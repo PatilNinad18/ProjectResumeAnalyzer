@@ -1,0 +1,330 @@
+{
+  "metadata": {
+    "jd_id": "sample-jd-001",
+    "jd_version": 1,
+    "specification_version": 1,
+    "prompt_version": "jd-understanding-agent-v1",
+    "model_version": "mock-extractor-v1",
+    "generated_at": "2026-08-30T07:55:49.736693Z"
+  },
+  "role": {
+    "job_title": "Senior Backend Engineer",
+    "role": null,
+    "department": null,
+    "seniority": "Senior",
+    "employment_type": null,
+    "reporting_structure": null,
+    "team_context": null
+  },
+  "job_context": {
+    "company_context": null,
+    "business_context": null,
+    "team_size": null,
+    "environment": "fast-paced startup"
+  },
+  "responsibilities": [
+    {
+      "description": "building scalable APIs",
+      "kind": "primary",
+      "source": null
+    },
+    {
+      "description": "designing backend services",
+      "kind": "primary",
+      "source": null
+    },
+    {
+      "description": "optimizing database performance",
+      "kind": "primary",
+      "source": null
+    },
+    {
+      "description": "collaborating with frontend",
+      "kind": "primary",
+      "source": null
+    },
+    {
+      "description": "product teams",
+      "kind": "primary",
+      "source": null
+    }
+  ],
+  "conventional_requirements": {
+    "experience": [
+      {
+        "description": "5+ years of relevant experience",
+        "min_years": 5.0,
+        "max_years": null,
+        "priority": "MUST_HAVE",
+        "explicit_or_derived": "explicit",
+        "source": {
+          "text": "5+ years",
+          "section": "experience",
+          "location": null
+        }
+      }
+    ],
+    "technical_skills": [
+      {
+        "name": "python",
+        "category": "language",
+        "priority": "MUST_HAVE",
+        "explicit_or_derived": "explicit",
+        "source": {
+          "text": "Strong Python and FastAPI experience is required.",
+          "section": "requirements",
+          "location": null
+        }
+      },
+      {
+        "name": "fastapi",
+        "category": "framework",
+        "priority": "MUST_HAVE",
+        "explicit_or_derived": "explicit",
+        "source": {
+          "text": "Strong Python and FastAPI experience is required.",
+          "section": "requirements",
+          "location": null
+        }
+      },
+      {
+        "name": "aws",
+        "category": "cloud",
+        "priority": "PREFERRED",
+        "explicit_or_derived": "explicit",
+        "source": {
+          "text": "AWS experience is preferred.",
+          "section": "requirements",
+          "location": null
+        }
+      }
+    ],
+    "education": [],
+    "certifications": [],
+    "domain": [],
+    "location": {
+      "country": null,
+      "city": "Pune",
+      "work_mode": "onsite",
+      "office_attendance": null,
+      "relocation_required": null,
+      "source": null
+    },
+    "work_mode": "onsite",
+    "travel": {
+      "required": true,
+      "description": "The candidate should be comfortable working in a fast-paced startup environment and may need to travel occasionally.",
+      "source": null
+    },
+    "languages": [],
+    "other": []
+  },
+  "must_have_requirements": [
+    "Senior backend experience",
+    "5+ years of relevant experience",
+    "python",
+    "fastapi",
+    "Pune onsite compatibility (attendance required)"
+  ],
+  "preferred_requirements": [
+    "aws"
+  ],
+  "responsibility_requirement_mapping": [
+    {
+      "responsibility": "building scalable APIs",
+      "required_capabilities": [
+        "API development",
+        "Backend engineering",
+        "System scalability"
+      ],
+      "rationale": null,
+      "source": null
+    },
+    {
+      "responsibility": "optimizing database performance",
+      "required_capabilities": [
+        "Database performance optimization"
+      ],
+      "rationale": null,
+      "source": null
+    },
+    {
+      "responsibility": "collaborating with frontend",
+      "required_capabilities": [
+        "Cross-functional collaboration"
+      ],
+      "rationale": null,
+      "source": null
+    }
+  ],
+  "requirement_interpretations": [
+    {
+      "explicit_requirement": "building scalable APIs",
+      "derived_interpretation": [
+        "Production API development experience",
+        "Backend engineering experience",
+        "Scalability/performance exposure"
+      ],
+      "rationale": "JD explicitly ties API-building to scalability, implying performance-aware backend engineering.",
+      "source": null
+    }
+  ],
+  "evidence_requirements": [
+    {
+      "requirement": "python",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [
+        "professional python usage",
+        "project-level python usage"
+      ],
+      "strong_evidence": "Candidate explicitly describes professional/production usage of python.",
+      "moderate_evidence": "Candidate describes substantial project experience with python.",
+      "weak_evidence": "python appears only in a technology/skills list with no described usage.",
+      "insufficient_evidence": "No mention of python anywhere in candidate materials.",
+      "prohibited_inference": "Do not assume python knowledge purely from adjacent/related technologies.",
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement": "fastapi",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [
+        "professional fastapi usage",
+        "project-level fastapi usage"
+      ],
+      "strong_evidence": "Candidate explicitly describes professional/production usage of fastapi.",
+      "moderate_evidence": "Candidate describes substantial project experience with fastapi.",
+      "weak_evidence": "fastapi appears only in a technology/skills list with no described usage.",
+      "insufficient_evidence": "No mention of fastapi anywhere in candidate materials.",
+      "prohibited_inference": "Do not assume fastapi knowledge purely from adjacent/related technologies.",
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement": "aws",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [
+        "professional aws usage",
+        "project-level aws usage"
+      ],
+      "strong_evidence": "Candidate explicitly describes professional/production usage of aws.",
+      "moderate_evidence": "Candidate describes substantial project experience with aws.",
+      "weak_evidence": "aws appears only in a technology/skills list with no described usage.",
+      "insufficient_evidence": "No mention of aws anywhere in candidate materials.",
+      "prohibited_inference": "Do not assume aws knowledge purely from adjacent/related technologies.",
+      "confidence": "medium",
+      "source": null
+    }
+  ],
+  "non_conventional_parameters": [
+    {
+      "parameter_name": "On-site Compatibility",
+      "category": "Work Arrangement",
+      "why_it_is_relevant": "The role requires regular in-office attendance.",
+      "jd_evidence": "The role is based in Pune and requires working from the office four days per week.",
+      "explicit_or_derived": "derived",
+      "evaluation_guidance": "Compare candidate's stated location/work preference against the required attendance pattern.",
+      "evidence_to_look_for": [
+        "candidate location",
+        "explicit work-mode preference",
+        "explicit relocation statement"
+      ],
+      "strong_evidence": "Candidate explicitly states willingness/current practice of onsite work in this city.",
+      "moderate_evidence": "Candidate is already located in the required city.",
+      "weak_evidence": "No location information stated in resume.",
+      "prohibited_inference": "Do not assume willingness or unwillingness to work onsite without explicit evidence.",
+      "confidence": "medium",
+      "unscored_if": "Candidate location/work-mode preference is not stated.",
+      "source": null
+    },
+    {
+      "parameter_name": "Travel Readiness",
+      "category": "Work Arrangement",
+      "why_it_is_relevant": "The JD indicates occasional travel is needed for the role.",
+      "jd_evidence": "The candidate should be comfortable working in a fast-paced startup environment and may need to travel occasionally.",
+      "explicit_or_derived": "explicit",
+      "evaluation_guidance": "Look for explicit statements of travel willingness/history; do not infer from job type alone.",
+      "evidence_to_look_for": [
+        "explicit travel willingness",
+        "past travel-heavy roles"
+      ],
+      "strong_evidence": "Candidate explicitly states willingness to travel.",
+      "moderate_evidence": "Candidate held a prior role with described travel requirements.",
+      "weak_evidence": "No mention of travel in candidate materials.",
+      "prohibited_inference": "Do not assume unwillingness to travel due to caregiving, gender, or family status.",
+      "confidence": "medium",
+      "unscored_if": "No candidate evidence about travel exists.",
+      "source": null
+    },
+    {
+      "parameter_name": "Startup / Fast-Paced Environment Compatibility",
+      "category": "Work Environment",
+      "why_it_is_relevant": "JD explicitly describes a fast-paced startup environment.",
+      "jd_evidence": "The candidate should be comfortable working in a fast-paced startup environment and may need to travel occasionally.",
+      "explicit_or_derived": "derived",
+      "evaluation_guidance": "Look for evidence of ambiguity tolerance, ownership, or small-team experience; do not infer personality traits.",
+      "evidence_to_look_for": [
+        "experience at early-stage companies",
+        "described ownership of ambiguous projects"
+      ],
+      "strong_evidence": "Candidate describes taking ownership of undefined/ambiguous projects at a small company.",
+      "moderate_evidence": "Candidate has worked at a startup previously.",
+      "weak_evidence": "No relevant evidence in candidate materials.",
+      "prohibited_inference": "Do not infer personality or 'culture fit' beyond stated evidence.",
+      "confidence": "low",
+      "unscored_if": "No relevant evidence available.",
+      "source": null
+    }
+  ],
+  "evaluation_rules": [
+    "Classify every requirement as MUST_HAVE, PREFERRED, CONTEXTUAL, INFORMATIONAL, or AMBIGUOUS.",
+    "Never fabricate candidate evidence.",
+    "Never invent numeric weights; the backend scoring engine assigns weights deterministically."
+  ],
+  "unscored_rules": [
+    "If a requirement cannot be evaluated from available candidate data, return UNCORED.",
+    "Absence of evidence is not negative evidence unless the JD explicitly requires demonstrated proof.",
+    "Contradictory evidence must resolve to UNCORED with an explanation, not a guess."
+  ],
+  "prohibited_inferences": [
+    "Do not infer protected characteristics (age, gender, race, religion, disability, marital status).",
+    "Do not infer why a candidate left a previous role.",
+    "Do not treat short tenure as automatically negative."
+  ],
+  "compliance_flags": [],
+  "ambiguities": [
+    {
+      "statement": "The candidate should be comfortable working in a fast-paced startup environment and may need to travel occasionally.",
+      "why_ambiguous": "'fast-paced' is not objectively defined in the JD.",
+      "suggested_interpretation": "Look for concrete, job-relevant evidence rather than self-reported traits.",
+      "evidence_required": [
+        "concrete examples tied to job-relevant tasks"
+      ],
+      "ta_confirmation_required": true,
+      "source": null
+    },
+    {
+      "statement": "The candidate should be comfortable working in a fast-paced startup environment and may need to travel occasionally.",
+      "why_ambiguous": "'comfortable working' is not objectively defined in the JD.",
+      "suggested_interpretation": "Look for concrete, job-relevant evidence rather than self-reported traits.",
+      "evidence_required": [
+        "concrete examples tied to job-relevant tasks"
+      ],
+      "ta_confirmation_required": true,
+      "source": null
+    }
+  ],
+  "ta_confirmation_required": [
+    "The candidate should be comfortable working in a fast-paced startup environment and may need to travel occasionally.",
+    "The candidate should be comfortable working in a fast-paced startup environment and may need to travel occasionally."
+  ],
+  "candidate_analysis_instructions": [
+    "Use this specification as the authoritative interpretation of the JD.",
+    "For every requirement: identify candidate evidence, determine evidence strength, compare against the requirement, provide provenance, assign confidence, and mark UNCORED when evidence is insufficient.",
+    "Never fabricate candidate information or infer protected characteristics.",
+    "Separate explicit candidate evidence from your own interpretation."
+  ]
+}

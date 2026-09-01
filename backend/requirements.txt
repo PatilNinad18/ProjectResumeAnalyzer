@@ -1,0 +1,12 @@
+fastapi>=0.111
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+boto3>=1.34
+python-multipart>=0.0.9
+anthropic>=0.34  # optional: only needed when LLM_PROVIDER=anthropic
+requests>=2.31   # optional: only needed when LLM_PROVIDER=gemini
+pytest>=8.2
+httpx>=0.27

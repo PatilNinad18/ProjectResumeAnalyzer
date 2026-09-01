@@ -1,0 +1,8 @@
+We are hiring a Staff Software Engineer with 10+ years of experience in
+distributed systems. Java and Kubernetes experience is required. Go and
+gRPC experience is a plus. This is a remote-friendly role with occasional
+travel to our San Francisco office for planning offsites.
+
+Responsibilities include leading architecture decisions across multiple
+teams, mentoring senior engineers, and owning the reliability of core
+platform services.

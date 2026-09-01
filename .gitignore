@@ -1,0 +1,55 @@
+# Python / Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+ENV/
+env/
+.python-version
+.pytest_cache/
+backend/.pytest_cache/
+
+# Environment files (Secrets & Local Configs)
+.env
+.env.*
+*.env
+!*.env.example
+!.env.example
+
+# Databases & Storage Data
+*.sqlite3
+*.db
+*.sqlite
+storage_data/
+backend/storage_data/
+backend/*.db
+
+# Fast API & Coverage
+.coverage
+htmlcov/
+backend/.coverage
+backend/htmlcov/
+
+# Frontend / Node / Next.js
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS & Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

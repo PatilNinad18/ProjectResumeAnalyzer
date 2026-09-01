@@ -1,0 +1,9 @@
+We are looking for a Senior Backend Engineer with 5+ years of experience.
+Strong Python and FastAPI experience is required. AWS experience is
+preferred. The role is based in Pune and requires working from the office
+four days per week. The candidate should be comfortable working in a
+fast-paced startup environment and may need to travel occasionally.
+
+The engineer will be responsible for building scalable APIs, designing
+backend services, optimizing database performance and collaborating with
+frontend and product teams.

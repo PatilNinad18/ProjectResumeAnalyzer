@@ -1,0 +1,21 @@
+We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in
+hardware and firmware development. The role is based in our Bangalore lab and requires
+full-time on-site presence due to the hands-on nature of the work.
+
+Required skills include proficiency in C and C++ for embedded systems, FPGA programming
+using VHDL or Verilog, and PCB design with Altium Designer. Experience with JTAG
+debugging and oscilloscope-based signal analysis is required. Familiarity with ARM
+Cortex-M microcontrollers and FreeRTOS is essential.
+
+Experience with MATLAB and Simulink for hardware-in-the-loop simulation is preferred.
+Knowledge of LabVIEW is a plus.
+
+Responsibilities include designing and verifying digital hardware subsystems, writing
+low-level firmware for real-time control applications, debugging hardware-software
+interfaces using oscilloscopes and logic analyzers, collaborating with mechanical and
+RF teams, and owning the bring-up of new prototype boards from schematic review
+through validation.
+
+The ideal candidate should be comfortable with ambiguous hardware problems and rapid
+prototyping cycles. Strong communication skills are important for cross-disciplinary
+collaboration.
