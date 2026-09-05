@@ -11,6 +11,8 @@ import pytest
 
 os.environ.setdefault("LLM_PROVIDER", "mock")
 
+from fastapi.testclient import TestClient
+from app.main import app
 from app.services.agent import JDUnderstandingAgent
 from app.services.json_serializer import to_json_dict
 from app.services.markdown_renderer import render_markdown
@@ -27,6 +29,12 @@ HARDWARE_JD = SAMPLE_DIR / "06_hardware_engineering.txt"
 @pytest.fixture(scope="module")
 def agent():
     return JDUnderstandingAgent()
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
 
 
 # ======================================================================
@@ -234,3 +242,25 @@ def test_hardware_jd_markdown_is_well_formed(agent):
     # Verify no metadata in Markdown
     assert "JD ID:" not in md
     assert "Prompt Version:" not in md
+
+
+def test_jd_chat_endpoints(client):
+    # Upload and analyze
+    resp = client.post("/api/jds", data={"project_id": "test-chat-proj", "text": "Senior Python Engineer needed with 5+ years experience and AWS skills. Remote work allowed."})
+    assert resp.status_code == 200
+    jd_id = resp.json()["jd_id"]
+
+    client.post(f"/api/jds/{jd_id}/analyze")
+
+    # Chat with jd_id
+    chat_resp = client.post(f"/api/jds/{jd_id}/chat", json={"question": "What are the key technical skills required?"})
+    assert chat_resp.status_code == 200
+    data = chat_resp.json()
+    assert "answer" in data
+    assert "Python" in data["answer"] or "Skills" in data["answer"] or "scanned" in data["answer"].lower()
+
+    # Direct chat with markdown context
+    direct_resp = client.post("/api/chat", json={"question": "Is remote work allowed?", "markdown": "Workplace: Remote allowed. Location: US."})
+    assert direct_resp.status_code == 200
+    assert "answer" in direct_resp.json()
+

@@ -194,3 +194,56 @@ def get_versions(jd_id: str, db: Session = Depends(get_db)):
         }
         for v in versions
     ]
+
+
+from pydantic import BaseModel
+
+
+class ChatRequest(BaseModel):
+    question: str
+    markdown: Optional[str] = None
+
+
+@router.post("/jds/{jd_id}/chat")
+def chat_jd(jd_id: str, request: ChatRequest, db: Session = Depends(get_db)):
+    if not request.question or not request.question.strip():
+        raise HTTPException(400, "Question is empty")
+
+    markdown_content = request.markdown
+    if not markdown_content:
+        try:
+            spec_version = _latest_spec_version(jd_id, db)
+            markdown_content = storage.get_text(spec_version.s3_markdown_key)
+        except HTTPException:
+            jd_version = (
+                db.query(JobDescriptionVersion)
+                .filter(JobDescriptionVersion.job_description_id == jd_id)
+                .order_by(JobDescriptionVersion.version.desc())
+                .first()
+            )
+            if jd_version:
+                markdown_content = storage.get_text(jd_version.s3_raw_key)
+
+    if not markdown_content:
+        raise HTTPException(400, "No JD Markdown context found for this job description.")
+
+    from app.services.llm_service import LLMService
+
+    llm = LLMService()
+    answer = llm.chat_with_jd_context(markdown_context=markdown_content, question=request.question)
+    return {"answer": answer, "jd_id": jd_id}
+
+
+@router.post("/chat")
+def chat_direct(request: ChatRequest):
+    if not request.question or not request.question.strip():
+        raise HTTPException(400, "Question is empty")
+    if not request.markdown or not request.markdown.strip():
+        raise HTTPException(400, "Markdown context is empty")
+
+    from app.services.llm_service import LLMService
+
+    llm = LLMService()
+    answer = llm.chat_with_jd_context(markdown_context=request.markdown, question=request.question)
+    return {"answer": answer}
+

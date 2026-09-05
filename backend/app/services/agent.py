@@ -43,7 +43,9 @@ class JDUnderstandingAgent:
         result = self.llm_service.complete_structured(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            max_tokens=16384,
         )
+
 
         if result.parsed_json is None:
             reason_hint = ""

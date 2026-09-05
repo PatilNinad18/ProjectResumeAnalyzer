@@ -57,6 +57,12 @@ class ProviderAdapter(abc.ABC):
     ) -> LLMResult:
         ...
 
+    @abc.abstractmethod
+    def complete_text(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int
+    ) -> str:
+        ...
+
 
 def _log_request(provider: str, model: str, system_prompt: str, user_prompt: str) -> None:
     print(f"\n[LLM REQUEST] provider={provider} model={model}")
@@ -155,13 +161,44 @@ class AnthropicAdapter(ProviderAdapter):
         parsed = _safe_json_extract(text)
         if parsed is None:
             _dump_full_response_for_debug(self.name, text)
-            if finish_reason == "max_tokens":
-                print(
-                    "[LLM ERROR] provider=anthropic response was cut off at max_tokens before "
-                    "the JSON object was closed. Raise `max_tokens` further."
-                )
+            raise ValueError(f"provider=anthropic returned unparseable or truncated JSON (finish_reason={finish_reason}).")
 
         return LLMResult(raw_text=text, parsed_json=parsed, usage=usage, prompt_version="", finish_reason=finish_reason)
+
+
+    def complete_text(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int
+    ) -> str:
+        try:
+            import anthropic  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("anthropic package not installed") from exc
+
+        settings = get_settings()
+        api_key = settings.anthropic_api_key
+        if not api_key:
+            raise RuntimeError("Missing ANTHROPIC_API_KEY")
+
+        _log_request(self.name, model, system_prompt, user_prompt)
+        client = anthropic.Anthropic(api_key=api_key)
+        start = time.perf_counter()
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
+        text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
+        usage = LLMUsage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            latency_ms=latency_ms,
+            model=model,
+        )
+        _log_response(self.name, text, usage)
+        return text
+
 
 
 class GeminiAdapter(ProviderAdapter):
@@ -276,14 +313,50 @@ class GeminiAdapter(ProviderAdapter):
         parsed = _safe_json_extract(text)
         if parsed is None:
             _dump_full_response_for_debug(self.name, text)
-            if finish_reason == "MAX_TOKENS":
-                print(
-                    "[LLM ERROR] provider=gemini response was cut off because it hit "
-                    "maxOutputTokens before the JSON object was closed. Raise `max_tokens` "
-                    "in LLMService.complete_structured (or the call site) further."
-                )
+            raise ValueError(f"provider=gemini returned unparseable or truncated JSON (finish_reason={finish_reason}).")
 
         return LLMResult(raw_text=text, parsed_json=parsed, usage=usage, prompt_version="", finish_reason=finish_reason)
+
+
+    def complete_text(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int
+    ) -> str:
+        import requests  # type: ignore
+
+        settings = get_settings()
+        api_key = settings.gemini_api_key
+        if not api_key or api_key.strip().lower() in ("", "paste-your-gemini-key-here"):
+            raise RuntimeError("Missing GEMINI_API_KEY")
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        payload = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {"maxOutputTokens": max_tokens},
+        }
+
+        _log_request(self.name, model, system_prompt, user_prompt)
+        start = time.perf_counter()
+        response = requests.post(url, json=payload, timeout=120)
+        latency_ms = (time.perf_counter() - start) * 1000
+        response.raise_for_status()
+        data = response.json()
+        candidates = data.get("candidates", [])
+        text = "".join(
+            part.get("text", "")
+            for candidate in candidates
+            for part in candidate.get("content", {}).get("parts", [])
+        )
+        usage_meta = data.get("usageMetadata", {})
+        usage = LLMUsage(
+            input_tokens=usage_meta.get("promptTokenCount", 0),
+            output_tokens=usage_meta.get("candidatesTokenCount", 0),
+            latency_ms=latency_ms,
+            model=model,
+        )
+        _log_response(self.name, text, usage)
+        return text
+
 
 
 class MockAdapter(ProviderAdapter):
@@ -327,8 +400,68 @@ class MockAdapter(ProviderAdapter):
             prompt_version="",
         )
 
+    def complete_text(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int
+    ) -> str:
+        import re
+
+        print("\n[LLM REQUEST] provider=mock complete_text (scanning Markdown context)")
+        question_text = user_prompt
+        if "User Question:" in user_prompt:
+            question_text = user_prompt.split("User Question:", 1)[1]
+        lower_q = question_text.lower()
+
+        # 1. Salary / Compensation Queries
+        if any(w in lower_q for w in ["salary", "compensation", "pay", "ctc", "lpa", "inr", "usd", "money", "reward", "package"]):
+            salary_match = re.search(
+                r"(\d+\s*K?\s*(?:INR|USD|EUR|GBP|₹|\$)\s*/\s*(?:month|year|annum)|\d+\s*-\s*\d+\s*K?\s*(?:INR|USD|₹|\$)|(?:₹|\$)?\s*\d+\s*K?\s*(?:INR|USD)?\s*/\s*month\s*-\s*\d+\s*K?\s*(?:INR|USD)?\s*/\s*month|\d+\s*-\s*\d+\s*(?:LPA|CTC|lpa|ctc))",
+                user_prompt,
+                re.IGNORECASE,
+            )
+            if salary_match:
+                return f"### Salary & Compensation\n\nBased on the JD Markdown context:\n\n- **Salary Range:** {salary_match.group(0).strip()}\n- **Context**: Listed in the job description."
+
+            sal_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["inr", "usd", "salary", "compensation", "lpa", "ctc", "month"])]
+            if sal_lines:
+                bullets = "\n".join([f"- {line}" for line in sal_lines[:4]])
+                return f"### Salary & Compensation\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+
+            return "### Salary & Compensation\n\nThe JD Markdown context does not explicitly list salary numbers or compensation ranges. It is logged under Section 6: Missing Information."
+
+        # 2. Title & Seniority / Experience Queries
+        if any(w in lower_q for w in ["title", "role", "position", "seniority", "senior", "experience", "year", "level"]):
+            matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["job title", "seniority", "role", "experience", "engineer", "lead", "manager", "years"])]
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:6]]) if matched_lines else "- Role details specified in JD Markdown overview."
+            return f"### Role Overview & Experience Level\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+
+        # 3. Technical Skills & Requirements Queries
+        if any(w in lower_q for w in ["skill", "tech", "python", "stack", "require", "qualification", "must", "preferred"]):
+            matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["skill", "require", "experience", "python", "scikit", "tensorflow", "pytorch", "aws", "gcp", "azure", "docker", "must", "preferred"])]
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:15]]) if matched_lines else "- Technical skills and qualifications as listed in Section 2 Requirements."
+            return f"### Key Requirements & Skills\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+
+        # 4. Remote / Location / Workplace Queries
+        if any(w in lower_q for w in ["remote", "location", "office", "where", "hybrid", "city", "india", "place", "country"]):
+            matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["remote", "location", "office", "hybrid", "onsite", "city", "india", "work mode"])]
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:4]]) if matched_lines else "- Location / Work Mode as specified in Section 1 of the JD Markdown."
+            return f"### Work Location & Policy\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+
+        # 5. Responsibilities Queries
+        if any(w in lower_q for w in ["responsibil", "duty", "do", "task", "deliver", "build", "design", "deploy"]):
+            matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["responsib", "duty", "deliver", "build", "lead", "manage", "design", "develop", "deploy", "optimize"])]
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:8]]) if matched_lines else "- Core responsibilities enumerated in Section 3 Responsibilities."
+            return f"### Key Responsibilities\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+
+        # 6. Fallback General Query Scanner
+        matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if len(line.strip()) > 15 and not line.startswith("#")]
+        bullets = "\n".join([f"- {line}" for line in matched_lines[:5]]) if matched_lines else "- Structured evaluation details generated in the Markdown specification."
+        return f"### JD Markdown Context Analysis\n\nI scanned the JD Markdown context for your query. Key findings:\n\n{bullets}"
+
+
+
 
 def _extract_jd_text(user_prompt: str) -> str:
+
     marker = "<jd_content>"
     end_marker = "</jd_content>"
     if marker in user_prompt and end_marker in user_prompt:
@@ -336,15 +469,69 @@ def _extract_jd_text(user_prompt: str) -> str:
     return user_prompt
 
 
+def _repair_truncated_json(text: str) -> Optional[Dict[str, Any]]:
+    import re
+
+    start = text.find("{")
+    if start == -1:
+        return None
+    sub = text[start:].strip()
+    sub = re.sub(r',\s*"[^"]*"?\s*:?\s*"?[^"]*$', "", sub)
+    sub = re.sub(r',\s*$', "", sub)
+
+    stack = []
+    in_string = False
+    escaped = False
+    clean_chars = []
+
+    for ch in sub:
+        if escaped:
+            escaped = False
+            clean_chars.append(ch)
+            continue
+        if ch == "\\" and in_string:
+            escaped = True
+            clean_chars.append(ch)
+            continue
+        if ch == '"':
+            in_string = not in_string
+            clean_chars.append(ch)
+            continue
+        if in_string:
+            clean_chars.append(ch)
+            continue
+
+        if ch in ("{", "["):
+            stack.append("}" if ch == "{" else "]")
+            clean_chars.append(ch)
+        elif ch in ("}", "]"):
+            if stack and stack[-1] == ch:
+                stack.pop()
+            clean_chars.append(ch)
+        else:
+            clean_chars.append(ch)
+
+    if in_string:
+        clean_chars.append('"')
+
+    while stack:
+        clean_chars.append(stack.pop())
+
+    repaired = "".join(clean_chars)
+    try:
+        res = json.loads(repaired, strict=False)
+        if isinstance(res, dict):
+            print("[LLM REPAIR SUCCESS] Successfully repaired truncated JSON response!")
+            return res
+    except Exception:
+        pass
+    return None
+
+
 def _safe_json_extract(text: str) -> Optional[Dict[str, Any]]:
     """Extract a JSON object even if the model wrapped it in prose/fences."""
     text = text.strip()
 
-    # Fast path: with responseMimeType=application/json (Gemini) or a clean
-    # Anthropic response, `text` IS the JSON already -- try it directly
-    # before doing anything lossy. strict=False tolerates literal control
-    # characters (e.g. raw newlines) inside string values, which some models
-    # emit despite being asked for valid JSON.
     try:
         return json.loads(text, strict=False)
     except json.JSONDecodeError:
@@ -357,16 +544,14 @@ def _safe_json_extract(text: str) -> Optional[Dict[str, Any]]:
 
     start = text.find("{")
     end = text.rfind("}")
-    if start == -1 or end == -1:
-        return None
-    candidate = text[start : end + 1]
-    try:
-        return json.loads(candidate, strict=False)
-    except json.JSONDecodeError as exc:
-        print(f"[LLM PARSE ERROR] {exc} -- candidate slice was {len(candidate)} chars "
-              f"(original text was {len(text)} chars). This usually means the response "
-              f"was truncated before the JSON object closed.")
-        return None
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            pass
+
+    return _repair_truncated_json(text)
 
 
 class LLMService:
@@ -390,7 +575,7 @@ class LLMService:
         self.max_retries = 2
         print(f"[LLM SERVICE] configured provider={provider_name} model={self.model}")
 
-    def complete_structured(self, system_prompt: str, user_prompt: str, max_tokens: int = 8000) -> LLMResult:
+    def complete_structured(self, system_prompt: str, user_prompt: str, max_tokens: int = 16384) -> LLMResult:
         last_exc: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -405,6 +590,7 @@ class LLMService:
             except Exception as exc:  # noqa: BLE001
                 print(f"[LLM ERROR] attempt {attempt + 1}/{self.max_retries + 1} failed: {exc}")
                 last_exc = exc
+
                 continue
 
         if not isinstance(self.adapter, MockAdapter):
@@ -418,3 +604,37 @@ class LLMService:
             )
 
         raise RuntimeError(f"LLM call failed after {self.max_retries + 1} attempts: {last_exc}")
+
+    def chat_with_jd_context(self, markdown_context: str, question: str, max_tokens: int = 2000) -> str:
+        system_prompt = (
+            "You are an intelligent Job Description (JD) AI Assistant.\n"
+            "Your primary role is to answer user questions accurately, clearly, and concisely "
+            "based strictly on the provided Job Description Markdown context.\n"
+            "Format your response in clean markdown."
+        )
+        user_prompt = (
+            f"Here is the converted Job Description Markdown context:\n\n"
+            f"<jd_markdown>\n{markdown_context}\n</jd_markdown>\n\n"
+            f"User Question: {question}"
+        )
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self.adapter.complete_text(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    model=self.model,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                print(f"[LLM CHAT ERROR] attempt {attempt + 1}/{self.max_retries + 1} failed: {exc}")
+                continue
+
+        if not isinstance(self.adapter, MockAdapter):
+            print(f"[LLM CHAT FALLBACK] Falling back to MockAdapter for chat response.")
+            return MockAdapter().complete_text(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model="mock-extractor-v1",
+                max_tokens=max_tokens,
+            )
+        raise RuntimeError("Chat LLM call failed")

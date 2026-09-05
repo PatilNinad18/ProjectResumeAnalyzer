@@ -49,3 +49,37 @@ export async function getVersions(jdId: string) {
   if (!res.ok) throw new Error(`Versions fetch failed: ${res.status}`);
   return res.json();
 }
+
+export async function askJDChatbot(
+  jdId: string | null,
+  question: string,
+  markdownContext?: string | null
+) {
+  if (jdId) {
+    const res = await fetch(`${API_BASE}/jds/${jdId}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, markdown: markdownContext ?? undefined }),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Chat request failed: ${res.status}`);
+    }
+    return res.json() as Promise<{ answer: string; jd_id: string }>;
+  } else {
+    if (!markdownContext || !markdownContext.trim()) {
+      throw new Error("Please paste or analyze a Job Description first.");
+    }
+    const res = await fetch(`${API_BASE}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, markdown: markdownContext }),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Chat request failed: ${res.status}`);
+    }
+    return res.json() as Promise<{ answer: string }>;
+  }
+}
+

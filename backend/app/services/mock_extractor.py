@@ -22,7 +22,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 TECH_KEYWORDS: Dict[str, str] = {
-    # Software
+    # Software & Cloud
+
     "python": "language",
     "fastapi": "framework",
     "django": "framework",
@@ -43,8 +44,30 @@ TECH_KEYWORDS: Dict[str, str] = {
     "mongodb": "database",
     "redis": "database",
     "kubernetes": "infra",
+    "k8s": "infra",
     "docker": "infra",
     "sql": "language",
+    # AI / ML / Data Science
+    "machine learning": "methodology",
+    "ml": "methodology",
+    "ai": "methodology",
+    "deep learning": "methodology",
+    "scikit-learn": "framework",
+    "tensorflow": "framework",
+    "pytorch": "framework",
+    "numpy": "library",
+    "pandas": "library",
+    "mlflow": "tool",
+    "sagemaker": "cloud",
+    "amazon sagemaker": "cloud",
+    "kubeflow": "tool",
+    "airflow": "tool",
+    "arize": "tool",
+    "evidently": "tool",
+    "llm": "domain",
+    "rag": "domain",
+    "nlp": "domain",
+    "computer vision": "domain",
     # Hardware / Embedded
     "fpga": "platform",
     "vhdl": "language",
@@ -72,6 +95,7 @@ TECH_KEYWORDS: Dict[str, str] = {
     "matlab": "tool",
     "simulink": "tool",
 }
+
 
 PREFERRED_MARKERS = ["preferred", "nice to have", "a plus", "bonus", "advantage"]
 REQUIRED_MARKERS = ["required", "must", "mandatory", "strong"]
@@ -162,7 +186,7 @@ def mock_extract_canonical(jd_text: str) -> Dict[str, Any]:  # noqa: C901 (compl
     # Location / Work Mode
     # ------------------------------------------------------------------ #
     location: Dict[str, Any] = {"work_mode": "unspecified"}
-    city_match = re.search(r"based in ([A-Z][a-zA-Z\s]+?)(?:\.|,|\s+and|\s+office)", jd_text)
+    city_match = re.search(r"(?:location|based in)\s*[-:]?\s*([A-Z][a-zA-Z\s]+?)(?:\.|,|\n|\r|$)", jd_text, re.IGNORECASE)
     if city_match:
         location["city"] = city_match.group(1).strip()
     if "office" in text_lower and ("day" in text_lower or "onsite" in text_lower or "on-site" in text_lower):
@@ -173,7 +197,7 @@ def mock_extract_canonical(jd_text: str) -> Dict[str, Any]:  # noqa: C901 (compl
         elif re.search(r"(\d+)\s+day", text_lower):
             days_m = re.search(r"(\d+)\s+day", text_lower)
             location["office_attendance"] = f"{days_m.group(1)} days/week onsite"
-    elif "remote" in text_lower:
+    elif "remote" in text_lower or "pan india" in text_lower or "work from home" in text_lower:
         location["work_mode"] = "remote"
     elif "hybrid" in text_lower:
         location["work_mode"] = "hybrid"
@@ -181,9 +205,23 @@ def mock_extract_canonical(jd_text: str) -> Dict[str, Any]:  # noqa: C901 (compl
     # ------------------------------------------------------------------ #
     # Lab / Hardware Environment (hardware-specific)
     # ------------------------------------------------------------------ #
-    lab_required = any(kw in text_lower for kw in ["lab", "laboratory", "oscilloscope", "bench", "soldering"])
+    lab_required = bool(re.search(r"\b(hardware lab|oscilloscope|soldering|bench work|jtag|vhdl|verilog|pcb layout)\b", text_lower))
     if lab_required:
         location["work_mode"] = "onsite"  # lab work requires physical presence
+
+    # ------------------------------------------------------------------ #
+    # Salary / Compensation
+    # ------------------------------------------------------------------ #
+    salary_match = re.search(
+        r"(\d+\s*K?\s*(?:INR|USD|EUR|GBP|₹|\$)\s*/\s*(?:month|year|annum)|\d+\s*-\s*\d+\s*K?\s*(?:INR|USD|₹|\$)|(?:₹|\$)?\s*\d+\s*K?\s*(?:INR|USD)?\s*/\s*month\s*-\s*\d+\s*K?\s*(?:INR|USD)?\s*/\s*month|\d+\s*-\s*\d+\s*(?:LPA|CTC|lpa|ctc))",
+        jd_text,
+        re.IGNORECASE,
+    )
+    salary_text = salary_match.group(0).strip() if salary_match else None
+    if not salary_text:
+        sal_line_m = re.search(r"(\d+K?\s*(?:INR|USD|\$|₹)?\s*[/|-]\s*\d*K?\s*(?:INR|USD|\$|₹)?\s*(?:/month|/year|month|lpa)?)", jd_text, re.IGNORECASE)
+        if sal_line_m and any(k in sal_line_m.group(0).lower() for k in ["inr", "usd", "$", "₹", "month", "lpa"]):
+            salary_text = sal_line_m.group(0).strip()
 
     # ------------------------------------------------------------------ #
     # Travel
@@ -197,17 +235,28 @@ def mock_extract_canonical(jd_text: str) -> Dict[str, Any]:  # noqa: C901 (compl
     # Responsibilities
     # ------------------------------------------------------------------ #
     responsibilities = []
-    resp_match = re.search(
-        r"(?:responsible for|will include|responsibilities include|will be expected to)\s+(.+)",
+    resp_block_match = re.search(
+        r"(?:Role\s*&\s*Responsibilities|Responsibilities|Key\s+Responsibilities)[:\n\r]+(.*?)(?=\n\s*\n[A-Z]|\n[A-Z][a-z]+\s*&?\s*[A-Z]|\Z)",
         jd_text, re.IGNORECASE | re.DOTALL
     )
-    if resp_match:
-        resp_section = resp_match.group(1)
-        for chunk in re.split(r",| and ", resp_section):
-            chunk = chunk.strip(" .\n")
-            if len(chunk.split()) >= 2 and len(chunk) < 150:
-                responsibilities.append({"description": chunk, "kind": "primary"})
-    responsibilities = responsibilities[:8]
+    if resp_block_match:
+        resp_lines = [line.strip("-*• ") for line in resp_block_match.group(1).splitlines() if line.strip("-*• ")]
+        for line in resp_lines[:8]:
+            if len(line) > 10:
+                responsibilities.append({"description": line, "kind": "primary"})
+
+    if not responsibilities:
+        resp_match = re.search(
+            r"(?:responsible for|will include|responsibilities include|will be expected to)\s+(.+)",
+            jd_text, re.IGNORECASE | re.DOTALL
+        )
+        if resp_match:
+            resp_section = resp_match.group(1)
+            for chunk in re.split(r",| and |\n", resp_section):
+                chunk = chunk.strip(" .-*\n")
+                if len(chunk.split()) >= 2 and len(chunk) < 150:
+                    responsibilities.append({"description": chunk, "kind": "primary"})
+        responsibilities = responsibilities[:8]
 
     # ------------------------------------------------------------------ #
     # Seniority & Role Title
@@ -218,8 +267,35 @@ def mock_extract_canonical(jd_text: str) -> Dict[str, Any]:  # noqa: C901 (compl
             seniority = level.capitalize()
             break
 
-    role_title_match = re.search(r"(?:looking for|hiring|seeking)\s+an?\s+([A-Za-z\s]+?)(?:\.|,|\swith\b)", jd_text, re.IGNORECASE)
-    job_title = role_title_match.group(1).strip() if role_title_match else None
+    if not seniority:
+        yrs_m = re.search(r"(\d+)\s*\+?\s*yrs?", text_lower)
+        if yrs_m:
+            yrs_val = int(yrs_m.group(1))
+            if yrs_val >= 8:
+                seniority = "Lead"
+            elif yrs_val >= 5:
+                seniority = "Senior"
+            elif yrs_val >= 2:
+                seniority = "Mid-level"
+            else:
+                seniority = "Junior"
+
+    job_title = None
+    role_header_match = re.search(r"(?:Role|Title|Job Title|Position)\s*[-:]\s*([^\n\r,]+)", jd_text, re.IGNORECASE)
+    if role_header_match:
+        job_title = role_header_match.group(1).strip()
+
+    if not job_title:
+        first_line = jd_text.splitlines()[0].strip() if jd_text.splitlines() else ""
+        first_line_clean = re.sub(r"_\d+\+?\s*yrs?.*$", "", first_line, flags=re.IGNORECASE).strip()
+        if len(first_line_clean) < 60 and any(k in first_line_clean.lower() for k in ["engineer", "developer", "architect", "lead", "manager", "analyst", "scientist", "specialist"]):
+            job_title = first_line_clean
+
+    if not job_title:
+        role_title_match = re.search(r"(?:looking for|hiring|seeking)\s+an?\s+([A-Za-z\s]+?)(?:\.|,|\swith\b)", jd_text, re.IGNORECASE)
+        if role_title_match:
+            job_title = role_title_match.group(1).strip()
+
 
     # ------------------------------------------------------------------ #
     # Non-conventional parameters — JD-specific only
@@ -399,6 +475,8 @@ def mock_extract_canonical(jd_text: str) -> Dict[str, Any]:  # noqa: C901 (compl
     # ------------------------------------------------------------------ #
     missing_information = []
     for field_name, why, suggested in _COMMONLY_MISSING:
+        if field_name.startswith("Compensation") and salary_text:
+            continue
         missing_information.append({"field": field_name, "why_it_matters": why, "suggested_action": suggested})
 
     # If work authorization is not mentioned explicitly, flag it
@@ -566,12 +644,14 @@ def mock_extract_canonical(jd_text: str) -> Dict[str, Any]:  # noqa: C901 (compl
             "seniority": seniority,
         },
         "job_context": {
+            "business_context": f"Salary / Compensation: {salary_text}" if salary_text else None,
             "environment": (
                 "fast-paced startup" if "startup" in text_lower
                 else "hardware/lab environment" if lab_required
                 else None
             ),
         },
+
         "responsibilities": responsibilities,
         "conventional_requirements": {
             "experience": experience,
