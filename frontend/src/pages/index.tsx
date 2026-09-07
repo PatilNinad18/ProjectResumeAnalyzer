@@ -1,121 +1,239 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import {
+  uploadJD,
   analyzeJD,
   getAnalysisStatus,
-  getJson,
   getMarkdown,
-  uploadJD,
+  getJson,
   askJDChatbot,
   ProcessingStatus,
+  CompanyDetails,
+  CreatedAgent,
 } from "@/lib/api";
 
-
 const POLL_INTERVAL_MS = 1500;
-const TERMINAL_STATUSES: ProcessingStatus[] = [
-  "READY",
-  "NEEDS_REVIEW",
-  "FAILED",
-];
+const TERMINAL_STATUSES: ProcessingStatus[] = ["READY", "NEEDS_REVIEW", "FAILED"];
 
-const statusConfig: Record<
-  ProcessingStatus,
-  { label: string; icon: string; className: string }
-> = {
-  UPLOADED: {
-    label: "Uploaded",
-    icon: "↑",
-    className: "status-uploaded",
-  },
-  PARSING: {
-    label: "Parsing JD",
-    icon: "◌",
-    className: "status-processing",
-  },
-  UNDERSTANDING: {
-    label: "Understanding JD",
-    icon: "◌",
-    className: "status-processing",
-  },
-  VALIDATING: {
-    label: "Validating",
-    icon: "◌",
-    className: "status-processing",
-  },
-  GENERATING: {
-    label: "Generating",
-    icon: "◌",
-    className: "status-processing",
-  },
-  READY: {
-    label: "Analysis Ready",
-    icon: "✓",
-    className: "status-ready",
-  },
-  NEEDS_REVIEW: {
-    label: "Needs Review",
-    icon: "!",
-    className: "status-review",
-  },
-  FAILED: {
-    label: "Failed",
-    icon: "×",
-    className: "status-failed",
-  },
+const statusConfig: Record<ProcessingStatus, { label: string; icon: string; className: string }> = {
+  UPLOADED: { label: "Uploaded", icon: "↑", className: "status-uploaded" },
+  PARSING: { label: "Parsing JD", icon: "◌", className: "status-processing" },
+  UNDERSTANDING: { label: "Understanding JD", icon: "◌", className: "status-processing" },
+  VALIDATING: { label: "Validating", icon: "◌", className: "status-processing" },
+  GENERATING: { label: "Generating Context", icon: "◌", className: "status-processing" },
+  READY: { label: "Analysis Ready", icon: "✓", className: "status-ready" },
+  NEEDS_REVIEW: { label: "Needs Review", icon: "!", className: "status-review" },
+  FAILED: { label: "Failed", icon: "×", className: "status-failed" },
 };
 
 export default function Home() {
+  // Navigation
+  const [activeTab, setActiveTab] = useState<"workflow" | "chat" | "settings">("workflow");
+
+  // Linear Workflow State (Step 1 -> 5)
+  const [companyDetails, setCompanyDetails] = useState<CompanyDetails>({
+    companyName: "Acme Corp",
+    department: "Engineering",
+    projectName: "Backend Hiring Q3",
+  });
+  const [isCompanySaved, setIsCompanySaved] = useState(false);
+
+  const [jobTitle, setJobTitle] = useState("Senior Backend Engineer");
   const [jdText, setJdText] = useState("");
   const [jdId, setJdId] = useState<string | null>(null);
   const [status, setStatus] = useState<ProcessingStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
-  const [jsonData, setJsonData] = useState<Record<string, unknown> | null>(
-    null
-  );
-  const [tab, setTab] = useState<"markdown" | "json">("markdown");
+  const [jsonData, setJsonData] = useState<Record<string, unknown> | null>(null);
+  const [specVersion, setSpecVersion] = useState<number>(1);
+  const [contextTab, setContextTab] = useState<"markdown" | "json">("markdown");
 
-  const [isChatOpen, setIsChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<
-    Array<{ id: string; sender: "user" | "assistant"; text: string }>
-  >([
+  // Agent Creation
+  const [agents, setAgents] = useState<CreatedAgent[]>([]);
+  const [agentNameInput, setAgentNameInput] = useState("");
+  const [createdAgentSuccess, setCreatedAgentSuccess] = useState<string | null>(null);
+
+  // Dedicated Chat State
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("current");
+  const [chatMessages, setChatMessages] = useState<Array<{ id: string; sender: "user" | "assistant"; text: string }>>([
     {
       id: "welcome",
       sender: "assistant",
-      text: "Hello! I am your JD AI Assistant. I scan your Job Description Markdown context to answer any queries about requirements, technical skills, experience, remote policies, and role responsibilities. Ask me anything!",
+      text: "Hello! I am your JD AI Assistant. Ask me anything about role requirements, responsibilities, technical skills, or evaluation criteria.",
     },
   ]);
   const [chatInput, setChatInput] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
 
+  // Settings & Regeneration State
+  const [selectedSettingAgentId, setSelectedSettingAgentId] = useState<string | null>(null);
+  const [editCompany, setEditCompany] = useState<CompanyDetails>({ companyName: "", department: "", projectName: "" });
+  const [editTitle, setEditTitle] = useState("");
+  const [editJdText, setEditJdText] = useState("");
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [regenStatus, setRegenStatus] = useState<string | null>(null);
+  const [regenSuccessMsg, setRegenSuccessMsg] = useState<string | null>(null);
+
+  // Auto-fill edit form when selecting an agent for settings
+  useEffect(() => {
+    if (selectedSettingAgentId) {
+      const target = agents.find((a) => a.id === selectedSettingAgentId);
+      if (target) {
+        setEditCompany({ ...target.companyDetails });
+        setEditTitle(target.title);
+        setEditJdText(target.jdText);
+      }
+    } else if (agents.length > 0 && !selectedSettingAgentId) {
+      setSelectedSettingAgentId(agents[0].id);
+    }
+  }, [selectedSettingAgentId, agents]);
+
+  // Derived Workflow Progress Step (1 to 5)
+  const isStep1Done = isCompanySaved || Boolean(companyDetails.companyName.trim());
+  const isStep2Done = Boolean(jdText.trim());
+  const isStep3Done = status === "READY" && markdown !== null;
+  const isStep4Done = isStep3Done;
+  const isStep5Done = agents.length > 0;
+
+  const currentStep = !isStep1Done ? 1 : !isStep2Done ? 2 : status !== "READY" ? 3 : !isStep5Done ? 4 : 5;
+
+  // Step 1 Save Handler
+  function handleSaveCompanyDetails(e: React.FormEvent) {
+    e.preventDefault();
+    if (!companyDetails.companyName.trim()) return;
+    setIsCompanySaved(true);
+  }
+
+  // Step 3 Analyse Handler
+  async function handleAnalyseJD() {
+    if (!jdText.trim()) return;
+    setError(null);
+    setMarkdown(null);
+    setJsonData(null);
+    setCreatedAgentSuccess(null);
+
+    try {
+      const { jd_id } = await uploadJD(
+        companyDetails.projectName.trim() || "default-project",
+        jdText,
+        jobTitle.trim() || "Untitled JD"
+      );
+      setJdId(jd_id);
+      setStatus("UPLOADED");
+      await analyzeJD(jd_id);
+      pollStatus(jd_id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  function pollStatus(id: string) {
+    const interval = setInterval(async () => {
+      try {
+        const { status: s, error_message } = await getAnalysisStatus(id);
+        setStatus(s);
+        if (TERMINAL_STATUSES.includes(s)) {
+          clearInterval(interval);
+          if (s === "FAILED") {
+            setError(error_message || "Processing failed.");
+            return;
+          }
+          const [mdRes, jsonRes] = await Promise.all([getMarkdown(id), getJson(id)]);
+          setMarkdown(mdRes.markdown);
+          setJsonData(jsonRes.json);
+          setSpecVersion(mdRes.specification_version || 1);
+        }
+      } catch (e) {
+        clearInterval(interval);
+        setError((e as Error).message);
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  // Step 5 Create Agent Handler
+  function handleCreateAgent() {
+    if (!markdown || !jdId) return;
+    const name = agentNameInput.trim() || `${jobTitle} Agent`;
+    const newAgent: CreatedAgent = {
+      id: `agent-${Date.now()}`,
+      agentName: name,
+      title: jobTitle,
+      companyDetails: { ...companyDetails },
+      jdId: jdId,
+      jdText: jdText,
+      markdown: markdown,
+      jsonData: jsonData || {},
+      specificationVersion: specVersion,
+      status: "ACTIVE",
+      createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      updatedAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setAgents((prev) => [newAgent, ...prev]);
+    setSelectedAgentId(newAgent.id);
+    setCreatedAgentSuccess(`Agent "${name}" successfully created!`);
+    setAgentNameInput("");
+  }
+
+  // File Upload Handler
+  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const text = evt.target?.result as string;
+      if (text) {
+        setJdText(text);
+        if (!jobTitle || jobTitle === "Senior Backend Engineer") {
+          setJobTitle(file.name.replace(/\.[^/.]+$/, "").replace(/_/g, " "));
+        }
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // Download File Helper
+  function downloadFile(filename: string, content: string, mime: string) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Dedicated Chat Send Handler
   async function handleSendChatMessage(textToSend?: string) {
     const q = (textToSend ?? chatInput).trim();
     if (!q || isChatLoading) return;
 
     const userMsgId = Date.now().toString();
-    setChatMessages((prev) => [
-      ...prev,
-      { id: userMsgId, sender: "user", text: q },
-    ]);
+    setChatMessages((prev) => [...prev, { id: userMsgId, sender: "user", text: q }]);
     if (!textToSend) setChatInput("");
     setIsChatLoading(true);
 
     try {
-      const contextToUse =
-        markdown ||
-        (jdText.trim()
-          ? `# Raw Job Description Context\n\n${jdText}`
-          : null);
-      const { answer } = await askJDChatbot(jdId, q, contextToUse);
+      let targetJdId: string | null = null;
+      let contextToUse: string | null = null;
+
+      if (selectedAgentId !== "current") {
+        const agent = agents.find((a) => a.id === selectedAgentId);
+        if (agent) {
+          targetJdId = agent.jdId;
+          contextToUse = agent.markdown;
+        }
+      } else {
+        targetJdId = jdId;
+        contextToUse = markdown || (jdText.trim() ? `# Job Description\n\n${jdText}` : null);
+      }
+
+      const { answer } = await askJDChatbot(targetJdId, q, contextToUse);
       setChatMessages((prev) => [
         ...prev,
-        {
-          id: (Date.now() + 1).toString(),
-          sender: "assistant",
-          text: answer,
-        },
+        { id: (Date.now() + 1).toString(), sender: "assistant", text: answer },
       ]);
     } catch (e) {
       setChatMessages((prev) => [
@@ -131,1454 +249,972 @@ export default function Home() {
     }
   }
 
-  async function handleSubmit() {
+  // Agent Settings & Context Regeneration Handler
+  async function handleRegenerateAgentContext() {
+    if (!selectedSettingAgentId || isRegenerating) return;
+    const target = agents.find((a) => a.id === selectedSettingAgentId);
+    if (!target) return;
 
-    if (!jdText.trim()) return;
+    if (!editJdText.trim()) {
+      alert("JD Text cannot be empty.");
+      return;
+    }
 
-    setError(null);
-    setMarkdown(null);
-    setJsonData(null);
+    setIsRegenerating(true);
+    setRegenStatus("Uploading updated JD...");
+    setRegenSuccessMsg(null);
 
     try {
       const { jd_id } = await uploadJD(
-        "demo-project",
-        jdText,
-        "Untitled JD"
+        editCompany.projectName || target.companyDetails.projectName || "updated-project",
+        editJdText,
+        editTitle.trim() || target.title
       );
 
-      setJdId(jd_id);
-      setStatus("UPLOADED");
-
+      setRegenStatus("Analyzing updated context...");
       await analyzeJD(jd_id);
-      pollStatus(jd_id);
+
+      // Poll until ready
+      const interval = setInterval(async () => {
+        try {
+          const { status: s, error_message } = await getAnalysisStatus(jd_id);
+          setRegenStatus(`Status: ${statusConfig[s]?.label || s}`);
+
+          if (TERMINAL_STATUSES.includes(s)) {
+            clearInterval(interval);
+            if (s === "FAILED") {
+              alert(`Regeneration failed: ${error_message || "Unknown error"}`);
+              setIsRegenerating(false);
+              return;
+            }
+
+            const [mdRes, jsonRes] = await Promise.all([getMarkdown(jd_id), getJson(jd_id)]);
+
+            // Re-point existing agent in-place
+            setAgents((prev) =>
+              prev.map((a) => {
+                if (a.id === selectedSettingAgentId) {
+                  return {
+                    ...a,
+                    title: editTitle.trim() || a.title,
+                    companyDetails: { ...editCompany },
+                    jdId: jd_id,
+                    jdText: editJdText,
+                    markdown: mdRes.markdown,
+                    jsonData: jsonRes.json,
+                    specificationVersion: mdRes.specification_version || a.specificationVersion + 1,
+                    updatedAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+                  };
+                }
+                return a;
+              })
+            );
+
+            // Also update current workflow view state if it matches
+            if (target.jdId === jdId) {
+              setMarkdown(mdRes.markdown);
+              setJsonData(jsonRes.json);
+              setJdId(jd_id);
+              setJdText(editJdText);
+            }
+
+            setRegenSuccessMsg(`Successfully regenerated context! Agent re-pointed to Specification v${mdRes.specification_version}`);
+            setIsRegenerating(false);
+            setRegenStatus(null);
+          }
+        } catch (err) {
+          clearInterval(interval);
+          alert(`Error polling regeneration: ${(err as Error).message}`);
+          setIsRegenerating(false);
+          setRegenStatus(null);
+        }
+      }, POLL_INTERVAL_MS);
     } catch (e) {
-      setError((e as Error).message);
+      alert(`Regeneration failed: ${(e as Error).message}`);
+      setIsRegenerating(false);
+      setRegenStatus(null);
     }
   }
 
-  function pollStatus(id: string) {
-    const interval = setInterval(async () => {
-      try {
-        const { status: s, error_message } =
-          await getAnalysisStatus(id);
-
-        setStatus(s);
-
-        if (TERMINAL_STATUSES.includes(s)) {
-          clearInterval(interval);
-
-          if (s === "FAILED") {
-            setError(error_message || "Processing failed.");
-            return;
-          }
-
-          const [mdRes, jsonRes] = await Promise.all([
-            getMarkdown(id),
-            getJson(id),
-          ]);
-
-          setMarkdown(mdRes.markdown);
-          setJsonData(jsonRes.json);
-        }
-      } catch (e) {
-        clearInterval(interval);
-        setError((e as Error).message);
-      }
-    }, POLL_INTERVAL_MS);
-  }
-
-  function download(
-    filename: string,
-    content: string,
-    mime: string
-  ) {
-    const blob = new Blob([content], { type: mime });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-
-    URL.revokeObjectURL(url);
-  }
-
-  const isProcessing =
-    status !== null && !TERMINAL_STATUSES.includes(status);
-
-  const currentStatus = status
-    ? statusConfig[status]
-    : null;
+  const activeAgentForChat = agents.find((a) => a.id === selectedAgentId);
 
   return (
     <>
       <style jsx global>{`
-        * {
-          box-sizing: border-box;
-        }
-
+        * { box-sizing: border-box; }
         body {
           margin: 0;
-          background: #f6f7f9;
-          color: #111827;
-          font-family:
-            Inter,
-            ui-sans-serif,
-            system-ui,
-            -apple-system,
-            BlinkMacSystemFont,
-            "Segoe UI",
-            sans-serif;
+          background: #0f172a;
+          color: #f8fafc;
+          font-family: Inter, system-ui, -apple-system, sans-serif;
         }
+        button, input, textarea, select { font-family: inherit; }
 
-        button {
-          font-family: inherit;
-        }
-
-        .app-shell {
+        .app-container {
           min-height: 100vh;
-          background:
-            radial-gradient(
-              circle at 80% 0%,
-              rgba(99, 102, 241, 0.08),
-              transparent 30%
-            ),
-            #f6f7f9;
+          background: radial-gradient(circle at 80% 0%, rgba(99, 102, 241, 0.12), transparent 40%), #0f172a;
+          display: flex;
+          flex-direction: column;
         }
 
+        /* Top Header */
         .topbar {
-          height: 68px;
-          background: rgba(255, 255, 255, 0.92);
+          height: 70px;
+          background: rgba(15, 23, 42, 0.85);
           backdrop-filter: blur(12px);
-          border-bottom: 1px solid #e5e7eb;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 0 36px;
+          padding: 0 32px;
           position: sticky;
           top: 0;
-          z-index: 10;
+          z-index: 50;
         }
-
         .brand {
           display: flex;
           align-items: center;
           gap: 12px;
-        }
-
-        .nextjs-badge-box {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-        }
-
-        .ask-anything-btn {
-          display: inline-flex;
-          align-items: center;
-          gap: 7px;
-          background: #4f46e5;
-          color: white;
-          border: 0;
-          border-radius: 999px;
-          padding: 6px 14px;
-          font-size: 12px;
           font-weight: 700;
+          font-size: 1.15rem;
+          color: #ffffff;
+        }
+        .brand-badge {
+          background: linear-gradient(135deg, #6366f1, #8b5cf6);
+          padding: 4px 10px;
+          border-radius: 6px;
+          font-size: 0.75rem;
+          letter-spacing: 0.5px;
+        }
+        .nav-tabs {
+          display: flex;
+          gap: 8px;
+          background: rgba(255, 255, 255, 0.05);
+          padding: 4px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .nav-btn {
+          background: transparent;
+          border: none;
+          color: #94a3b8;
+          padding: 8px 18px;
+          border-radius: 8px;
+          font-size: 0.88rem;
+          font-weight: 500;
           cursor: pointer;
           transition: all 0.2s ease;
-          box-shadow: 0 2px 10px rgba(79, 70, 229, 0.25);
-        }
-
-        .ask-anything-btn:hover {
-          background: #4338ca;
-          transform: translateY(-1px);
-          box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
-        }
-
-        .ask-anything-btn .sparkle {
-          color: #a5b4fc;
-          font-size: 11px;
-        }
-
-        .ask-anything-btn .bot-tag {
-          background: rgba(255, 255, 255, 0.2);
-          padding: 2px 6px;
-          border-radius: 8px;
-          font-size: 9px;
-          text-transform: uppercase;
-          letter-spacing: 0.05em;
-        }
-
-        .header-divider {
-          width: 1px;
-          height: 24px;
-          background: #e5e7eb;
-          margin: 0 2px;
-        }
-
-        .brand-icon {
-          width: 34px;
-          height: 34px;
-          border-radius: 10px;
-          background: #111827;
-          color: white;
-          display: grid;
-          place-items: center;
-          font-weight: 800;
-          font-size: 15px;
-        }
-
-        .brand-title {
-          font-weight: 750;
-          font-size: 15px;
-          letter-spacing: -0.2px;
-        }
-
-        .brand-subtitle {
-          color: #9ca3af;
-          font-size: 12px;
-          margin-top: 2px;
-        }
-
-        .topbar-badge {
-          border: 1px solid #e5e7eb;
-          background: #fafafa;
-          border-radius: 999px;
-          padding: 7px 12px;
-          color: #6b7280;
-          font-size: 12px;
-          font-weight: 600;
-        }
-
-        .chat-popup {
-          position: fixed;
-          top: 80px;
-          right: 36px;
-          width: 440px;
-          max-width: calc(100vw - 32px);
-          height: 620px;
-          max-height: calc(100vh - 100px);
-          background: white;
-          border: 1px solid #e5e7eb;
-          border-radius: 20px;
-          box-shadow: 0 20px 50px rgba(15, 23, 42, 0.2);
-          display: flex;
-          flex-direction: column;
-          z-index: 1000;
-          overflow: hidden;
-          animation: popup-appear 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        @keyframes popup-appear {
-          from {
-            opacity: 0;
-            transform: translateY(-10px) scale(0.96);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0) scale(1);
-          }
-        }
-
-        .chat-header {
-          padding: 16px 20px;
-          background: #111827;
-          color: white;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-
-        .chat-header-title {
-          font-weight: 750;
-          font-size: 14px;
           display: flex;
           align-items: center;
           gap: 8px;
         }
-
-        .chat-header-subtitle {
-          font-size: 11px;
-          color: #9ca3af;
-          margin-top: 3px;
+        .nav-btn:hover { color: #ffffff; background: rgba(255, 255, 255, 0.05); }
+        .nav-btn.active {
+          background: #6366f1;
+          color: #ffffff;
+          box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
         }
 
-        .chat-close-btn {
-          background: transparent;
-          border: 0;
-          color: #9ca3af;
-          font-size: 18px;
-          cursor: pointer;
-          padding: 4px 8px;
-          border-radius: 8px;
-        }
-
-        .chat-close-btn:hover {
-          color: white;
-          background: rgba(255, 255, 255, 0.1);
-        }
-
-        .chat-status-bar {
-          background: #f8fafc;
-          border-bottom: 1px solid #edf2f7;
-          padding: 8px 16px;
-          font-size: 11px;
-          color: #64748b;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-
-        .chat-status-pill {
-          padding: 2px 8px;
-          border-radius: 999px;
-          font-weight: 650;
-          font-size: 10px;
-        }
-
-        .status-pill-ready {
-          background: #dcfce7;
-          color: #15803d;
-        }
-
-        .status-pill-raw {
-          background: #e0e7ff;
-          color: #4338ca;
-        }
-
-        .status-pill-empty {
-          background: #fef3c7;
-          color: #b45309;
-        }
-
-        .chat-body {
+        /* Main Content Container */
+        .main-content {
           flex: 1;
-          overflow-y: auto;
-          padding: 16px;
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          background: #fafbfc;
-        }
-
-        .chat-bubble {
-          max-width: 88%;
-          padding: 10px 14px;
-          border-radius: 14px;
-          font-size: 13px;
-          line-height: 1.6;
-        }
-
-        .chat-bubble-user {
-          align-self: flex-end;
-          background: #4f46e5;
-          color: white;
-          border-bottom-right-radius: 4px;
-        }
-
-        .chat-bubble-assistant {
-          align-self: flex-start;
-          background: white;
-          color: #1f2937;
-          border: 1px solid #e5e7eb;
-          border-bottom-left-radius: 4px;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-        }
-
-        .quick-prompts-wrapper {
-          padding: 10px 16px;
-          background: #f8fafc;
-          border-top: 1px solid #edf2f7;
-        }
-
-        .quick-prompts-title {
-          font-size: 10px;
-          color: #9ca3af;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.04em;
-          margin-bottom: 6px;
-        }
-
-        .quick-prompts {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 5px;
-        }
-
-        .quick-prompt-chip {
-          background: white;
-          border: 1px solid #cbd5e1;
-          border-radius: 12px;
-          padding: 4px 9px;
-          font-size: 11px;
-          color: #334155;
-          cursor: pointer;
-          font-weight: 600;
-          transition: all 0.15s ease;
-        }
-
-        .quick-prompt-chip:hover {
-          border-color: #6366f1;
-          color: #4f46e5;
-          background: #eff6ff;
-        }
-
-        .chat-footer {
-          padding: 12px 16px;
-          background: white;
-          border-top: 1px solid #e5e7eb;
-          display: flex;
-          gap: 8px;
-        }
-
-        .chat-input {
-          flex: 1;
-          border: 1px solid #d1d5db;
-          border-radius: 10px;
-          padding: 8px 12px;
-          font-size: 13px;
-          outline: none;
-        }
-
-        .chat-input:focus {
-          border-color: #6366f1;
-        }
-
-        .chat-send-btn {
-          background: #111827;
-          color: white;
-          border: 0;
-          border-radius: 10px;
-          padding: 8px 16px;
-          font-size: 13px;
-          font-weight: 700;
-          cursor: pointer;
-        }
-
-        .chat-send-btn:disabled {
-          opacity: 0.4;
-          cursor: not-allowed;
-        }
-
-
-        .page {
-          max-width: 1380px;
-          margin: 0 auto;
-          padding: 42px 32px 60px;
-        }
-
-        .hero {
-          margin-bottom: 30px;
-        }
-
-        .eyebrow {
-          color: #6366f1;
-          font-size: 12px;
-          font-weight: 750;
-          letter-spacing: 0.08em;
-          text-transform: uppercase;
-          margin-bottom: 9px;
-        }
-
-        .hero h1 {
-          margin: 0;
-          font-size: 34px;
-          line-height: 1.1;
-          letter-spacing: -1.2px;
-          font-weight: 800;
-        }
-
-        .hero p {
-          margin: 10px 0 0;
-          max-width: 720px;
-          color: #6b7280;
-          font-size: 15px;
-          line-height: 1.65;
-        }
-
-        .workspace {
-          display: grid;
-          grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-          gap: 22px;
-          align-items: start;
-        }
-
-        .card {
-          background: white;
-          border: 1px solid #e5e7eb;
-          border-radius: 16px;
-          box-shadow:
-            0 1px 2px rgba(0, 0, 0, 0.03),
-            0 8px 30px rgba(15, 23, 42, 0.035);
-        }
-
-        .card-header {
-          padding: 20px 22px;
-          border-bottom: 1px solid #edf0f3;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-
-        .card-title {
-          font-size: 14px;
-          font-weight: 750;
-        }
-
-        .card-description {
-          font-size: 12px;
-          color: #9ca3af;
-          margin-top: 4px;
-        }
-
-        .input-card {
-          overflow: hidden;
-        }
-
-        .input-body {
-          padding: 20px;
-        }
-
-        .input-label {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          font-size: 12px;
-          font-weight: 700;
-          color: #374151;
-          margin-bottom: 9px;
-        }
-
-        .character-count {
-          color: #9ca3af;
-          font-weight: 500;
-        }
-
-        .jd-input {
+          max-width: 1280px;
           width: 100%;
-          min-height: 430px;
-          resize: vertical;
-          border: 1px solid #dfe3e8;
-          border-radius: 12px;
-          background: #fbfcfd;
-          padding: 16px;
-          outline: none;
-          color: #1f2937;
-          font-size: 13px;
-          line-height: 1.65;
-          font-family:
-            "SFMono-Regular",
-            Consolas,
-            "Liberation Mono",
-            monospace;
-          transition: 0.2s ease;
+          margin: 0 auto;
+          padding: 32px;
         }
 
-        .jd-input:focus {
-          border-color: #818cf8;
-          background: white;
-          box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        /* Card Styles */
+        .card {
+          background: rgba(30, 41, 59, 0.7);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 16px;
+          padding: 28px;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+          backdrop-filter: blur(8px);
+          margin-bottom: 24px;
         }
 
-        .jd-input::placeholder {
-          color: #adb5bd;
-        }
-
-        .input-footer {
+        /* Workflow Stepper */
+        .stepper {
           display: flex;
-          justify-content: space-between;
           align-items: center;
-          margin-top: 14px;
+          justify-content: space-between;
+          position: relative;
+          margin-bottom: 36px;
+          padding: 0 12px;
         }
-
-        .hint {
-          color: #9ca3af;
-          font-size: 11px;
+        .stepper::before {
+          content: "";
+          position: absolute;
+          top: 20px;
+          left: 40px;
+          right: 40px;
+          height: 2px;
+          background: rgba(255, 255, 255, 0.1);
+          z-index: 1;
         }
-
-        .analyze-button {
-          border: 0;
-          border-radius: 10px;
-          padding: 10px 18px;
-          background: #111827;
-          color: white;
-          font-size: 13px;
-          font-weight: 700;
+        .step-item {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 8px;
+          position: relative;
+          z-index: 2;
           cursor: pointer;
-          transition: all 0.18s ease;
         }
-
-        .analyze-button:hover:not(:disabled) {
-          background: #1f2937;
-          transform: translateY(-1px);
-          box-shadow: 0 5px 15px rgba(17, 24, 39, 0.15);
-        }
-
-        .analyze-button:disabled {
-          opacity: 0.4;
-          cursor: not-allowed;
-        }
-
-        .status-card {
-          min-height: 530px;
-        }
-
-        .status-content {
-          padding: 22px;
-        }
-
-        .status-overview {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 16px;
-          border: 1px solid #edf0f3;
-          border-radius: 12px;
-          background: #fafbfc;
-          margin-bottom: 20px;
-        }
-
-        .status-left {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .status-dot {
-          width: 36px;
-          height: 36px;
-          border-radius: 10px;
-          display: grid;
-          place-items: center;
-          font-weight: 800;
-        }
-
-        .status-uploaded {
-          color: #2563eb;
-          background: #eff6ff;
-        }
-
-        .status-processing {
-          color: #6366f1;
-          background: #eef2ff;
-        }
-
-        .status-ready {
-          color: #059669;
-          background: #ecfdf5;
-        }
-
-        .status-review {
-          color: #d97706;
-          background: #fffbeb;
-        }
-
-        .status-failed {
-          color: #dc2626;
-          background: #fef2f2;
-        }
-
-        .status-name {
-          font-size: 13px;
-          font-weight: 750;
-        }
-
-        .status-detail {
-          font-size: 11px;
-          color: #9ca3af;
-          margin-top: 3px;
-        }
-
-        .processing-animation {
-          animation: pulse 1.4s infinite;
-        }
-
-        @keyframes pulse {
-          0%,
-          100% {
-            opacity: 1;
-          }
-          50% {
-            opacity: 0.4;
-          }
-        }
-
-        .id-label {
-          font-size: 10px;
-          color: #9ca3af;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-        }
-
-        .id-value {
-          margin-top: 5px;
-          font-family: monospace;
-          font-size: 10px;
-          color: #6b7280;
-          word-break: break-all;
-        }
-
-        .empty-state {
-          min-height: 330px;
+        .step-circle {
+          width: 42px;
+          height: 42px;
+          border-radius: 50%;
+          background: #1e293b;
+          border: 2px solid #334155;
+          color: #94a3b8;
           display: flex;
           align-items: center;
           justify-content: center;
-          text-align: center;
-          border: 1px dashed #dfe3e8;
-          border-radius: 14px;
-          background: #fbfcfd;
+          font-weight: 600;
+          font-size: 0.95rem;
+          transition: all 0.3s ease;
         }
+        .step-item.active .step-circle {
+          border-color: #6366f1;
+          background: #6366f1;
+          color: #ffffff;
+          box-shadow: 0 0 16px rgba(99, 102, 241, 0.5);
+        }
+        .step-item.completed .step-circle {
+          border-color: #10b981;
+          background: #10b981;
+          color: #ffffff;
+        }
+        .step-label {
+          font-size: 0.8rem;
+          font-weight: 500;
+          color: #94a3b8;
+        }
+        .step-item.active .step-label { color: #ffffff; font-weight: 600; }
+        .step-item.completed .step-label { color: #10b981; }
 
-        .empty-icon {
-          width: 48px;
-          height: 48px;
-          border-radius: 14px;
-          background: #f1f3f5;
+        /* Form Inputs */
+        .form-grid {
           display: grid;
-          place-items: center;
-          margin: 0 auto 14px;
-          font-size: 20px;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          gap: 20px;
         }
-
-        .empty-title {
-          font-weight: 750;
-          font-size: 14px;
+        .form-group {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
         }
-
-        .empty-text {
-          max-width: 300px;
-          margin: 7px auto 0;
-          font-size: 12px;
-          line-height: 1.6;
-          color: #9ca3af;
+        .form-group label {
+          font-size: 0.85rem;
+          font-weight: 600;
+          color: #cbd5e1;
         }
-
-        .error {
-          margin-top: 15px;
-          padding: 12px 14px;
-          background: #fef2f2;
-          border: 1px solid #fecaca;
+        .input-text, .textarea, .select {
+          background: #0f172a;
+          border: 1px solid rgba(255, 255, 255, 0.12);
           border-radius: 10px;
-          color: #b91c1c;
-          font-size: 12px;
+          padding: 12px 16px;
+          color: #f8fafc;
+          font-size: 0.92rem;
+          transition: border-color 0.2s;
         }
-
-        .review-message {
-          margin-bottom: 16px;
-          padding: 12px 14px;
-          background: #fffbeb;
-          border: 1px solid #fde68a;
-          border-radius: 10px;
-          color: #92400e;
-          font-size: 12px;
+        .input-text:focus, .textarea:focus, .select:focus {
+          outline: none;
+          border-color: #6366f1;
+          box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+        }
+        .textarea {
+          min-height: 220px;
+          resize: vertical;
           line-height: 1.5;
         }
 
-        .result-section {
-          margin-top: 22px;
+        /* Buttons */
+        .btn-primary {
+          background: linear-gradient(135deg, #6366f1, #4f46e5);
+          color: #ffffff;
+          border: none;
+          padding: 12px 24px;
+          border-radius: 10px;
+          font-weight: 600;
+          font-size: 0.92rem;
+          cursor: pointer;
+          transition: all 0.2s;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+        }
+        .btn-primary:hover:not(:disabled) {
+          transform: translateY(-1px);
+          box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+        }
+        .btn-primary:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .btn-secondary {
+          background: rgba(255, 255, 255, 0.08);
+          color: #cbd5e1;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          padding: 10px 18px;
+          border-radius: 8px;
+          font-weight: 500;
+          font-size: 0.88rem;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
+
+        /* Status & Alert Badges */
+        .alert-success {
+          background: rgba(16, 185, 129, 0.12);
+          border: 1px solid rgba(16, 185, 129, 0.3);
+          color: #34d399;
+          padding: 14px 20px;
+          border-radius: 10px;
+          font-size: 0.9rem;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 20px;
+        }
+        .alert-error {
+          background: rgba(239, 68, 68, 0.12);
+          border: 1px solid rgba(239, 68, 68, 0.3);
+          color: #f87171;
+          padding: 14px 20px;
+          border-radius: 10px;
+          font-size: 0.9rem;
+          margin-bottom: 20px;
         }
 
-        .result-header {
+        /* Status Pills */
+        .status-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 6px 14px;
+          border-radius: 20px;
+          font-size: 0.8rem;
+          font-weight: 600;
+        }
+        .status-uploaded { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+        .status-processing { background: rgba(168, 85, 247, 0.15); color: #c084fc; }
+        .status-ready { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        .status-failed { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+
+        /* Preview Tabs */
+        .preview-header {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          margin-bottom: 12px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          padding-bottom: 16px;
+          margin-bottom: 20px;
         }
-
-        .result-title {
-          font-size: 14px;
-          font-weight: 750;
-        }
-
-        .result-actions {
+        .sub-tabs {
           display: flex;
-          gap: 7px;
+          gap: 8px;
         }
-
-        .secondary-button {
-          border: 1px solid #e1e5ea;
-          background: white;
-          color: #374151;
-          border-radius: 8px;
-          padding: 7px 11px;
-          font-size: 11px;
-          font-weight: 650;
-          cursor: pointer;
-        }
-
-        .secondary-button:hover {
-          background: #f9fafb;
-          border-color: #cfd4dc;
-        }
-
-        .tabs {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          background: #f1f3f5;
-          padding: 4px;
-          border-radius: 10px;
-          width: fit-content;
-          margin-bottom: 12px;
-        }
-
-        .tab {
-          border: 0;
+        .sub-tab-btn {
           background: transparent;
-          padding: 8px 15px;
-          border-radius: 7px;
-          color: #6b7280;
-          font-size: 12px;
-          font-weight: 650;
+          border: none;
+          color: #94a3b8;
+          padding: 6px 14px;
+          border-radius: 6px;
+          font-size: 0.85rem;
           cursor: pointer;
         }
-
-        .tab.active {
-          background: white;
-          color: #111827;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        .sub-tab-btn.active {
+          background: rgba(255, 255, 255, 0.1);
+          color: #ffffff;
+          font-weight: 600;
         }
 
-        .viewer {
-          background: white;
-          border: 1px solid #e1e5ea;
-          border-radius: 14px;
+        .code-preview {
+          background: #090d16;
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          border-radius: 12px;
+          padding: 24px;
+          max-height: 520px;
+          overflow-y: auto;
+          font-size: 0.9rem;
+          line-height: 1.6;
+        }
+
+        /* Dedicated Chat Styles */
+        .chat-container {
+          display: flex;
+          flex-direction: column;
+          height: calc(100vh - 160px);
+          background: rgba(30, 41, 59, 0.7);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 16px;
           overflow: hidden;
         }
-
-        .viewer-toolbar {
-          height: 38px;
+        .chat-topbar {
+          padding: 16px 24px;
+          background: rgba(15, 23, 42, 0.6);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
           display: flex;
           align-items: center;
-          gap: 6px;
-          padding: 0 12px;
-          border-bottom: 1px solid #edf0f3;
-          background: #fafbfc;
+          justify-content: space-between;
         }
-
-        .traffic-dot {
-          width: 7px;
-          height: 7px;
-          border-radius: 50%;
-          background: #d1d5db;
-        }
-
-        .viewer-label {
-          margin-left: 7px;
-          color: #9ca3af;
-          font-family: monospace;
-          font-size: 10px;
-        }
-
-        .viewer-body {
-          max-height: 620px;
-          overflow: auto;
+        .chat-messages {
+          flex: 1;
           padding: 24px;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
         }
-
-        .markdown-content {
-          font-size: 13px;
-          line-height: 1.7;
-          color: #374151;
+        .message-bubble {
+          max-width: 80%;
+          padding: 16px 20px;
+          border-radius: 14px;
+          font-size: 0.92rem;
+          line-height: 1.5;
         }
-
-        .markdown-content h1 {
-          font-size: 25px;
-          color: #111827;
-          margin-top: 0;
+        .message-user {
+          align-self: flex-end;
+          background: linear-gradient(135deg, #6366f1, #4f46e5);
+          color: #ffffff;
+          border-bottom-right-radius: 4px;
         }
-
-        .markdown-content h2 {
-          font-size: 19px;
-          color: #111827;
-          margin-top: 28px;
-          padding-bottom: 7px;
-          border-bottom: 1px solid #edf0f3;
+        .message-assistant {
+          align-self: flex-start;
+          background: #1e293b;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          color: #e2e8f0;
+          border-bottom-left-radius: 4px;
         }
-
-        .markdown-content h3 {
-          font-size: 15px;
-          color: #111827;
-          margin-top: 20px;
+        .chat-input-bar {
+          padding: 16px 24px;
+          background: rgba(15, 23, 42, 0.6);
+          border-top: 1px solid rgba(255, 255, 255, 0.08);
+          display: flex;
+          gap: 12px;
         }
-
-        .markdown-content strong {
-          color: #111827;
+        .prompt-chips {
+          display: flex;
+          gap: 8px;
+          padding: 12px 24px;
+          background: rgba(15, 23, 42, 0.3);
+          border-top: 1px solid rgba(255, 255, 255, 0.04);
+          overflow-x: auto;
         }
-
-        .markdown-content code {
-          background: #f3f4f6;
-          padding: 2px 5px;
-          border-radius: 4px;
-          font-size: 11px;
+        .chip {
+          background: rgba(255, 255, 255, 0.06);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          color: #94a3b8;
+          padding: 6px 12px;
+          border-radius: 20px;
+          font-size: 0.78rem;
+          cursor: pointer;
+          white-space: nowrap;
         }
+        .chip:hover { background: rgba(99, 102, 241, 0.2); color: #6366f1; }
 
-        .markdown-content li {
-          margin-bottom: 5px;
+        /* Agent Cards */
+        .agent-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+          gap: 20px;
         }
-
-        .json-viewer {
-          margin: 0;
-          font-family:
-            "SFMono-Regular",
-            Consolas,
-            monospace;
-          font-size: 11px;
-          line-height: 1.65;
-          color: #374151;
-          white-space: pre-wrap;
-          word-break: break-word;
+        .agent-card {
+          background: #1e293b;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 14px;
+          padding: 20px;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          transition: all 0.2s;
         }
+        .agent-card:hover { border-color: #6366f1; transform: translateY(-2px); }
+        .agent-card.selected { border-color: #6366f1; box-shadow: 0 0 16px rgba(99, 102, 241, 0.3); }
 
-        @media (max-width: 1000px) {
-          .workspace {
-            grid-template-columns: 1fr;
-          }
-
-          .status-card {
-            min-height: auto;
-          }
+        .spinner {
+          width: 16px;
+          height: 16px;
+          border: 2px solid rgba(255, 255, 255, 0.3);
+          border-top-color: #ffffff;
+          border-radius: 50%;
+          animation: spin 0.8s linear infinite;
         }
-
-        @media (max-width: 640px) {
-          .topbar {
-            padding: 0 18px;
-          }
-
-          .topbar-badge {
-            display: none;
-          }
-
-          .page {
-            padding: 28px 16px 40px;
-          }
-
-          .hero h1 {
-            font-size: 28px;
-          }
-
-          .input-footer {
-            align-items: flex-start;
-            flex-direction: column;
-            gap: 12px;
-          }
-
-          .analyze-button {
-            width: 100%;
-          }
-
-          .result-header {
-            align-items: flex-start;
-            flex-direction: column;
-            gap: 10px;
-          }
-
-          .viewer-body {
-            padding: 16px;
-          }
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
       `}</style>
 
-      <div className="app-shell">
-        {/* HEADER */}
+      <div className="app-container">
+        {/* Top Navbar */}
         <header className="topbar">
           <div className="brand">
-            {/* NEXT.JS LOGO */}
-            <div className="nextjs-badge-box" title="Next.js App">
-              <svg width="24" height="24" viewBox="0 0 180 180" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="90" cy="90" r="90" fill="#000000"/>
-                <path d="M149.508 157.52L69.143 54H54V126H67.08V70.7222L138.077 162.247C142.179 160.916 146.012 159.324 149.508 157.52Z" fill="url(#next_linear_0)"/>
-                <rect x="115" y="54" width="13" height="72" fill="url(#next_linear_1)"/>
-                <defs>
-                  <linearGradient id="next_linear_0" x1="109" y1="116.5" x2="144.5" y2="160.5" gradientUnits="userSpaceOnUse">
-                    <stop stopColor="white"/>
-                    <stop offset="1" stopColor="white" stopOpacity="0"/>
-                  </linearGradient>
-                  <linearGradient id="next_linear_1" x1="121.5" y1="54" x2="121.5" y2="106" gradientUnits="userSpaceOnUse">
-                    <stop stopColor="white"/>
-                    <stop offset="1" stopColor="white" stopOpacity="0"/>
-                  </linearGradient>
-                </defs>
-              </svg>
-            </div>
+            <span style={{ fontSize: "1.3rem" }}>⚡</span>
+            <span>JD Understanding Agent</span>
+            <span className="brand-badge">PRO v2.0</span>
+          </div>
 
-            {/* ASK ANYTHING CHATBOT BUTTON RIGHT NEXT TO NEXT.JS LOGO */}
+          <nav className="nav-tabs">
             <button
-              className="ask-anything-btn"
-              onClick={() => setIsChatOpen(!isChatOpen)}
+              className={`nav-btn ${activeTab === "workflow" ? "active" : ""}`}
+              onClick={() => setActiveTab("workflow")}
             >
-              <span className="sparkle">✦</span>
-              <span>Ask Anything</span>
-              <span className="bot-tag">Chatbot</span>
+              <span>📋</span> Linear Setup
             </button>
-
-            <div className="header-divider" />
-
-            <div className="brand-icon">AI</div>
-
-            <div>
-              <div className="brand-title">
-                JD Understanding Agent
-              </div>
-              <div className="brand-subtitle">
-                Intelligent job description analysis
-              </div>
-            </div>
-          </div>
-
-          <div className="topbar-badge">
-            AI Evaluation Context
-          </div>
+            <button
+              className={`nav-btn ${activeTab === "chat" ? "active" : ""}`}
+              onClick={() => setActiveTab("chat")}
+            >
+              <span>💬</span> Dedicated Chat
+            </button>
+            <button
+              className={`nav-btn ${activeTab === "settings" ? "active" : ""}`}
+              onClick={() => setActiveTab("settings")}
+            >
+              <span>⚙️</span> Agent Settings
+            </button>
+          </nav>
         </header>
 
-
-        <main className="page">
-          {/* HERO */}
-          <section className="hero">
-            <div className="eyebrow">
-              Job Intelligence
-            </div>
-
-            <h1>
-              Turn a JD into
-              <br />
-              actionable AI context.
-            </h1>
-
-            <p>
-              Analyze a job description end-to-end and generate a
-              structured evaluation specification for downstream
-              candidate analysis.
-            </p>
-          </section>
-
-          {/* MAIN WORKSPACE */}
-          <div className="workspace">
-            {/* LEFT: INPUT */}
-            <section className="card input-card">
-              <div className="card-header">
-                <div>
-                  <div className="card-title">
-                    Job Description
-                  </div>
-
-                  <div className="card-description">
-                    Provide the raw JD for analysis
-                  </div>
+        <main className="main-content">
+          {/* ========================================================================= */}
+          {/* TAB 1: LINEAR JD WORKFLOW (Company -> Upload -> Analyse -> View -> Agent)  */}
+          {/* ========================================================================= */}
+          {activeTab === "workflow" && (
+            <div>
+              {/* Stepper Progress Indicator */}
+              <div className="stepper">
+                <div className={`step-item ${isStep1Done ? "completed" : "active"}`}>
+                  <div className="step-circle">{isStep1Done ? "✓" : "1"}</div>
+                  <span className="step-label">Company Details</span>
                 </div>
-
-                <span
-                  style={{
-                    fontSize: 18,
-                    color: "#9ca3af",
-                  }}
-                >
-                  ✦
-                </span>
+                <div className={`step-item ${isStep2Done ? "completed" : currentStep === 2 ? "active" : ""}`}>
+                  <div className="step-circle">{isStep2Done ? "✓" : "2"}</div>
+                  <span className="step-label">Enter JD</span>
+                </div>
+                <div className={`step-item ${isStep3Done ? "completed" : currentStep === 3 ? "active" : ""}`}>
+                  <div className="step-circle">{isStep3Done ? "✓" : "3"}</div>
+                  <span className="step-label">Analyse</span>
+                </div>
+                <div className={`step-item ${isStep4Done ? "completed" : currentStep === 4 ? "active" : ""}`}>
+                  <div className="step-circle">{isStep4Done ? "✓" : "4"}</div>
+                  <span className="step-label">View / Download</span>
+                </div>
+                <div className={`step-item ${isStep5Done ? "completed" : currentStep === 5 ? "active" : ""}`}>
+                  <div className="step-circle">{isStep5Done ? "✓" : "5"}</div>
+                  <span className="step-label">Create Agent</span>
+                </div>
               </div>
 
-              <div className="input-body">
-                <div className="input-label">
-                  <span>Raw JD content</span>
+              {/* Step 1: Company Details */}
+              <div className="card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                  <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Step 1: Company & Project Details</h3>
+                  {isStep1Done && <span className="status-pill status-ready">✓ Saved</span>}
+                </div>
+                <form onSubmit={handleSaveCompanyDetails} className="form-grid">
+                  <div className="form-group">
+                    <label>Company Name *</label>
+                    <input
+                      type="text"
+                      className="input-text"
+                      value={companyDetails.companyName}
+                      onChange={(e) => setCompanyDetails({ ...companyDetails, companyName: e.target.value })}
+                      placeholder="e.g. Acme Corp"
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Department / Team</label>
+                    <input
+                      type="text"
+                      className="input-text"
+                      value={companyDetails.department}
+                      onChange={(e) => setCompanyDetails({ ...companyDetails, department: e.target.value })}
+                      placeholder="e.g. Engineering"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Project / Hiring Campaign</label>
+                    <input
+                      type="text"
+                      className="input-text"
+                      value={companyDetails.projectName}
+                      onChange={(e) => setCompanyDetails({ ...companyDetails, projectName: e.target.value })}
+                      placeholder="e.g. Q3 Hiring Drive"
+                    />
+                  </div>
+                  <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end" }}>
+                    <button type="submit" className="btn-primary">
+                      Save & Continue to JD →
+                    </button>
+                  </div>
+                </form>
+              </div>
 
-                  <span className="character-count">
-                    {jdText.length.toLocaleString()} chars
-                  </span>
+              {/* Step 2 & 3: Enter / Upload JD & Analyse */}
+              <div className="card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignContent: "center", marginBottom: "16px" }}>
+                  <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Step 2 & 3: Enter Job Description & Run Analysis</h3>
+                  {status && (
+                    <span className={`status-pill ${statusConfig[status]?.className}`}>
+                      {statusConfig[status]?.icon} {statusConfig[status]?.label}
+                    </span>
+                  )}
                 </div>
 
-                <textarea
-                  className="jd-input"
-                  value={jdText}
-                  onChange={(e) => setJdText(e.target.value)}
-                  placeholder={`Paste the complete Job Description here...
+                <div className="form-group" style={{ marginBottom: "16px" }}>
+                  <label>Target Job Title</label>
+                  <input
+                    type="text"
+                    className="input-text"
+                    value={jobTitle}
+                    onChange={(e) => setJobTitle(e.target.value)}
+                    placeholder="e.g. Senior Backend Engineer"
+                  />
+                </div>
 
-The agent will identify:
-• Conventional requirements
-• Must-have vs preferred criteria
-• Responsibilities
-• Experience & technical requirements
-• Location and work constraints
-• Non-conventional candidate parameters
-• Evidence and evaluation rules
-• Ambiguities and compliance concerns`}
-                />
+                <div className="form-group" style={{ marginBottom: "16px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <label>Job Description Content (Paste or Upload file) *</label>
+                    <label className="btn-secondary" style={{ cursor: "pointer", fontSize: "0.8rem", padding: "4px 10px" }}>
+                      📁 Upload .txt File
+                      <input type="file" accept=".txt,.md" onChange={handleFileUpload} style={{ display: "none" }} />
+                    </label>
+                  </div>
+                  <textarea
+                    className="textarea"
+                    value={jdText}
+                    onChange={(e) => setJdText(e.target.value)}
+                    placeholder="Paste the complete Job Description text here..."
+                  />
+                </div>
 
-                <div className="input-footer">
-                  <span className="hint">
-                    The complete JD produces better context.
-                  </span>
+                {error && <div className="alert-error">❌ {error}</div>}
 
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
                   <button
-                    className="analyze-button"
-                    onClick={handleSubmit}
-                    disabled={
-                      !jdText.trim() || isProcessing
-                    }
+                    onClick={handleAnalyseJD}
+                    disabled={!jdText.trim() || (status !== null && !TERMINAL_STATUSES.includes(status))}
+                    className="btn-primary"
                   >
-                    {isProcessing
-                      ? "Analyzing..."
-                      : "Analyze JD  →"}
+                    {status !== null && !TERMINAL_STATUSES.includes(status) ? (
+                      <>
+                        <span className="spinner"></span> Analyzing JD...
+                      </>
+                    ) : (
+                      "🚀 Analyse Job Description"
+                    )}
                   </button>
                 </div>
               </div>
-            </section>
 
-            {/* RIGHT: STATUS */}
-            <section className="card status-card">
-              <div className="card-header">
-                <div>
-                  <div className="card-title">
-                    Analysis Workspace
-                  </div>
-
-                  <div className="card-description">
-                    Canonical JD understanding
-                  </div>
-                </div>
-
-                {currentStatus && (
-                  <div
-                    className={`status-dot ${currentStatus.className}`}
-                  >
-                    {currentStatus.icon}
-                  </div>
-                )}
-              </div>
-
-              <div className="status-content">
-                {status && currentStatus && (
-                  <div className="status-overview">
-                    <div className="status-left">
-                      <div
-                        className={`status-dot ${currentStatus.className} ${
-                          isProcessing
-                            ? "processing-animation"
-                            : ""
-                        }`}
-                      >
-                        {currentStatus.icon}
-                      </div>
-
-                      <div>
-                        <div className="status-name">
-                          {currentStatus.label}
-                        </div>
-
-                        <div className="status-detail">
-                          {isProcessing
-                            ? "The agent is processing the job description..."
-                            : status === "READY"
-                              ? "Specification generated successfully."
-                              : status === "NEEDS_REVIEW"
-                                ? "Human review is recommended."
-                                : "Processing could not be completed."}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {jdId && (
-                  <div style={{ marginBottom: 20 }}>
-                    <div className="id-label">
-                      Job Description ID
-                    </div>
-
-                    <div className="id-value">
-                      {jdId}
-                    </div>
-                  </div>
-                )}
-
-                {error && (
-                  <div className="error">
-                    <strong>Processing error:</strong>{" "}
-                    {error}
-                  </div>
-                )}
-
-                {status === "NEEDS_REVIEW" && (
-                  <div className="review-message">
-                    <strong>TA review recommended.</strong>{" "}
-                    The generated specification contains
-                    ambiguities or compliance-related items that
-                    should be reviewed before candidate evaluation.
-                  </div>
-                )}
-
-                {!markdown && !jsonData && !error && (
-                  <div className="empty-state">
+              {/* Step 4: View / Download JD Context */}
+              {isStep3Done && markdown && (
+                <div className="card">
+                  <div className="preview-header">
                     <div>
-                      <div className="empty-icon">
-                        ✦
+                      <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Step 4: Generated JD Context (Specification v{specVersion})</h3>
+                      <span style={{ fontSize: "0.82rem", color: "#94a3b8" }}>
+                        Analysis complete. Crisp Markdown and canonical JSON available below.
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", gap: "10px" }}>
+                      <div className="sub-tabs">
+                        <button
+                          className={`sub-tab-btn ${contextTab === "markdown" ? "active" : ""}`}
+                          onClick={() => setContextTab("markdown")}
+                        >
+                          Markdown View
+                        </button>
+                        <button
+                          className={`sub-tab-btn ${contextTab === "json" ? "active" : ""}`}
+                          onClick={() => setContextTab("json")}
+                        >
+                          JSON Source of Truth
+                        </button>
                       </div>
-
-                      <div className="empty-title">
-                        No specification yet
-                      </div>
-
-                      <div className="empty-text">
-                        Paste a job description on the left and
-                        run the analysis to generate Markdown
-                        and JSON evaluation context.
-                      </div>
+                      <button
+                        className="btn-secondary"
+                        onClick={() =>
+                          contextTab === "markdown"
+                            ? downloadFile("job_specification.md", markdown, "text/markdown")
+                            : downloadFile("job_specification.json", JSON.stringify(jsonData, null, 2), "application/json")
+                        }
+                      >
+                        ⬇ Download {contextTab.toUpperCase()}
+                      </button>
                     </div>
                   </div>
-                )}
-              </div>
-            </section>
-          </div>
 
-          {/* RESULTS */}
-          {(markdown || jsonData) && (
-            <section className="result-section">
-              <div className="result-header">
-                <div>
-                  <div className="result-title">
-                    Generated Specification
-                  </div>
-
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: "#9ca3af",
-                      marginTop: 4,
-                    }}
-                  >
-                    Canonical candidate evaluation context
+                  <div className="code-preview">
+                    {contextTab === "markdown" ? (
+                      <ReactMarkdown>{markdown}</ReactMarkdown>
+                    ) : (
+                      <pre style={{ margin: 0, fontFamily: "monospace", color: "#a5f3fc" }}>
+                        {JSON.stringify(jsonData, null, 2)}
+                      </pre>
+                    )}
                   </div>
                 </div>
+              )}
 
-                <div className="result-actions">
-                  {markdown && (
-                    <button
-                      className="secondary-button"
-                      onClick={() =>
-                        download(
-                          "job_specification.md",
-                          markdown,
-                          "text/markdown"
-                        )
-                      }
-                    >
-                      ↓ Markdown
+              {/* Step 5: Create Agent */}
+              {isStep3Done && (
+                <div className="card" style={{ borderColor: "#6366f1" }}>
+                  <h3 style={{ margin: "0 0 8px 0", fontSize: "1.1rem" }}>Step 5: Create JD Agent</h3>
+                  <p style={{ margin: "0 0 16px 0", fontSize: "0.88rem", color: "#94a3b8" }}>
+                    Finalize your configuration to register this JD agent.
+                  </p>
+
+                  {createdAgentSuccess && <div className="alert-success">✓ {createdAgentSuccess}</div>}
+
+                  <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+                    <input
+                      type="text"
+                      className="input-text"
+                      style={{ flex: 1 }}
+                      placeholder="Agent Name (e.g. Senior Backend Screener)"
+                      value={agentNameInput}
+                      onChange={(e) => setAgentNameInput(e.target.value)}
+                    />
+                    <button className="btn-primary" onClick={handleCreateAgent}>
+                      ✨ Create Agent & Enable Chat
                     </button>
-                  )}
-
-                  {jsonData && (
-                    <button
-                      className="secondary-button"
-                      onClick={() =>
-                        download(
-                          "job_specification.json",
-                          JSON.stringify(
-                            jsonData,
-                            null,
-                            2
-                          ),
-                          "application/json"
-                        )
-                      }
-                    >
-                      ↓ JSON
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="tabs">
-                <button
-                  className={`tab ${
-                    tab === "markdown"
-                      ? "active"
-                      : ""
-                  }`}
-                  onClick={() => setTab("markdown")}
-                >
-                  Markdown
-                </button>
-
-                <button
-                  className={`tab ${
-                    tab === "json" ? "active" : ""
-                  }`}
-                  onClick={() => setTab("json")}
-                >
-                  JSON
-                </button>
-              </div>
-
-              <div className="viewer">
-                <div className="viewer-toolbar">
-                  <span className="traffic-dot" />
-                  <span className="traffic-dot" />
-                  <span className="traffic-dot" />
-
-                  <span className="viewer-label">
-                    {tab === "markdown"
-                      ? "job_specification.md"
-                      : "job_specification.json"}
-                  </span>
-                </div>
-
-                <div className="viewer-body">
-                  {tab === "markdown" && markdown && (
-                    <div className="markdown-content">
-                      <ReactMarkdown>
-                        {markdown}
-                      </ReactMarkdown>
-                    </div>
-                  )}
-
-                  {tab === "json" && jsonData && (
-                    <pre className="json-viewer">
-                      {JSON.stringify(
-                        jsonData,
-                        null,
-                        2
-                      )}
-                    </pre>
-                  )}
-                </div>
-              </div>
-            </section>
-          )}
-        </main>
-
-        {/* CHATBOT POPUP MODAL */}
-        {isChatOpen && (
-          <div className="chat-popup">
-            <div className="chat-header">
-              <div>
-                <div className="chat-header-title">
-                  <span>✨</span>
-                  <span>Ask Anything about JD</span>
-                </div>
-                <div className="chat-header-subtitle">
-                  Scans converted .md context to answer questions
-                </div>
-              </div>
-              <button
-                className="chat-close-btn"
-                onClick={() => setIsChatOpen(false)}
-                title="Close chat"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="chat-status-bar">
-              <span>Context Status:</span>
-              <span
-                className={`chat-status-pill ${
-                  markdown
-                    ? "status-pill-ready"
-                    : jdText.trim()
-                      ? "status-pill-raw"
-                      : "status-pill-empty"
-                }`}
-              >
-                {markdown
-                  ? "✓ Markdown Ready"
-                  : jdText.trim()
-                    ? "⚡ Raw JD Text Available"
-                    : "⚠️ No JD Context Yet"}
-              </span>
-            </div>
-
-            <div className="chat-body">
-              {chatMessages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`chat-bubble ${
-                    msg.sender === "user"
-                      ? "chat-bubble-user"
-                      : "chat-bubble-assistant"
-                  }`}
-                >
-                  {msg.sender === "assistant" ? (
-                    <div className="markdown-content">
-                      <ReactMarkdown>{msg.text}</ReactMarkdown>
-                    </div>
-                  ) : (
-                    msg.text
-                  )}
-                </div>
-              ))}
-
-              {isChatLoading && (
-                <div className="chat-bubble chat-bubble-assistant">
-                  <span className="processing-animation">
-                    Scanning JD Markdown & generating answer...
-                  </span>
+                  </div>
                 </div>
               )}
             </div>
+          )}
 
-            <div className="quick-prompts-wrapper">
-              <div className="quick-prompts-title">Suggested questions:</div>
-              <div className="quick-prompts">
-                <button
-                  className="quick-prompt-chip"
-                  onClick={() =>
-                    handleSendChatMessage("What are the required technical skills?")
-                  }
-                >
-                  Technical Skills
+          {/* ========================================================================= */}
+          {/* TAB 2: DEDICATED JD CHAT PAGE (No floating popup widget)                 */}
+          {/* ========================================================================= */}
+          {activeTab === "chat" && (
+            <div className="chat-container">
+              {/* Chat Header */}
+              <div className="chat-topbar">
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <span style={{ fontSize: "1.4rem" }}>🤖</span>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: "1rem" }}>
+                      {activeAgentForChat ? activeAgentForChat.agentName : "JD AI Assistant"}
+                    </h4>
+                    <span style={{ fontSize: "0.78rem", color: "#94a3b8" }}>
+                      {activeAgentForChat
+                        ? `${activeAgentForChat.companyDetails.companyName} • Spec v${activeAgentForChat.specificationVersion}`
+                        : "Conversational context interface"}
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <label style={{ fontSize: "0.82rem", color: "#94a3b8" }}>Select Agent / Context:</label>
+                  <select
+                    className="select"
+                    value={selectedAgentId}
+                    onChange={(e) => setSelectedAgentId(e.target.value)}
+                  >
+                    {markdown && <option value="current">Current Active JD Context</option>}
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.agentName} ({a.companyDetails.companyName})
+                      </option>
+                    ))}
+                    {!markdown && agents.length === 0 && <option value="none">No Agent Created Yet</option>}
+                  </select>
+                  <button className="btn-secondary" onClick={() => setChatMessages([])} style={{ padding: "6px 12px" }}>
+                    Clear History
+                  </button>
+                </div>
+              </div>
+
+              {/* Message Thread */}
+              <div className="chat-messages">
+                {chatMessages.map((msg) => (
+                  <div key={msg.id} className={`message-bubble ${msg.sender === "user" ? "message-user" : "message-assistant"}`}>
+                    <ReactMarkdown>{msg.text}</ReactMarkdown>
+                  </div>
+                ))}
+                {isChatLoading && (
+                  <div className="message-bubble message-assistant" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span className="spinner"></span> Generating response...
+                  </div>
+                )}
+              </div>
+
+              {/* Actionable Prompt Suggestions */}
+              <div className="prompt-chips">
+                <button className="chip" onClick={() => handleSendChatMessage("What are the must-have requirements for this role?")}>
+                  💡 Must-have requirements?
                 </button>
-                <button
-                  className="quick-prompt-chip"
-                  onClick={() =>
-                    handleSendChatMessage("What is the required experience level?")
-                  }
-                >
-                  Experience Level
+                <button className="chip" onClick={() => handleSendChatMessage("What technical skills and tools are required?")}>
+                  🛠 Technical stack?
                 </button>
-                <button
-                  className="quick-prompt-chip"
-                  onClick={() =>
-                    handleSendChatMessage("Is remote work allowed?")
-                  }
-                >
-                  Remote Policy
+                <button className="chip" onClick={() => handleSendChatMessage("What responsibilities are outlined?")}>
+                  📋 Role duties?
                 </button>
-                <button
-                  className="quick-prompt-chip"
-                  onClick={() =>
-                    handleSendChatMessage("What are the core responsibilities?")
-                  }
-                >
-                  Responsibilities
+                <button className="chip" onClick={() => handleSendChatMessage("Are there any missing information fields or ambiguities?")}>
+                  ❓ Missing information?
+                </button>
+              </div>
+
+              {/* Input Bar */}
+              <div className="chat-input-bar">
+                <input
+                  type="text"
+                  className="input-text"
+                  style={{ flex: 1 }}
+                  placeholder="Ask any question about the JD requirements..."
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSendChatMessage()}
+                />
+                <button className="btn-primary" onClick={() => handleSendChatMessage()} disabled={isChatLoading || !chatInput.trim()}>
+                  Send ➔
                 </button>
               </div>
             </div>
+          )}
 
-            <div className="chat-footer">
-              <input
-                className="chat-input"
-                type="text"
-                placeholder="Ask anything about the JD..."
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleSendChatMessage();
-                  }
-                }}
-              />
-              <button
-                className="chat-send-btn"
-                onClick={() => handleSendChatMessage()}
-                disabled={!chatInput.trim() || isChatLoading}
-              >
-                Send
-              </button>
+          {/* ========================================================================= */}
+          {/* TAB 3: AGENT SETTINGS & CONTEXT REGENERATION                              */}
+          {/* ========================================================================= */}
+          {activeTab === "settings" && (
+            <div>
+              <h2 style={{ marginTop: 0, marginBottom: "20px" }}>Agent Management & Context Regeneration</h2>
+
+              {agents.length === 0 ? (
+                <div className="card" style={{ textAlign: "center", padding: "40px" }}>
+                  <p style={{ color: "#94a3b8", fontSize: "1rem", margin: "0 0 16px 0" }}>
+                    No agents created yet. Complete the <strong>Linear Setup Workflow</strong> to create your first JD agent.
+                  </p>
+                  <button className="btn-primary" onClick={() => setActiveTab("workflow")}>
+                    Go to Workflow Setup →
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: "24px" }}>
+                  {/* Left Column: Created Agents List */}
+                  <div>
+                    <h4 style={{ margin: "0 0 12px 0", color: "#cbd5e1" }}>Created Agents ({agents.length})</h4>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                      {agents.map((a) => (
+                        <div
+                          key={a.id}
+                          className={`agent-card ${selectedSettingAgentId === a.id ? "selected" : ""}`}
+                          onClick={() => setSelectedSettingAgentId(a.id)}
+                          style={{ cursor: "pointer" }}
+                        >
+                          <div>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                              <h4 style={{ margin: "0 0 4px 0", fontSize: "0.98rem" }}>{a.agentName}</h4>
+                              <span className="status-pill status-ready">v{a.specificationVersion}</span>
+                            </div>
+                            <p style={{ margin: 0, fontSize: "0.82rem", color: "#94a3b8" }}>{a.title}</p>
+                            <p style={{ margin: "4px 0 0 0", fontSize: "0.78rem", color: "#64748b" }}>
+                              {a.companyDetails.companyName} • Updated {a.updatedAt}
+                            </p>
+                          </div>
+                          <div style={{ marginTop: "12px", display: "flex", gap: "8px" }}>
+                            <button
+                              className="btn-secondary"
+                              style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedAgentId(a.id);
+                                setActiveTab("chat");
+                              }}
+                            >
+                              💬 Chat
+                            </button>
+                            <button className="btn-secondary" style={{ padding: "4px 10px", fontSize: "0.78rem" }}>
+                              ⚙️ Edit Settings
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Right Column: Settings & Context Regeneration Form */}
+                  {selectedSettingAgentId && (
+                    <div className="card">
+                      <h3 style={{ margin: "0 0 8px 0" }}>Agent Settings & Context Regeneration</h3>
+                      <p style={{ margin: "0 0 20px 0", fontSize: "0.85rem", color: "#94a3b8" }}>
+                        Update company details or JD text below. Clicking <strong>Generate Updated Context</strong> will re-analyze the JD, update the specification version, and re-point this existing agent without creating duplicates.
+                      </p>
+
+                      {regenSuccessMsg && <div className="alert-success">✓ {regenSuccessMsg}</div>}
+                      {regenStatus && <div className="alert-success" style={{ color: "#c084fc", borderColor: "rgba(168,85,247,0.3)" }}>◌ {regenStatus}</div>}
+
+                      <div className="form-grid" style={{ marginBottom: "20px" }}>
+                        <div className="form-group">
+                          <label>Job Title</label>
+                          <input
+                            type="text"
+                            className="input-text"
+                            value={editTitle}
+                            onChange={(e) => setEditTitle(e.target.value)}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Company Name</label>
+                          <input
+                            type="text"
+                            className="input-text"
+                            value={editCompany.companyName}
+                            onChange={(e) => setEditCompany({ ...editCompany, companyName: e.target.value })}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Department</label>
+                          <input
+                            type="text"
+                            className="input-text"
+                            value={editCompany.department}
+                            onChange={(e) => setEditCompany({ ...editCompany, department: e.target.value })}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="form-group" style={{ marginBottom: "24px" }}>
+                        <label>Job Description Text</label>
+                        <textarea
+                          className="textarea"
+                          value={editJdText}
+                          onChange={(e) => setEditJdText(e.target.value)}
+                          style={{ minHeight: "240px" }}
+                        />
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                        <button
+                          className="btn-primary"
+                          onClick={handleRegenerateAgentContext}
+                          disabled={isRegenerating || !editJdText.trim()}
+                        >
+                          {isRegenerating ? (
+                            <>
+                              <span className="spinner"></span> Regenerating Context...
+                            </>
+                          ) : (
+                            "🔄 Generate Updated Context & Re-point Agent"
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          )}
+        </main>
       </div>
     </>
   );
-}
+}

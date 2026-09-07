@@ -10,6 +10,27 @@ export type ProcessingStatus =
   | "NEEDS_REVIEW"
   | "FAILED";
 
+export interface CompanyDetails {
+  companyName: string;
+  department: string;
+  projectName: string;
+}
+
+export interface CreatedAgent {
+  id: string;
+  agentName: string;
+  title: string;
+  companyDetails: CompanyDetails;
+  jdId: string;
+  jdText: string;
+  markdown: string;
+  jsonData: Record<string, unknown>;
+  specificationVersion: number;
+  status: "ACTIVE" | "REGENERATING" | "FAILED";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export async function uploadJD(projectId: string, text: string, title?: string) {
   const form = new FormData();
   form.append("project_id", projectId);
@@ -82,4 +103,3 @@ export async function askJDChatbot(
     return res.json() as Promise<{ answer: string }>;
   }
 }
-

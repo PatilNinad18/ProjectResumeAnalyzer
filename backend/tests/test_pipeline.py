@@ -257,7 +257,7 @@ def test_jd_chat_endpoints(client):
     assert chat_resp.status_code == 200
     data = chat_resp.json()
     assert "answer" in data
-    assert "Python" in data["answer"] or "Skills" in data["answer"] or "scanned" in data["answer"].lower()
+    assert "python" in data["answer"].lower() or "skills" in data["answer"].lower() or "requirements" in data["answer"].lower()
 
     # Direct chat with markdown context
     direct_resp = client.post("/api/chat", json={"question": "Is remote work allowed?", "markdown": "Workplace: Remote allowed. Location: US."})

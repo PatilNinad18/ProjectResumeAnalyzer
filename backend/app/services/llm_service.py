@@ -405,7 +405,7 @@ class MockAdapter(ProviderAdapter):
     ) -> str:
         import re
 
-        print("\n[LLM REQUEST] provider=mock complete_text (scanning Markdown context)")
+        print("\n[LLM REQUEST] provider=mock complete_text")
         question_text = user_prompt
         if "User Question:" in user_prompt:
             question_text = user_prompt.split("User Question:", 1)[1]
@@ -419,43 +419,43 @@ class MockAdapter(ProviderAdapter):
                 re.IGNORECASE,
             )
             if salary_match:
-                return f"### Salary & Compensation\n\nBased on the JD Markdown context:\n\n- **Salary Range:** {salary_match.group(0).strip()}\n- **Context**: Listed in the job description."
+                return f"- **Salary Range:** {salary_match.group(0).strip()}\n- **Details:** Specified in the job requirements."
 
             sal_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["inr", "usd", "salary", "compensation", "lpa", "ctc", "month"])]
             if sal_lines:
                 bullets = "\n".join([f"- {line}" for line in sal_lines[:4]])
-                return f"### Salary & Compensation\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+                return bullets
 
-            return "### Salary & Compensation\n\nThe JD Markdown context does not explicitly list salary numbers or compensation ranges. It is logged under Section 6: Missing Information."
+            return "The job description does not explicitly state a salary range or compensation numbers."
 
         # 2. Title & Seniority / Experience Queries
         if any(w in lower_q for w in ["title", "role", "position", "seniority", "senior", "experience", "year", "level"]):
             matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["job title", "seniority", "role", "experience", "engineer", "lead", "manager", "years"])]
-            bullets = "\n".join([f"- {line}" for line in matched_lines[:6]]) if matched_lines else "- Role details specified in JD Markdown overview."
-            return f"### Role Overview & Experience Level\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:6]]) if matched_lines else "- Senior software role with experience expectations outlined in the requirements."
+            return bullets
 
         # 3. Technical Skills & Requirements Queries
         if any(w in lower_q for w in ["skill", "tech", "python", "stack", "require", "qualification", "must", "preferred"]):
             matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["skill", "require", "experience", "python", "scikit", "tensorflow", "pytorch", "aws", "gcp", "azure", "docker", "must", "preferred"])]
-            bullets = "\n".join([f"- {line}" for line in matched_lines[:15]]) if matched_lines else "- Technical skills and qualifications as listed in Section 2 Requirements."
-            return f"### Key Requirements & Skills\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:15]]) if matched_lines else "- Core technical skills include Python, backend architecture, and cloud services."
+            return bullets
 
         # 4. Remote / Location / Workplace Queries
         if any(w in lower_q for w in ["remote", "location", "office", "where", "hybrid", "city", "india", "place", "country"]):
             matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["remote", "location", "office", "hybrid", "onsite", "city", "india", "work mode"])]
-            bullets = "\n".join([f"- {line}" for line in matched_lines[:4]]) if matched_lines else "- Location / Work Mode as specified in Section 1 of the JD Markdown."
-            return f"### Work Location & Policy\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:4]]) if matched_lines else "- Work location and attendance policies as specified in role overview."
+            return bullets
 
         # 5. Responsibilities Queries
         if any(w in lower_q for w in ["responsibil", "duty", "do", "task", "deliver", "build", "design", "deploy"]):
             matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if any(k in line.lower() for k in ["responsib", "duty", "deliver", "build", "lead", "manage", "design", "develop", "deploy", "optimize"])]
-            bullets = "\n".join([f"- {line}" for line in matched_lines[:8]]) if matched_lines else "- Core responsibilities enumerated in Section 3 Responsibilities."
-            return f"### Key Responsibilities\n\nBased on the scanned JD Markdown context:\n\n{bullets}"
+            bullets = "\n".join([f"- {line}" for line in matched_lines[:8]]) if matched_lines else "- Design, develop, and maintain core services and collaborate across teams."
+            return bullets
 
         # 6. Fallback General Query Scanner
         matched_lines = [line.strip("-* ") for line in user_prompt.splitlines() if len(line.strip()) > 15 and not line.startswith("#")]
-        bullets = "\n".join([f"- {line}" for line in matched_lines[:5]]) if matched_lines else "- Structured evaluation details generated in the Markdown specification."
-        return f"### JD Markdown Context Analysis\n\nI scanned the JD Markdown context for your query. Key findings:\n\n{bullets}"
+        bullets = "\n".join([f"- {line}" for line in matched_lines[:5]]) if matched_lines else "I am ready to assist with details regarding role qualifications, skills, or responsibilities."
+        return bullets
 
 
 
@@ -608,9 +608,12 @@ class LLMService:
     def chat_with_jd_context(self, markdown_context: str, question: str, max_tokens: int = 2000) -> str:
         system_prompt = (
             "You are an intelligent Job Description (JD) AI Assistant.\n"
-            "Your primary role is to answer user questions accurately, clearly, and concisely "
-            "based strictly on the provided Job Description Markdown context.\n"
-            "Format your response in clean markdown."
+            "Answer the user's question directly, naturally, and conversationally based on the provided Job Description context.\n"
+            "Rules:\n"
+            "1. Answer directly and concisely.\n"
+            "2. Do NOT announce context scanning/re-scanning or state process phrases like 'Based on the JD context...' or 'I scanned...'\n"
+            "3. Mention the Job Description only when relevant or explicitly asked.\n"
+            "4. Format responses using clean, readable markdown."
         )
         user_prompt = (
             f"Here is the converted Job Description Markdown context:\n\n"
