@@ -778,15 +778,26 @@ export default function Home() {
           padding-right: 34px;
         }
 
+        .select option {
+          background-color: #ffffff;
+          color: #101828;
+        }
+
         .select-on-dark {
-          background-color: rgba(255,255,255,0.08);
-          border: 1px solid rgba(255,255,255,0.18);
-          color: #fff;
+          background-color: rgba(255,255,255,0.12);
+          border: 1px solid rgba(255,255,255,0.22);
+          color: #ffffff;
           box-shadow: none;
         }
 
-        .select-on-dark:hover { border-color: rgba(255,255,255,0.3); }
-        .select-on-dark:focus { border-color: rgba(255,255,255,0.4); box-shadow: 0 0 0 4px rgba(255,255,255,0.08); }
+        .select-on-dark option {
+          background-color: #181c2e;
+          color: #ffffff;
+          padding: 8px 12px;
+        }
+
+        .select-on-dark:hover { border-color: rgba(255,255,255,0.4); }
+        .select-on-dark:focus { border-color: rgba(255,255,255,0.6); box-shadow: 0 0 0 4px rgba(255,255,255,0.12); }
 
         /* Buttons */
         .btn-primary {
