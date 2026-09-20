@@ -12,9 +12,14 @@ Design principles enforced by this prompt:
 - Missing information must be captured explicitly, never silently omitted.
 - Experience requirements ("5+ years Python") mean relevant experience in that
   technology/domain, not simply 5 total years of employment.
+- RAG domain knowledge is injected as supporting interpretation context only;
+  it must never override explicit JD facts.
 """
+from __future__ import annotations
 
-PROMPT_VERSION = "jd-understanding-agent-v2"
+from typing import Optional
+
+PROMPT_VERSION = "jd-understanding-agent-v3-rag"
 
 SYSTEM_PROMPT = """You are the JD Understanding Agent inside an AI-powered Candidate
 Screening and Evaluation System.
@@ -181,5 +186,29 @@ fields with no supported evidence rather than inventing content):
 """
 
 
-def build_user_prompt(jd_text: str) -> str:
-    return f"<jd_content>\n{jd_text}\n</jd_content>\n\nProduce the canonical JSON specification now."
+def build_user_prompt(jd_text: str, rag_context: Optional[str] = None) -> str:
+    """
+    Assemble the user prompt for the JD Understanding Agent.
+
+    Args:
+        jd_text: The raw Job Description text (immutable source of truth).
+        rag_context: Optional domain knowledge snippets from the RAG pipeline,
+                     formatted as a string by context_selector.format_snippets_for_prompt().
+                     When provided, injected as <domain_knowledge_context> to guide
+                     interpretation — but the model must NEVER let it override JD facts.
+    """
+    parts: list[str] = []
+    parts.append(f"<jd_content>\n{jd_text}\n</jd_content>")
+
+    if rag_context and rag_context.strip():
+        parts.append(
+            "<domain_knowledge_context>\n"
+            "The following domain knowledge is provided as SUPPORTING INTERPRETATION GUIDANCE ONLY.\n"
+            "It must NEVER override, replace, or contradict any explicit fact stated in the JD above.\n"
+            "Use it to enrich evidence standards, flag compliance issues, and interpret ambiguous requirements.\n"
+            f"{rag_context}\n"
+            "</domain_knowledge_context>"
+        )
+
+    parts.append("Produce the canonical JSON specification now.")
+    return "\n\n".join(parts)

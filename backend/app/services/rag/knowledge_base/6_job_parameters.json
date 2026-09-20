@@ -1,0 +1,47 @@
+[
+  {
+    "id": "jp-001",
+    "category": "job_parameters",
+    "title": "Lab / Bench Work Physical Attendance Parameter",
+    "content": "When a JD mentions lab environment, bench work, hardware bring-up, testing with physical equipment, or oscilloscope usage, a non-conventional 'Lab/Bench Work Required' parameter must be derived. This parameter requires candidates to demonstrate physical lab access and hands-on hardware experience. Remote-only candidates who cannot be on-site for lab sessions are incompatible with this parameter unless the JD explicitly states remote lab access is supported.",
+    "keywords": ["lab", "bench", "physical", "attendance", "hardware", "on-site", "equipment", "oscilloscope", "remote"],
+    "applicable_roles": ["hardware engineer", "embedded engineer", "firmware engineer"],
+    "metadata": {"parameter_type": "physical_requirement", "rule_type": "job_parameter"}
+  },
+  {
+    "id": "jp-002",
+    "category": "job_parameters",
+    "title": "Travel Requirement Parameter",
+    "content": "When a JD explicitly mentions travel (e.g., 'travel up to 25%', 'client site visits', 'international travel required'), a 'Travel Required' non-conventional parameter must be derived. Evaluate candidates for: history of roles involving client travel, consultant or professional services backgrounds, and willingness statements (if available in cover letters). Do not assume travel willingness from country-of-residence alone.",
+    "keywords": ["travel", "client site", "international", "25%", "travel required", "consultant", "professional services"],
+    "applicable_roles": ["consultant", "solutions engineer", "account manager", "field engineer"],
+    "metadata": {"parameter_type": "logistics", "rule_type": "job_parameter"}
+  },
+  {
+    "id": "jp-003",
+    "category": "job_parameters",
+    "title": "Startup Fit / Fast-Paced Environment Parameter",
+    "content": "When a JD uses startup signals such as 'fast-paced environment', 'wear many hats', 'ambiguity', 'high ownership', 'scrappy team', 'zero-to-one', this triggers a 'Startup Fit' non-conventional parameter. Evaluate candidates for: history at early-stage companies (<100 employees), demonstrated breadth across multiple technical domains, ownership of complete product surfaces, and evidence of adapting to rapidly changing priorities. Large enterprise-only backgrounds may be flagged for this parameter.",
+    "keywords": ["startup", "fast-paced", "ambiguity", "ownership", "scrappy", "zero-to-one", "many hats", "early-stage"],
+    "applicable_roles": ["all"],
+    "metadata": {"parameter_type": "culture_fit", "rule_type": "job_parameter"}
+  },
+  {
+    "id": "jp-004",
+    "category": "job_parameters",
+    "title": "Client-Facing Ownership Parameter",
+    "content": "When a JD mentions direct client interaction, customer-facing responsibilities, external stakeholder management, or customer success involvement, a 'Client-Facing Ownership' non-conventional parameter applies. Evidence to evaluate: described external client or customer interaction in prior roles, presentations or demos to non-technical stakeholders, escalation handling experience, and ability to translate technical context for business audiences.",
+    "keywords": ["client", "customer", "external", "stakeholder", "demo", "presentation", "escalation", "non-technical", "customer success"],
+    "applicable_roles": ["solutions engineer", "account executive", "technical account manager", "customer success"],
+    "metadata": {"parameter_type": "client_interaction", "rule_type": "job_parameter"}
+  },
+  {
+    "id": "jp-005",
+    "category": "job_parameters",
+    "title": "On-Call / Shift Work Parameter",
+    "content": "When a JD specifies on-call rotations, shift work, 24/7 support responsibilities, or after-hours availability, a 'On-Call/Shift' non-conventional parameter must be derived. Evidence includes: SRE or DevOps roles with described on-call rotation participation, described incident response involvement outside business hours, or operational roles with defined shift structures. This parameter should not be scored — flag as 'unscored_if: candidate has not described on-call or shift availability'.",
+    "keywords": ["on-call", "shift", "24/7", "after-hours", "rotation", "incident response", "operational", "support"],
+    "applicable_roles": ["sre", "devops", "operations", "support engineer"],
+    "metadata": {"parameter_type": "availability", "rule_type": "job_parameter"}
+  }
+]

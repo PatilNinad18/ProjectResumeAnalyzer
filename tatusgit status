@@ -1,0 +1,269 @@
+[1mdiff --git a/backend/app/services/agent.py b/backend/app/services/agent.py[m
+[1mindex eebb748..91837da 100644[m
+[1m--- a/backend/app/services/agent.py[m
+[1m+++ b/backend/app/services/agent.py[m
+[36m@@ -1,19 +1,39 @@[m
+ """[m
+[31m-JD Understanding Agent orchestration.[m
+[32m+[m[32mJD Understanding Agent orchestration with RAG grounding.[m
+ [m
+[31m-RAW JD -> LLMService (structured output) -> Pydantic validation ->[m
+[31m-JobEvaluationSpecification (canonical object) -> caller renders MD/JSON.[m
+[32m+[m[32mPipeline:[m
+[32m+[m[32m  RAW JD[m
+[32m+[m[32m    → RAG pre-processing (atomic extraction → classification → hybrid retrieval → RRF)[m
+[32m+[m[32m    → build_user_prompt (raw JD + domain knowledge context)[m
+[32m+[m[32m    → LLMService (structured output)[m
+[32m+[m[32m    → Pydantic validation[m
+[32m+[m[32m    → JobEvaluationSpecification (canonical object)[m
+[32m+[m[32m    → caller renders MD/JSON[m
+[32m+[m
+[32m+[m[32mThe raw JD remains the immutable source of truth throughout. RAG provides[m
+[32m+[m[32msupporting interpretation guidance only and must never override JD facts.[m
+ """[m
+ from __future__ import annotations[m
+ [m
+[32m+[m[32mimport logging[m
+ from datetime import datetime, timezone[m
+ from typing import Optional[m
+ [m
+ from pydantic import ValidationError[m
+ [m
+[31m-from app.schemas.canonical import JobEvaluationSpecification, MetadataInfo[m
+[32m+[m[32mfrom app.schemas.canonical import JobEvaluationSpecification[m
+ from app.services.llm_service import LLMService, LLMResult[m
+ from app.services.prompt import PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt[m
+[32m+[m[32mfrom app.services.rag import ([m
+[32m+[m[32m    extract_and_classify,[m
+[32m+[m[32m    format_snippets_for_prompt,[m
+[32m+[m[32m    generate_queries,[m
+[32m+[m[32m    run_rag_pipeline,[m
+[32m+[m[32m    select_context,[m
+[32m+[m[32m)[m
+[32m+[m[32mfrom app.services.rag.retrieval import HybridRetriever[m
+[32m+[m
+[32m+[m[32mlogger = logging.getLogger("jd_agent.agent")[m
+ [m
+ [m
+ class JDUnderstandingError(Exception):[m
+[36m@@ -21,8 +41,36 @@[m [mclass JDUnderstandingError(Exception):[m
+ [m
+ [m
+ class JDUnderstandingAgent:[m
+[31m-    def __init__(self, llm_service: Optional[LLMService] = None):[m
+[32m+[m[32m    def __init__(self, llm_service: Optional[LLMService] = None, enable_rag: bool = True):[m
+         self.llm_service = llm_service or LLMService()[m
+[32m+[m[32m        self.enable_rag = enable_rag[m
+[32m+[m
+[32m+[m[32m    def _run_rag(self, jd_text: str) -> str:[m
+[32m+[m[32m        """[m
+[32m+[m[32m        Run the full RAG pipeline for the given JD text.[m
+[32m+[m
+[32m+[m[32m        Returns a formatted domain knowledge context string ready for prompt[m
+[32m+[m[32m        injection, or an empty string if RAG produced no useful snippets.[m
+[32m+[m[32m        """[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            rag_context = run_rag_pipeline(jd_text, max_snippets=8)[m
+[32m+[m[32m            if not rag_context.selected_snippets:[m
+[32m+[m[32m                logger.debug("[RAG] No snippets selected for prompt injection.")[m
+[32m+[m[32m                return ""[m
+[32m+[m[32m            formatted = format_snippets_for_prompt(rag_context.selected_snippets)[m
+[32m+[m[32m            logger.info([m
+[32m+[m[32m                "[RAG] Grounding complete: %d classified requirements, "[m
+[32m+[m[32m                "%d snippets injected (budget_used=%d, total_retrieved=%d).",[m
+[32m+[m[32m                len(rag_context.classified_requirements),[m
+[32m+[m[32m                rag_context.budget_used,[m
+[32m+[m[32m                rag_context.budget_used,[m
+[32m+[m[32m                rag_context.total_retrieved,[m
+[32m+[m[32m            )[m
+[32m+[m[32m            return formatted[m
+[32m+[m[32m        except Exception as exc:  # noqa: BLE001[m
+[32m+[m[32m            # RAG failure must never block the core JD analysis pipeline.[m
+[32m+[m[32m            logger.warning("[RAG] Pipeline failed — proceeding without RAG context: %s", exc)[m
+[32m+[m[32m            return ""[m
+ [m
+     def understand([m
+         self,[m
+[36m@@ -32,21 +80,33 @@[m [mclass JDUnderstandingAgent:[m
+         specification_version: Optional[int] = None,[m
+     ) -> tuple[JobEvaluationSpecification, LLMResult]:[m
+         """[m
+[31m-        Runs the JD through the Agent and returns a validated canonical[m
+[32m+[m[32m        Runs the JD through the RAG-grounded Agent and returns a validated canonical[m
+         JobEvaluationSpecification, plus the raw LLM call metadata (for[m
+         cost/latency/audit tracking).[m
+[32m+[m
+[32m+[m[32m        Stage 1-6: RAG pre-processing (extraction, classification, retrieval, RRF, selection).[m
+[32m+[m[32m        Stage 7:   Context Creator (build_user_prompt with RAG snippets).[m
+[32m+[m[32m        Stage 8:   LLM structured generation.[m
+[32m+[m[32m        Stage 9:   Pydantic validation → JobEvaluationSpecification.[m
+         """[m
+         if not jd_text or not jd_text.strip():[m
+             raise JDUnderstandingError("JD text is empty.")[m
+ [m
+[31m-        user_prompt = build_user_prompt(jd_text)[m
+[32m+[m[32m        # ── Stage 1–6: RAG grounding ─────────────────────────────────────────[m
+[32m+[m[32m        rag_context_str: str = ""[m
+[32m+[m[32m        if self.enable_rag:[m
+[32m+[m[32m            rag_context_str = self._run_rag(jd_text)[m
+[32m+[m
+[32m+[m[32m        # ── Stage 7: Context Creator ──────────────────────────────────────────[m
+[32m+[m[32m        user_prompt = build_user_prompt(jd_text, rag_context=rag_context_str or None)[m
+[32m+[m
+[32m+[m[32m        # ── Stage 8: LLM structured generation ───────────────────────────────[m
+         result = self.llm_service.complete_structured([m
+             system_prompt=SYSTEM_PROMPT,[m
+             user_prompt=user_prompt,[m
+             max_tokens=16384,[m
+         )[m
+ [m
+[31m-[m
+         if result.parsed_json is None:[m
+             reason_hint = ""[m
+             if result.finish_reason in ("MAX_TOKENS", "max_tokens"):[m
+[36m@@ -61,6 +121,7 @@[m [mclass JDUnderstandingAgent:[m
+                 "storage_data/debug_llm_failures/ for review."[m
+             )[m
+ [m
+[32m+[m[32m        # ── Stage 9: Pydantic validation ──────────────────────────────────────[m
+         payload = dict(result.parsed_json)[m
+         payload["metadata"] = {[m
+             "jd_id": jd_id,[m
+[1mdiff --git a/backend/app/services/llm_service.py b/backend/app/services/llm_service.py[m
+[1mindex 24792a4..3977205 100644[m
+[1m--- a/backend/app/services/llm_service.py[m
+[1m+++ b/backend/app/services/llm_service.py[m
+[36m@@ -605,21 +605,71 @@[m [mclass LLMService:[m
+ [m
+         raise RuntimeError(f"LLM call failed after {self.max_retries + 1} attempts: {last_exc}")[m
+ [m
+[31m-    def chat_with_jd_context(self, markdown_context: str, question: str, max_tokens: int = 2000) -> str:[m
+[32m+[m[32m    def chat_with_jd_context([m[41m[m
+[32m+[m[32m        self,[m[41m[m
+[32m+[m[32m        markdown_context: str,[m[41m[m
+[32m+[m[32m        question: str,[m[41m[m
+[32m+[m[32m        max_tokens: int = 2000,[m[41m[m
+[32m+[m[32m        enable_rag: bool = True,[m[41m[m
+[32m+[m[32m    ) -> str:[m[41m[m
+[32m+[m[32m        """[m[41m[m
+[32m+[m[32m        Answer a user question about the JD using dual-context retrieval.[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        Context 1 (Primary): The JD specification Markdown (source of truth).[m[41m[m
+[32m+[m[32m        Context 2 (Supporting): RAG-retrieved evaluation standards from the[m[41m[m
+[32m+[m[32m                                Knowledge Base, retrieved against the question.[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        The model is instructed to treat the JD spec as authoritative and the[m[41m[m
+[32m+[m[32m        RAG snippets as supporting interpretation guidance only.[m[41m[m
+[32m+[m[32m        """[m[41m[m
+[32m+[m[32m        # ── Retrieve domain context from RAG (question → KB) ──────────────────[m[41m[m
+[32m+[m[32m        rag_domain_snippets: str = ""[m[41m[m
+[32m+[m[32m        if enable_rag:[m[41m[m
+[32m+[m[32m            try:[m[41m[m
+[32m+[m[32m                from app.services.rag.query_generator import classify_clause, generate_queries[m[41m[m
+[32m+[m[32m                from app.services.rag.retrieval import HybridRetriever[m[41m[m
+[32m+[m[32m                from app.services.rag.context_selector import format_snippets_for_prompt, select_context[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                classified = [classify_clause(question)][m[41m[m
+[32m+[m[32m                queries = generate_queries(classified)[m[41m[m
+[32m+[m[32m                retriever = HybridRetriever()[m[41m[m
+[32m+[m[32m                all_results = retriever.search_all(queries, top_k_per_query=3)[m[41m[m
+[32m+[m[32m                rag_ctx = select_context([m[41m[m
+[32m+[m[32m                    retrieval_results=all_results,[m[41m[m
+[32m+[m[32m                    classified_requirements=classified,[m[41m[m
+[32m+[m[32m                    max_snippets=4,  # smaller budget for chat[m[41m[m
+[32m+[m[32m                )[m[41m[m
+[32m+[m[32m                if rag_ctx.selected_snippets:[m[41m[m
+[32m+[m[32m                    rag_domain_snippets = format_snippets_for_prompt(rag_ctx.selected_snippets)[m[41m[m
+[32m+[m[32m            except Exception as exc:  # noqa: BLE001[m[41m[m
+[32m+[m[32m                print(f"[LLM CHAT RAG] RAG retrieval failed — proceeding without domain context: {exc}")[m[41m[m
+[32m+[m[41m[m
+         system_prompt = ([m
+             "You are an intelligent Job Description (JD) AI Assistant.\n"[m
+[31m-            "Answer the user's question directly, naturally, and conversationally based on the provided Job Description context.\n"[m
+[32m+[m[32m            "Answer the user's question directly, naturally, and conversationally based on the provided context.\n"[m[41m[m
+             "Rules:\n"[m
+             "1. Answer directly and concisely.\n"[m
+[31m-            "2. Do NOT announce context scanning/re-scanning or state process phrases like 'Based on the JD context...' or 'I scanned...'\n"[m
+[31m-            "3. Mention the Job Description only when relevant or explicitly asked.\n"[m
+[31m-            "4. Format responses using clean, readable markdown."[m
+[31m-        )[m
+[31m-        user_prompt = ([m
+[31m-            f"Here is the converted Job Description Markdown context:\n\n"[m
+[31m-            f"<jd_markdown>\n{markdown_context}\n</jd_markdown>\n\n"[m
+[31m-            f"User Question: {question}"[m
+[32m+[m[32m            "2. Do NOT announce context scanning/re-scanning or state process phrases like "[m[41m[m
+[32m+[m[32m            "'Based on the JD context...' or 'I scanned...'\n"[m[41m[m
+[32m+[m[32m            "3. The <job_specification_markdown> is the authoritative source of truth.\n"[m[41m[m
+[32m+[m[32m            "4. The <supporting_evaluation_standards> provide interpretation guidance only — "[m[41m[m
+[32m+[m[32m            "they must NOT override any explicit JD fact.\n"[m[41m[m
+[32m+[m[32m            "5. Format responses using clean, readable markdown."[m[41m[m
+         )[m
+[32m+[m[41m[m
+[32m+[m[32m        # Build the dual-context user prompt[m[41m[m
+[32m+[m[32m        prompt_parts = [[m[41m[m
+[32m+[m[32m            f"<job_specification_markdown>\n{markdown_context}\n</job_specification_markdown>",[m[41m[m
+[32m+[m[32m        ][m[41m[m
+[32m+[m[32m        if rag_domain_snippets:[m[41m[m
+[32m+[m[32m            prompt_parts.append([m[41m[m
+[32m+[m[32m                f"<supporting_evaluation_standards>\n"[m[41m[m
+[32m+[m[32m                f"{rag_domain_snippets}\n"[m[41m[m
+[32m+[m[32m                f"</supporting_evaluation_standards>"[m[41m[m
+[32m+[m[32m            )[m[41m[m
+[32m+[m[32m        prompt_parts.append(f"User Question: {question}")[m[41m[m
+[32m+[m[32m        user_prompt = "\n\n".join(prompt_parts)[m[41m[m
+[32m+[m[41m[m
+         for attempt in range(self.max_retries + 1):[m
+             try:[m
+                 return self.adapter.complete_text([m
+[1mdiff --git a/backend/app/services/prompt.py b/backend/app/services/prompt.py[m
+[1mindex 19ed565..a4e8abf 100644[m
+[1m--- a/backend/app/services/prompt.py[m
+[1m+++ b/backend/app/services/prompt.py[m
+[36m@@ -12,9 +12,14 @@[m [mDesign principles enforced by this prompt:[m
+ - Missing information must be captured explicitly, never silently omitted.[m
+ - Experience requirements ("5+ years Python") mean relevant experience in that[m
+   technology/domain, not simply 5 total years of employment.[m
+[32m+[m[32m- RAG domain knowledge is injected as supporting interpretation context only;[m
+[32m+[m[32m  it must never override explicit JD facts.[m
+ """[m
+[32m+[m[32mfrom __future__ import annotations[m
+ [m
+[31m-PROMPT_VERSION = "jd-understanding-agent-v2"[m
+[32m+[m[32mfrom typing import Optional[m
+[32m+[m
+[32m+[m[32mPROMPT_VERSION = "jd-understanding-agent-v3-rag"[m
+ [m
+ SYSTEM_PROMPT = """You are the JD Understanding Agent inside an AI-powered Candidate[m
+ Screening and Evaluation System.[m
+[36m@@ -181,5 +186,29 @@[m [mfields with no supported evidence rather than inventing content):[m
+ """[m
+ [m
+ [m
+[31m-def build_user_prompt(jd_text: str) -> str:[m
+[31m-    return f"<jd_content>\n{jd_text}\n</jd_content>\n\nProduce the canonical JSON specification now."[m
+[32m+[m[32mdef build_user_prompt(jd_text: str, rag_context: Optional[str] = None) -> str:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Assemble the user prompt for the JD Understanding Agent.[m
+[32m+[m
+[32m+[m[32m    Args:[m
+[32m+[m[32m        jd_text: The raw Job Description text (immutable source of truth).[m
+[32m+[m[32m        rag_context: Optional domain knowledge snippets from the RAG pipeline,[m
+[32m+[m[32m                     formatted as a string by context_selector.format_snippets_for_prompt().[m
+[32m+[m[32m                     When provided, injected as <domain_knowledge_context> to guide[m
+[32m+[m[32m                     interpretation — but the model must NEVER let it override JD facts.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    parts: list[str] = [][m
+[32m+[m[32m    parts.append(f"<jd_content>\n{jd_text}\n</jd_content>")[m
+[32m+[m
+[32m+[m[32m    if rag_context and rag_context.strip():[m
+[32m+[m[32m        parts.append([m
+[32m+[m[32m            "<domain_knowledge_context>\n"[m
+[32m+[m[32m            "The following domain knowledge is provided as SUPPORTING INTERPRETATION GUIDANCE ONLY.\n"[m
+[32m+[m[32m            "It must NEVER override, replace, or contradict any explicit fact stated in the JD above.\n"[m
+[32m+[m[32m            "Use it to enrich evidence standards, flag compliance issues, and interpret ambiguous requirements.\n"[m
+[32m+[m[32m            f"{rag_context}\n"[m
+[32m+[m[32m            "</domain_knowledge_context>"[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    parts.append("Produce the canonical JSON specification now.")[m
+[32m+[m[32m    return "\n\n".join(parts)[m

@@ -1,0 +1,47 @@
+[
+  {
+    "id": "exp-001",
+    "category": "experience",
+    "title": "Relevant Experience vs. Total Employment Years",
+    "content": "When a JD states '5+ years of Python' or '3+ years of FastAPI', this refers to 5+ years of DEMONSTRATED, RELEVANT experience with that specific technology — not total years of employment where the technology was incidentally used. A candidate with 10 total years but only 1 year of active Python usage does NOT meet a '5+ years Python' requirement. Evidence must show sustained, hands-on, professional-level usage of the technology across multiple roles or projects.",
+    "keywords": ["years", "experience", "relevant", "total", "employment", "technology", "sustained", "hands-on"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "interpretation", "source": "evaluation_standard"}
+  },
+  {
+    "id": "exp-002",
+    "category": "experience",
+    "title": "Seniority-Adjusted Experience Expectations",
+    "content": "For senior/staff/principal roles, experience requirements should be interpreted as requiring deep, production-level expertise demonstrated through architectural decisions, team leadership, or measurable business impact — not just years of incidental usage. For junior/mid roles, demonstrated project-level experience with a progression trajectory is acceptable.",
+    "keywords": ["senior", "staff", "principal", "junior", "mid", "production", "architecture", "leadership", "seniority"],
+    "applicable_roles": ["senior", "staff", "principal", "lead", "junior", "mid"],
+    "metadata": {"rule_type": "interpretation", "source": "evaluation_standard"}
+  },
+  {
+    "id": "exp-003",
+    "category": "experience",
+    "title": "Domain Experience vs. Tool Experience",
+    "content": "Domain experience (e.g., '5+ years in FinTech') implies not only technical tool usage but familiarity with domain-specific regulatory constraints, business logic, workflows, and terminology. Tool experience (e.g., '5+ years Python') measures technology depth. These are distinct dimensions. A candidate may have high tool experience but low domain experience — both should be evaluated independently.",
+    "keywords": ["domain", "fintech", "tool", "technology", "industry", "regulatory", "workflow"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "interpretation", "source": "evaluation_standard"}
+  },
+  {
+    "id": "exp-004",
+    "category": "experience",
+    "title": "Minimum vs. Preferred Experience Thresholds",
+    "content": "When a JD specifies a minimum experience requirement (e.g., '3+ years'), this is a hard floor for MUST_HAVE requirements. PREFERRED requirements (e.g., '5+ years preferred') define the ideal bar — candidates below this are not disqualified but should be noted. Never treat PREFERRED experience thresholds as disqualifying criteria.",
+    "keywords": ["minimum", "preferred", "threshold", "must-have", "floor", "ideal", "disqualify"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "interpretation", "source": "evaluation_standard"}
+  },
+  {
+    "id": "exp-005",
+    "category": "experience",
+    "title": "Gap Periods and Career Transitions",
+    "content": "Employment gaps or career transitions do not automatically reduce relevant experience. Assess the quality and depth of experience within active employment periods. A candidate with 3 years of intensive, production-scale experience in the required technology may outperform one with 7 years of peripheral usage. Focus on demonstrated evidence of proficiency.",
+    "keywords": ["gap", "career", "transition", "employment", "proficiency", "quality", "depth"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "interpretation", "source": "evaluation_standard"}
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "id": "rs-001",
+    "category": "roles_seniority",
+    "title": "Staff / Principal Engineer Expectations",
+    "content": "Staff and Principal Engineer roles expect candidates who operate as architectural leaders with organization-wide technical influence. Evidence must demonstrate: defining technical direction and system design across multiple teams or domains, driving engineering standards and best practices, mentoring senior engineers, making technology adoption decisions at org scale, and delivering long-horizon technical roadmaps. Staff-level impact is measured in months-to-years of architectural influence, not sprint velocity.",
+    "keywords": ["staff", "principal", "architect", "architectural", "technical direction", "system design", "org-wide", "mentoring", "roadmap"],
+    "applicable_roles": ["staff", "principal", "distinguished", "fellow"],
+    "metadata": {"seniority_level": "staff+", "rule_type": "seniority_standard"}
+  },
+  {
+    "id": "rs-002",
+    "category": "roles_seniority",
+    "title": "Senior Engineer Expectations",
+    "content": "Senior Engineer roles expect full technical autonomy within a domain or team. Evidence must demonstrate: designing and implementing complex features end-to-end with minimal supervision, making independent architectural decisions for team-scoped systems, reviewing and guiding junior/mid engineer work, proactively identifying and resolving technical debt, and delivering production systems with measurable reliability and performance outcomes.",
+    "keywords": ["senior", "autonomy", "complex", "end-to-end", "independent", "architectural", "review", "guide", "production", "reliability"],
+    "applicable_roles": ["senior", "senior engineer", "sr. engineer", "se ii"],
+    "metadata": {"seniority_level": "senior", "rule_type": "seniority_standard"}
+  },
+  {
+    "id": "rs-003",
+    "category": "roles_seniority",
+    "title": "Lead / Tech Lead Expectations",
+    "content": "Tech Lead roles combine individual technical contribution with team coordination and delivery accountability. Evidence must demonstrate: technical leadership over a small team (3-8 engineers), hands-on code contribution alongside coordination responsibilities, sprint planning and unblocking team members, cross-functional collaboration with product and design, and ownership of technical delivery timelines.",
+    "keywords": ["tech lead", "lead", "team", "coordination", "delivery", "sprint", "unblocking", "cross-functional", "accountability"],
+    "applicable_roles": ["lead", "tech lead", "engineering lead", "team lead"],
+    "metadata": {"seniority_level": "lead", "rule_type": "seniority_standard"}
+  },
+  {
+    "id": "rs-004",
+    "category": "roles_seniority",
+    "title": "Mid-Level Engineer Expectations",
+    "content": "Mid-level / intermediate engineers are expected to work independently on well-defined tasks, contribute meaningfully to feature development, participate in code reviews, and demonstrate growth toward senior-level responsibilities. Evidence should show increasing scope of work over time, ability to implement complete features with moderate guidance, and participation in system design discussions.",
+    "keywords": ["mid", "intermediate", "independent", "feature", "code review", "growth", "guidance", "scope"],
+    "applicable_roles": ["mid", "intermediate", "engineer ii", "se i", "software engineer"],
+    "metadata": {"seniority_level": "mid", "rule_type": "seniority_standard"}
+  },
+  {
+    "id": "rs-005",
+    "category": "roles_seniority",
+    "title": "Junior Engineer Expectations",
+    "content": "Junior engineers are expected to learn, contribute to well-specified tasks, and grow under senior guidance. Evidence criteria for junior roles should be adjusted: project-level experience, academic projects, bootcamp graduates, open source contributions, and internships are all acceptable evidence. Keyword presence in a skills list carries more weight than for senior roles due to limited professional experience available.",
+    "keywords": ["junior", "entry", "graduate", "intern", "bootcamp", "learning", "guidance", "project", "academic"],
+    "applicable_roles": ["junior", "entry-level", "associate", "new grad", "graduate"],
+    "metadata": {"seniority_level": "junior", "rule_type": "seniority_standard"}
+  },
+  {
+    "id": "rs-006",
+    "category": "roles_seniority",
+    "title": "Management Role vs. IC Role Distinction",
+    "content": "Management roles (Engineering Manager, Director) require evidence of people management, performance reviews, hiring decisions, and team organizational design — not only technical contributions. Individual Contributor (IC) roles with 'influence' language (e.g., 'shape the technical direction') require technical influence through code, design, and review — not organizational management. Do not conflate management signals with IC technical leadership evidence.",
+    "keywords": ["manager", "director", "ic", "individual contributor", "people management", "performance review", "hiring", "influence"],
+    "applicable_roles": ["manager", "director", "vp", "ic", "individual contributor"],
+    "metadata": {"rule_type": "distinction", "source": "evaluation_standard"}
+  }
+]

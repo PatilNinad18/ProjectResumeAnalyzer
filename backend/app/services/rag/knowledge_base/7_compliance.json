@@ -1,0 +1,56 @@
+[
+  {
+    "id": "comp-001",
+    "category": "compliance",
+    "title": "Age Proxy Language Detection",
+    "content": "Certain JD phrases act as age proxies that may constitute indirect age discrimination under EEOC and similar regulations. Flag the following: 'digital native', 'recent graduate', 'fresh graduate', 'new grad', 'young and dynamic', 'energetic team', 'young professional', 'graduation year required', explicit graduation year constraints, 'class of 20XX', or maximum years of experience caps (e.g., 'no more than 5 years experience'). These should be flagged for TA review and must never be used as scoring criteria.",
+    "keywords": ["age proxy", "digital native", "recent graduate", "fresh graduate", "new grad", "young", "energetic", "graduation year", "eeoc"],
+    "applicable_roles": ["all"],
+    "metadata": {"compliance_type": "age_discrimination", "regulation": "EEOC Age Discrimination in Employment Act", "rule_type": "compliance_flag"}
+  },
+  {
+    "id": "comp-002",
+    "category": "compliance",
+    "title": "Gender Bias Language Detection",
+    "content": "Flag gender-coded language in JDs that may deter qualified candidates of certain genders from applying. Common patterns: gendered pronouns in role descriptions ('he will', 'she must'), gender-stereotyped trait language ('nurturing', 'aggressive', 'dominant', 'maternal'), and role title gender coding ('manpower', 'chairman', 'stewardess'). Flag for TA review. These must never be used as evaluation criteria.",
+    "keywords": ["gender", "gendered", "pronoun", "nurturing", "aggressive", "manpower", "chairman", "bias", "eeoc"],
+    "applicable_roles": ["all"],
+    "metadata": {"compliance_type": "gender_discrimination", "regulation": "Title VII, EEOC", "rule_type": "compliance_flag"}
+  },
+  {
+    "id": "comp-003",
+    "category": "compliance",
+    "title": "National Origin and Race Bias Detection",
+    "content": "Flag language that may indirectly target or exclude candidates based on national origin or race. Examples: region-specific name filtering, language requirements that go beyond business necessity (e.g., 'native English speaker' for a role that does not require native fluency), or cultural fit language tied to a specific national identity. Flag any requirement that correlates with race or national origin without a clear, documentable business justification.",
+    "keywords": ["national origin", "race", "native english", "cultural fit", "region", "name", "eeoc", "title vii"],
+    "applicable_roles": ["all"],
+    "metadata": {"compliance_type": "race_national_origin_discrimination", "regulation": "Title VII, EEOC", "rule_type": "compliance_flag"}
+  },
+  {
+    "id": "comp-004",
+    "category": "compliance",
+    "title": "Disability Accommodation Language",
+    "content": "JDs should not include language that directly or indirectly excludes candidates with disabilities without demonstrating essential job function necessity. Flag: physical requirements stated without necessity context ('must be physically fit', 'no physical limitations'), requests for medical information, or language implying able-bodied-only candidates. Standard ADA accommodation language ('reasonable accommodations available') is expected and positive. Flag its absence for senior roles.",
+    "keywords": ["disability", "ada", "accommodation", "physical", "medical", "able-bodied", "reasonable accommodation"],
+    "applicable_roles": ["all"],
+    "metadata": {"compliance_type": "disability_discrimination", "regulation": "ADA, Section 503", "rule_type": "compliance_flag"}
+  },
+  {
+    "id": "comp-005",
+    "category": "compliance",
+    "title": "Protected Characteristics Must Not Be Scored",
+    "content": "The following are protected characteristics that must NEVER be used as evaluation scoring criteria, regardless of how the JD frames them: age, race, color, religion, sex, national origin, disability, genetic information, pregnancy, marital status, veteran status, sexual orientation (where applicable). If a JD requirement correlates with a protected characteristic (e.g., graduation year as age proxy, native language fluency as national origin proxy), flag it for TA review — do not score it.",
+    "keywords": ["protected", "age", "race", "religion", "sex", "national origin", "disability", "pregnancy", "veteran", "sexual orientation", "scoring prohibited"],
+    "applicable_roles": ["all"],
+    "metadata": {"compliance_type": "protected_characteristics", "regulation": "EEOC, Title VII, ADA", "rule_type": "compliance_prohibition"}
+  },
+  {
+    "id": "comp-006",
+    "category": "compliance",
+    "title": "Equal Opportunity Employer Statement",
+    "content": "JDs that do not contain an Equal Opportunity Employer (EEO) statement should have this gap noted in missing_information for TA awareness — particularly for U.S.-based roles or companies with international hiring. The absence of an EEO statement is not itself a disqualifier for the role analysis but should be flagged as a recommended addition for HR/TA teams.",
+    "keywords": ["equal opportunity", "eeo", "employer", "statement", "missing", "hr", "ta"],
+    "applicable_roles": ["all"],
+    "metadata": {"compliance_type": "eeo_statement", "regulation": "EEOC", "rule_type": "compliance_check"}
+  }
+]

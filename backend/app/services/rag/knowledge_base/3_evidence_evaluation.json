@@ -1,0 +1,56 @@
+[
+  {
+    "id": "ev-001",
+    "category": "evidence_evaluation",
+    "title": "Strong Evidence Definition",
+    "content": "STRONG evidence: The candidate's resume/portfolio describes sustained, professional-level, production-scale usage of the required technology or skill in actual job roles or major projects. Strong evidence includes: named technology appearing in multiple job descriptions with described scope (team size, scale, traffic, impact), architectural decision-making attribution, measurable outcomes tied to the technology, and consistent usage across career progression.",
+    "keywords": ["strong", "evidence", "production", "sustained", "professional", "scope", "impact", "architectural", "measurable"],
+    "applicable_roles": ["all"],
+    "metadata": {"evidence_level": "strong", "rule_type": "evidence_definition"}
+  },
+  {
+    "id": "ev-002",
+    "category": "evidence_evaluation",
+    "title": "Moderate Evidence Definition",
+    "content": "MODERATE evidence: The candidate demonstrates project-level or substantial usage of the required technology with described outcomes, but lacks the breadth, production scale, or career-long consistency expected for senior/staff roles. Includes: technology mentioned in a single prominent project with described outcomes, freelance or contract work using the technology, academic project with real-world complexity, or supporting usage in a hybrid role.",
+    "keywords": ["moderate", "evidence", "project", "outcome", "freelance", "contract", "academic", "hybrid"],
+    "applicable_roles": ["all"],
+    "metadata": {"evidence_level": "moderate", "rule_type": "evidence_definition"}
+  },
+  {
+    "id": "ev-003",
+    "category": "evidence_evaluation",
+    "title": "Weak Evidence Definition",
+    "content": "WEAK evidence: The candidate mentions the required technology only in a Skills/Technologies list without any project, role description, or context. A single brief mention in an unrelated context, or incidental exposure described as 'familiar with' or 'basic knowledge of', also constitutes weak evidence. Weak evidence is insufficient alone to confirm meeting a MUST_HAVE requirement.",
+    "keywords": ["weak", "evidence", "skills", "list", "familiar", "basic", "mention", "incidental", "insufficient"],
+    "applicable_roles": ["all"],
+    "metadata": {"evidence_level": "weak", "rule_type": "evidence_definition"}
+  },
+  {
+    "id": "ev-004",
+    "category": "evidence_evaluation",
+    "title": "Insufficient Evidence (UNSCORED)",
+    "content": "INSUFFICIENT evidence (UNSCORED): The required technology, skill, or domain is completely absent from the candidate's materials, or the candidate explicitly states they have not worked with it. When evidence is insufficient, the candidate cannot be scored on this requirement — it must be flagged as 'UNSCORED' in the evaluation output. Do not assign a low score; leave it unscored and flag it for TA review.",
+    "keywords": ["insufficient", "unscored", "absent", "missing", "no evidence", "ta review", "flag"],
+    "applicable_roles": ["all"],
+    "metadata": {"evidence_level": "insufficient", "rule_type": "evidence_definition"}
+  },
+  {
+    "id": "ev-005",
+    "category": "evidence_evaluation",
+    "title": "Recency and Relevance of Evidence",
+    "content": "Evidence from the last 3 years carries stronger weight for fast-evolving technologies (cloud, AI/ML frameworks, modern web frameworks). For foundational technologies (core programming languages, fundamental algorithms), evidence from further back remains valid if reinforced by recent usage. Always prefer recent demonstrated usage; flag if the most recent evidence for a critical skill is more than 5 years old.",
+    "keywords": ["recency", "relevance", "recent", "years", "evolving", "cloud", "ml", "foundational", "flag"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "evidence_standard", "source": "evaluation_standard"}
+  },
+  {
+    "id": "ev-006",
+    "category": "evidence_evaluation",
+    "title": "Demonstrated Proof Over Keyword Presence",
+    "content": "A candidate evaluation must prioritize demonstrated proof of capability over keyword presence. Keyword matching alone (scanning resumes for technology names) produces false positives. The downstream LLM must actively look for: described usage in role responsibilities, impact statements tied to the technology, team/system scale context, and technical depth indicators (architecture, debugging, optimization). Keyword counting is explicitly prohibited as an evaluation method.",
+    "keywords": ["demonstrated", "proof", "keyword", "matching", "prohibited", "false positive", "depth", "architecture"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "prohibition", "source": "evaluation_standard"}
+  }
+]

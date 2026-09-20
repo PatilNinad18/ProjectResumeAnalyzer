@@ -1,0 +1,47 @@
+[
+  {
+    "id": "dom-001",
+    "category": "domains",
+    "title": "Embedded / Hardware Lab Attendance Requirements",
+    "content": "Embedded and hardware engineering roles frequently require physical lab attendance that cannot be performed remotely. Key indicators in JDs: 'lab environment', 'bench work', 'oscilloscope', 'hardware bring-up', 'PCB debugging', 'on-site lab access'. When these indicators are present, remote work or 'hybrid' should be flagged as potentially incompatible with the role's physical lab requirements. Candidates must demonstrate physical hands-on embedded/hardware development, not simulation-only experience.",
+    "keywords": ["embedded", "hardware", "lab", "bench", "oscilloscope", "pcb", "bring-up", "on-site", "remote", "simulation"],
+    "applicable_roles": ["hardware engineer", "embedded engineer", "firmware engineer", "electronics engineer"],
+    "metadata": {"domain": "embedded_hardware", "rule_type": "domain_standard"}
+  },
+  {
+    "id": "dom-002",
+    "category": "domains",
+    "title": "FinTech Domain Benchmarks",
+    "content": "FinTech roles require specific domain knowledge beyond technical skills: familiarity with regulatory frameworks (PCI-DSS, SOX, GDPR for financial data, AML/KYC processes), understanding of financial transaction processing, payment systems, risk management, and audit requirements. Strong FinTech evidence includes: described work on payment processing systems, financial data pipelines, regulatory compliance implementations, or fraud detection systems with named regulatory contexts.",
+    "keywords": ["fintech", "pci", "sox", "gdpr", "aml", "kyc", "payment", "transaction", "regulatory", "compliance", "fraud", "risk"],
+    "applicable_roles": ["fintech engineer", "payment engineer", "financial systems", "banking", "regulatory"],
+    "metadata": {"domain": "fintech", "rule_type": "domain_standard"}
+  },
+  {
+    "id": "dom-003",
+    "category": "domains",
+    "title": "SaaS / Cloud Product Scalability Benchmarks",
+    "content": "SaaS and cloud product roles expect experience with distributed systems at scale: multi-tenant architectures, horizontal scaling, high-availability design, SLA-driven reliability engineering. Strong evidence includes: described ownership of services handling >1K RPS, multi-region deployment experience, incident response for production outages, capacity planning, and cost optimization at scale. General web development experience without scale indicators is insufficient for senior SaaS platform roles.",
+    "keywords": ["saas", "cloud", "distributed", "scalability", "multi-tenant", "high availability", "sla", "rps", "multi-region", "incident"],
+    "applicable_roles": ["platform engineer", "backend engineer", "cloud engineer", "sre", "devops"],
+    "metadata": {"domain": "saas_cloud", "rule_type": "domain_standard"}
+  },
+  {
+    "id": "dom-004",
+    "category": "domains",
+    "title": "AI / ML Domain Benchmarks",
+    "content": "AI and ML roles require domain-specific evidence beyond general programming. Strong evidence includes: described model training pipelines (data prep, feature engineering, training, evaluation), production model serving at scale, ML experiment tracking, hyperparameter optimization, and understanding of model performance metrics (precision, recall, AUC). 'Knows scikit-learn' or 'completed a Kaggle competition' without production deployment context is weak evidence for senior ML roles.",
+    "keywords": ["ai", "ml", "machine learning", "model training", "pipeline", "feature engineering", "production", "serving", "kaggle", "scikit-learn"],
+    "applicable_roles": ["ml engineer", "data scientist", "ai engineer", "mlops engineer"],
+    "metadata": {"domain": "ai_ml", "rule_type": "domain_standard"}
+  },
+  {
+    "id": "dom-005",
+    "category": "domains",
+    "title": "Healthcare / MedTech Domain Benchmarks",
+    "content": "Healthcare and MedTech roles often carry regulatory constraints (FDA 510(k), HIPAA, HL7/FHIR, ISO 13485 for medical devices). Evidence for healthcare software roles should include: described work on HIPAA-compliant systems, electronic health record (EHR) integrations, HL7/FHIR API implementations, or FDA-regulated software development practices. General enterprise software experience is insufficient without demonstrated healthcare regulatory compliance context.",
+    "keywords": ["healthcare", "hipaa", "hl7", "fhir", "ehr", "fda", "medical device", "iso 13485", "regulatory", "compliance"],
+    "applicable_roles": ["healthcare engineer", "medtech", "health tech", "clinical systems"],
+    "metadata": {"domain": "healthcare", "rule_type": "domain_standard"}
+  }
+]

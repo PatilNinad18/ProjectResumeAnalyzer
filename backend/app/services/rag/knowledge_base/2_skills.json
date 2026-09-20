@@ -1,0 +1,56 @@
+[
+  {
+    "id": "skills-001",
+    "category": "technical_skills",
+    "title": "Framework-to-Language Inference Prohibition",
+    "content": "A candidate's experience with a framework does NOT imply proficiency in its host language, and vice versa. Django/Flask experience does NOT establish Python expertise independently. React experience does NOT establish JavaScript or TypeScript expertise. FastAPI experience does NOT establish async Python expertise. Each technology must be evidenced independently. Never infer one from the other.",
+    "keywords": ["framework", "language", "django", "flask", "react", "fastapi", "typescript", "python", "inference", "prohibited"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "prohibition", "source": "evaluation_standard"}
+  },
+  {
+    "id": "skills-002",
+    "category": "technical_skills",
+    "title": "Keyword-Only Evidence is Weak",
+    "content": "A technology name appearing in a resume's Skills list or Technologies section with no accompanying project, role, or context description is WEAK evidence. Strong evidence requires the technology to appear in actual job description entries or project descriptions with scope, outcomes, or team context. 'Knows Python' in a skills list is insufficient for a role requiring '5+ years of Python'.",
+    "keywords": ["keyword", "skills", "list", "weak", "strong", "evidence", "context", "project", "role", "scope"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "evidence_standard", "source": "evaluation_standard"}
+  },
+  {
+    "id": "skills-003",
+    "category": "technical_skills",
+    "title": "Technology Hierarchy: Specialization vs. Generalism",
+    "content": "For specialized technology requirements (e.g., Kubernetes, Terraform, embedded C), experience must be domain-specific, not inferred from general categories (e.g., 'cloud experience' does not imply Kubernetes expertise). Broad platform experience (AWS) does not guarantee specific service proficiency (AWS ECS, Kinesis). Evaluate each named technology independently.",
+    "keywords": ["kubernetes", "terraform", "embedded", "cloud", "aws", "specialized", "generalism", "platform"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "prohibition", "source": "evaluation_standard"}
+  },
+  {
+    "id": "skills-004",
+    "category": "technical_skills",
+    "title": "Certification vs. Practical Experience",
+    "content": "A professional certification (e.g., AWS Certified Solutions Architect, CKA, PMP) provides evidence of structured knowledge but does NOT substitute for hands-on practical experience in the certified domain. Certifications should be treated as MODERATE supplementary evidence, not as standalone proof of production-level proficiency.",
+    "keywords": ["certification", "aws", "cka", "pmp", "practical", "experience", "production", "proficiency"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "evidence_standard", "source": "evaluation_standard"}
+  },
+  {
+    "id": "skills-005",
+    "category": "technical_skills",
+    "title": "Open Source Contributions as Evidence",
+    "content": "Substantial open source contributions (merged PRs, maintained repositories, documented issues) to technology-specific projects constitute MODERATE-to-STRONG evidence of practical proficiency, depending on the scope and complexity of contributions. Side projects with no external users or review carry weaker signal than production deployments.",
+    "keywords": ["open source", "github", "contributions", "pull request", "repository", "maintained", "proficiency"],
+    "applicable_roles": ["all"],
+    "metadata": {"rule_type": "evidence_standard", "source": "evaluation_standard"}
+  },
+  {
+    "id": "skills-006",
+    "category": "technical_skills",
+    "title": "Hardware and Embedded Systems Experience Standards",
+    "content": "Hardware and embedded systems roles require physical, hands-on lab experience that cannot be substituted with simulation or theoretical knowledge. Skills such as oscilloscope usage, PCB debugging, JTAG, embedded firmware writing on real hardware (microcontrollers, FPGAs) must be evidenced by described lab or production embedded development work — not by academic coursework alone.",
+    "keywords": ["hardware", "embedded", "oscilloscope", "pcb", "fpga", "jtag", "microcontroller", "firmware", "lab", "hands-on"],
+    "applicable_roles": ["hardware engineer", "embedded engineer", "firmware engineer", "electronics"],
+    "metadata": {"rule_type": "evidence_standard", "source": "evaluation_standard"}
+  }
+]

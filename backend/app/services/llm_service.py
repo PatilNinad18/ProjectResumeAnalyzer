@@ -605,21 +605,71 @@ class LLMService:
 
         raise RuntimeError(f"LLM call failed after {self.max_retries + 1} attempts: {last_exc}")
 
-    def chat_with_jd_context(self, markdown_context: str, question: str, max_tokens: int = 2000) -> str:
+    def chat_with_jd_context(
+        self,
+        markdown_context: str,
+        question: str,
+        max_tokens: int = 2000,
+        enable_rag: bool = True,
+    ) -> str:
+        """
+        Answer a user question about the JD using dual-context retrieval.
+
+        Context 1 (Primary): The JD specification Markdown (source of truth).
+        Context 2 (Supporting): RAG-retrieved evaluation standards from the
+                                Knowledge Base, retrieved against the question.
+
+        The model is instructed to treat the JD spec as authoritative and the
+        RAG snippets as supporting interpretation guidance only.
+        """
+        # ── Retrieve domain context from RAG (question → KB) ──────────────────
+        rag_domain_snippets: str = ""
+        if enable_rag:
+            try:
+                from app.services.rag.query_generator import classify_clause, generate_queries
+                from app.services.rag.retrieval import HybridRetriever
+                from app.services.rag.context_selector import format_snippets_for_prompt, select_context
+
+                classified = [classify_clause(question)]
+                queries = generate_queries(classified)
+                retriever = HybridRetriever()
+                all_results = retriever.search_all(queries, top_k_per_query=3)
+                rag_ctx = select_context(
+                    retrieval_results=all_results,
+                    classified_requirements=classified,
+                    max_snippets=4,  # smaller budget for chat
+                )
+                if rag_ctx.selected_snippets:
+                    rag_domain_snippets = format_snippets_for_prompt(rag_ctx.selected_snippets)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[LLM CHAT RAG] RAG retrieval failed — proceeding without domain context: {exc}")
+
         system_prompt = (
             "You are an intelligent Job Description (JD) AI Assistant.\n"
-            "Answer the user's question directly, naturally, and conversationally based on the provided Job Description context.\n"
+            "Answer the user's question directly, naturally, and conversationally based on the provided context.\n"
             "Rules:\n"
             "1. Answer directly and concisely.\n"
-            "2. Do NOT announce context scanning/re-scanning or state process phrases like 'Based on the JD context...' or 'I scanned...'\n"
-            "3. Mention the Job Description only when relevant or explicitly asked.\n"
-            "4. Format responses using clean, readable markdown."
+            "2. Do NOT announce context scanning/re-scanning or state process phrases like "
+            "'Based on the JD context...' or 'I scanned...'\n"
+            "3. The <job_specification_markdown> is the authoritative source of truth.\n"
+            "4. The <supporting_evaluation_standards> provide interpretation guidance only — "
+            "they must NOT override any explicit JD fact.\n"
+            "5. Format responses using clean, readable markdown."
         )
-        user_prompt = (
-            f"Here is the converted Job Description Markdown context:\n\n"
-            f"<jd_markdown>\n{markdown_context}\n</jd_markdown>\n\n"
-            f"User Question: {question}"
-        )
+
+        # Build the dual-context user prompt
+        prompt_parts = [
+            f"<job_specification_markdown>\n{markdown_context}\n</job_specification_markdown>",
+        ]
+        if rag_domain_snippets:
+            prompt_parts.append(
+                f"<supporting_evaluation_standards>\n"
+                f"{rag_domain_snippets}\n"
+                f"</supporting_evaluation_standards>"
+            )
+        prompt_parts.append(f"User Question: {question}")
+        user_prompt = "\n\n".join(prompt_parts)
+
         for attempt in range(self.max_retries + 1):
             try:
                 return self.adapter.complete_text(
