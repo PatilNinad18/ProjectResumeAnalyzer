@@ -31,14 +31,46 @@ export interface CreatedAgent {
   updatedAt: string;
 }
 
-export async function uploadJD(projectId: string, text: string, title?: string) {
+export interface JDListItem {
+  jd_id: string;
+  project_id: string;
+  title: string;
+  current_version: number;
+  created_at: string | null;
+  status: ProcessingStatus;
+  has_specification: boolean;
+  specification_version: number | null;
+}
+
+export async function uploadJD(
+  projectId: string,
+  input: { text?: string; file?: File },
+  title?: string
+) {
   const form = new FormData();
   form.append("project_id", projectId);
-  form.append("text", text);
+  if (input.text) form.append("text", input.text);
+  if (input.file) form.append("file", input.file, input.file.name);
   if (title) form.append("title", title);
   const res = await fetch(`${API_BASE}/jds`, { method: "POST", body: form });
-  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-  return res.json() as Promise<{ jd_id: string; jd_version_id: string; version: number; status: string }>;
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.detail || `Upload failed: ${res.status}`);
+  }
+  return res.json() as Promise<{
+    jd_id: string;
+    jd_version_id: string;
+    version: number;
+    title: string;
+    status: string;
+  }>;
+}
+
+export async function listJDs(projectId?: string) {
+  const url = projectId ? `${API_BASE}/jds?project_id=${encodeURIComponent(projectId)}` : `${API_BASE}/jds`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to list JDs: ${res.status}`);
+  return res.json() as Promise<JDListItem[]>;
 }
 
 export async function analyzeJD(jdId: string) {

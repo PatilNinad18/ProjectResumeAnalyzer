@@ -226,18 +226,21 @@ Visit `http://localhost:3000` to access the application.
 
 ## 7. Running Tests
 
-The test suite contains **60 automated tests** across RAG components and end-to-end pipeline execution:
+The test suite contains **78 automated tests** across document parsing, multi-JD isolation, RAG components, and end-to-end pipeline execution:
 
 ```bash
 cd backend
 
-# Run the complete test suite (60 tests)
-python -m pytest tests/test_rag.py tests/test_pipeline.py -v
+# Run the complete test suite (78 tests)
+python -m pytest tests/test_document_parser.py tests/test_multi_jd_isolation.py tests/test_rag.py tests/test_pipeline.py -v
 
-# Run only RAG unit tests (44 tests)
+# Run document parsing & multi-JD isolation tests
+python -m pytest tests/test_document_parser.py tests/test_multi_jd_isolation.py -v
+
+# Run RAG unit tests (44 tests)
 python -m pytest tests/test_rag.py -v
 
-# Run only Pipeline integration tests (16 tests)
+# Run Pipeline integration tests (16 tests)
 python -m pytest tests/test_pipeline.py -v
 ```
 
@@ -247,7 +250,8 @@ python -m pytest tests/test_pipeline.py -v
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/jds` | Upload a JD (multipart file or raw text) |
+| `GET`  | `/api/jds` | List all Job Descriptions with status & spec summary |
+| `POST` | `/api/jds` | Upload a JD (supports `.txt`, `.pdf`, `.docx` files or raw text) |
 | `GET`  | `/api/jds/{jd_id}` | Retrieve JD metadata and version info |
 | `POST` | `/api/jds/{jd_id}/analyze` | Enqueue JD Understanding & RAG pipeline |
 | `GET`  | `/api/jds/{jd_id}/analysis` | Poll processing status (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`) |

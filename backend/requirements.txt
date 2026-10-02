@@ -10,3 +10,4 @@ anthropic>=0.34  # optional: only needed when LLM_PROVIDER=anthropic
 requests>=2.31   # optional: only needed when LLM_PROVIDER=gemini
 pytest>=8.2
 httpx>=0.27
+pypdf>=4.0.0
