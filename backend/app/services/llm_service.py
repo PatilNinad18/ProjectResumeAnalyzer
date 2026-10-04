@@ -98,6 +98,192 @@ def _dump_full_response_for_debug(provider: str, raw_text: str) -> Optional[str]
         return None
 
 
+class OllamaAdapter(ProviderAdapter):
+    """
+    Local Ollama adapter running completely offline on localhost.
+    Targets local models (e.g. qwen3:4b) via Ollama's HTTP API.
+    """
+
+    name = "ollama"
+
+    def __init__(self, base_url: Optional[str] = None) -> None:
+        settings = get_settings()
+        self.base_url = (base_url or settings.ollama_base_url or "http://localhost:11434").rstrip("/")
+
+    def complete_structured(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int
+    ) -> LLMResult:
+        import httpx
+
+        url = f"{self.base_url}/api/chat"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "format": "json",
+            "options": {
+                "num_ctx": 16384,
+                "temperature": 0.0,
+            },
+            "stream": True,  # streaming: each chunk resets the read-timeout window
+        }
+
+        _log_request(self.name, model, system_prompt, user_prompt)
+        start = time.perf_counter()
+        # connect=10s: fail fast if Ollama is not running.
+        # read=120s: per-chunk idle timeout — Ollama keeps sending tokens so this
+        #            never fires during normal generation, even for 10-minute runs.
+        _timeout = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
+        try:
+            full_text = ""
+            input_tokens = 0
+            output_tokens = 0
+            finish_reason = "stop"
+
+            with httpx.Client(timeout=_timeout) as client:
+                with client.stream("POST", url, json=payload) as response:
+                    if response.status_code == 404:
+                        raise RuntimeError(
+                            f"{model} model is not installed. Run: ollama pull {model}"
+                        )
+                    if not response.is_success:
+                        body = response.read().decode()
+                        if "not found" in body.lower() or "try pulling" in body.lower():
+                            raise RuntimeError(
+                                f"{model} model is not installed. Run: ollama pull {model}"
+                            )
+                        raise RuntimeError(
+                            f"Ollama returned HTTP {response.status_code}: {body}"
+                        )
+
+                    for raw_line in response.iter_lines():
+                        if not raw_line:
+                            continue
+                        try:
+                            chunk = json.loads(raw_line)
+                        except json.JSONDecodeError:
+                            continue
+                        msg = chunk.get("message", {})
+                        full_text += msg.get("content", "")
+                        if chunk.get("done"):
+                            input_tokens = chunk.get("prompt_eval_count", 0)
+                            output_tokens = chunk.get("eval_count", 0)
+                            finish_reason = chunk.get("done_reason", "") or "stop"
+                            break
+
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise RuntimeError("Local LLM service is not running. Please start Ollama.") from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Failed to communicate with local Ollama service: {exc}") from exc
+
+        latency_ms = (time.perf_counter() - start) * 1000
+        text = full_text
+
+        usage = LLMUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            model=model,
+            estimated_cost_usd=0.0,
+        )
+        _log_response(self.name, text, usage, finish_reason)
+
+        parsed = _safe_json_extract(text)
+        if parsed is None:
+            _dump_full_response_for_debug(self.name, text)
+            raise ValueError(
+                f"provider=ollama returned unparseable or truncated JSON "
+                f"(finish_reason={finish_reason})."
+            )
+
+        return LLMResult(
+            raw_text=text, parsed_json=parsed, usage=usage,
+            prompt_version="", finish_reason=finish_reason,
+        )
+
+    def complete_text(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int
+    ) -> str:
+        import httpx
+
+        url = f"{self.base_url}/api/chat"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "options": {
+                "num_ctx": 16384,
+                "temperature": 0.2,
+            },
+            "stream": True,
+        }
+
+        _log_request(self.name, model, system_prompt, user_prompt)
+        start = time.perf_counter()
+        _timeout = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
+        try:
+            full_text = ""
+            input_tokens = 0
+            output_tokens = 0
+
+            with httpx.Client(timeout=_timeout) as client:
+                with client.stream("POST", url, json=payload) as response:
+                    if response.status_code == 404:
+                        raise RuntimeError(
+                            f"{model} model is not installed. Run: ollama pull {model}"
+                        )
+                    if not response.is_success:
+                        body = response.read().decode()
+                        if "not found" in body.lower() or "try pulling" in body.lower():
+                            raise RuntimeError(
+                                f"{model} model is not installed. Run: ollama pull {model}"
+                            )
+                        raise RuntimeError(
+                            f"Ollama returned HTTP {response.status_code}: {body}"
+                        )
+
+                    for raw_line in response.iter_lines():
+                        if not raw_line:
+                            continue
+                        try:
+                            chunk = json.loads(raw_line)
+                        except json.JSONDecodeError:
+                            continue
+                        msg = chunk.get("message", {})
+                        full_text += msg.get("content", "")
+                        if chunk.get("done"):
+                            input_tokens = chunk.get("prompt_eval_count", 0)
+                            output_tokens = chunk.get("eval_count", 0)
+                            break
+
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise RuntimeError("Local LLM service is not running. Please start Ollama.") from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Failed to communicate with local Ollama service: {exc}") from exc
+
+        latency_ms = (time.perf_counter() - start) * 1000
+        text = full_text
+
+        usage = LLMUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            model=model,
+            estimated_cost_usd=0.0,
+        )
+        _log_response(self.name, text, usage)
+        return text
+
+
+
 class AnthropicAdapter(ProviderAdapter):
     """
     Requires ANTHROPIC_API_KEY (from your .env, via Settings). In
@@ -561,17 +747,20 @@ class LLMService:
         settings = get_settings()
         provider_name = settings.llm_provider
         default_models = {
+            "ollama": "qwen3:4b",
             "anthropic": "claude-sonnet-4-6",
             "gemini": "gemini-1.5-flash",
             "mock": "mock-extractor-v1",
         }
         adapters = {
+            "ollama": OllamaAdapter,
             "anthropic": AnthropicAdapter,
             "gemini": GeminiAdapter,
             "mock": MockAdapter,
         }
-        self.adapter = adapter or adapters.get(provider_name, MockAdapter)()
-        self.model = model or settings.llm_model or default_models.get(provider_name, "mock-extractor-v1")
+        self.adapter = adapter or adapters.get(provider_name, OllamaAdapter)()
+        self.model = model or settings.llm_model or default_models.get(provider_name, "qwen3:4b")
+        self.provider = provider_name
         self.max_retries = 2
         print(f"[LLM SERVICE] configured provider={provider_name} model={self.model}")
 
@@ -590,10 +779,13 @@ class LLMService:
             except Exception as exc:  # noqa: BLE001
                 print(f"[LLM ERROR] attempt {attempt + 1}/{self.max_retries + 1} failed: {exc}")
                 last_exc = exc
-
+                if isinstance(self.adapter, OllamaAdapter):
+                    err_str = str(exc)
+                    if "not running" in err_str or "not installed" in err_str:
+                        raise
                 continue
 
-        if not isinstance(self.adapter, MockAdapter):
+        if isinstance(self.adapter, (AnthropicAdapter, GeminiAdapter)):
             print(f"\n[LLM WARNING] {self.adapter.name.upper()} API call failed after {self.max_retries + 1} attempts ({last_exc}).")
             print("[LLM FALLBACK] Falling back to MockAdapter (offline rule-based extractor) to keep application running!\n")
             return MockAdapter().complete_structured(
@@ -680,9 +872,13 @@ class LLMService:
                 )
             except Exception as exc:
                 print(f"[LLM CHAT ERROR] attempt {attempt + 1}/{self.max_retries + 1} failed: {exc}")
+                if isinstance(self.adapter, OllamaAdapter):
+                    err_str = str(exc)
+                    if "not running" in err_str or "not installed" in err_str:
+                        raise
                 continue
 
-        if not isinstance(self.adapter, MockAdapter):
+        if isinstance(self.adapter, (AnthropicAdapter, GeminiAdapter)):
             print(f"[LLM CHAT FALLBACK] Falling back to MockAdapter for chat response.")
             return MockAdapter().complete_text(
                 system_prompt=system_prompt,

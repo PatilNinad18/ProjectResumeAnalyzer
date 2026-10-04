@@ -36,14 +36,14 @@ class Settings(BaseSettings):
     sqs_queue_url: str = os.environ.get("SQS_QUEUE_URL", "")
     redis_url: str = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
-    # LLM provider abstraction
-    llm_provider: str = os.environ.get("LLM_PROVIDER", "mock")  # "mock" | "anthropic" | "gemini"
+    # LLM provider abstraction: "ollama" | "mock" | "gemini" | "anthropic"
+    llm_provider: str = os.environ.get("LLM_PROVIDER", "ollama")
     # Leave unset (None) to let LLMService pick the right default model per
     # provider; only set LLM_MODEL if you want to override that.
     llm_model: Optional[str] = os.environ.get("LLM_MODEL") or None
+    ollama_base_url: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
-    # LLM API keys -- paste directly into your local .env, never commit them.
-    # In production, inject via AWS Secrets Manager / your secrets store instead.
+    # LLM API keys (only needed if using cloud providers like gemini/anthropic)
     anthropic_api_key: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")
     gemini_api_key: Optional[str] = os.environ.get("GEMINI_API_KEY")
 
