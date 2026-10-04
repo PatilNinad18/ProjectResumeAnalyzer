@@ -23,6 +23,7 @@ from app.models.db_models import (
     ProcessingStatusEnum,
 )
 from app.services.agent import JDUnderstandingAgent, JDUnderstandingError
+from app.services.document_parser import DocumentParseError, parse_document
 from app.services.json_serializer import to_json_dict, to_json_str
 from app.services.markdown_renderer import render_markdown
 from app.services.markdown_to_json import markdown_to_spec
@@ -50,6 +51,47 @@ def _queue_processing(jd_version_id: str) -> None:
         db.close()
 
 
+@router.get("/jds")
+def list_jds(project_id: Optional[str] = None, db: Session = Depends(get_db)):
+    """List all Job Descriptions with their latest processing status and specification summary."""
+    query = db.query(JobDescription)
+    if project_id:
+        query = query.filter(JobDescription.project_id == project_id)
+    jds = query.order_by(JobDescription.created_at.desc()).all()
+
+    results = []
+    for jd in jds:
+        latest_spec = (
+            db.query(JobSpecificationVersion)
+            .join(JobDescriptionVersion)
+            .filter(JobDescriptionVersion.job_description_id == jd.id)
+            .order_by(JobSpecificationVersion.created_at.desc())
+            .first()
+        )
+        latest_job = (
+            db.query(ProcessingJob)
+            .join(JobDescriptionVersion)
+            .filter(JobDescriptionVersion.job_description_id == jd.id)
+            .order_by(ProcessingJob.created_at.desc())
+            .first()
+        )
+        status_val = "UPLOADED"
+        if latest_job:
+            status_val = latest_job.status.value if hasattr(latest_job.status, "value") else str(latest_job.status)
+
+        results.append({
+            "jd_id": jd.id,
+            "project_id": jd.project_id,
+            "title": jd.title or "Untitled JD",
+            "current_version": jd.current_version,
+            "created_at": jd.created_at.isoformat() if jd.created_at else None,
+            "status": status_val,
+            "has_specification": latest_spec is not None,
+            "specification_version": latest_spec.specification_version if latest_spec else None,
+        })
+    return results
+
+
 @router.post("/jds")
 def upload_jd(
     project_id: str = Form(...),
@@ -58,13 +100,33 @@ def upload_jd(
     text: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
-    if not file and not text:
-        raise HTTPException(400, "Provide either a file or raw text.")
-    raw_text = text or (file.file.read().decode("utf-8") if file else "")
-    if not raw_text.strip():
+    """
+    Upload a Job Description via either raw text or a file (.txt, .pdf, .docx).
+    Both inputs normalize into raw_jd_text before entering the pipeline.
+    """
+    raw_text = ""
+    inferred_title = title
+
+    if text and text.strip():
+        raw_text = text.strip()
+    elif file is not None:
+        try:
+            file_bytes = file.file.read()
+            raw_text = parse_document(file.filename or "upload.txt", file_bytes)
+            if not inferred_title and file.filename:
+                base_name = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
+                inferred_title = base_name.strip()
+        except DocumentParseError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(400, f"Error reading uploaded file: {e}")
+    else:
+        raise HTTPException(400, "Provide either a file (.txt, .pdf, .docx) or raw text.")
+
+    if not raw_text or not raw_text.strip():
         raise HTTPException(400, "JD content is empty.")
 
-    jd = JobDescription(project_id=project_id, title=title, current_version=1)
+    jd = JobDescription(project_id=project_id, title=inferred_title or "Untitled JD", current_version=1)
     db.add(jd)
     db.flush()
 
@@ -80,7 +142,13 @@ def upload_jd(
     db.add(jd_version)
     db.commit()
 
-    return {"jd_id": jd.id, "jd_version_id": jd_version.id, "version": 1, "status": "UPLOADED"}
+    return {
+        "jd_id": jd.id,
+        "jd_version_id": jd_version.id,
+        "version": 1,
+        "title": jd.title,
+        "status": "UPLOADED",
+    }
 
 
 @router.get("/jds/{jd_id}")

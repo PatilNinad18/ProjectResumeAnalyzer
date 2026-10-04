@@ -50,22 +50,30 @@ export default function Home() {
   const [specVersion, setSpecVersion] = useState<number>(1);
   const [contextTab, setContextTab] = useState<"markdown" | "json">("markdown");
 
+  // Selected File for multi-format upload (.txt, .pdf, .docx)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+
   // Agent Creation
   const [agents, setAgents] = useState<CreatedAgent[]>([]);
   const [agentNameInput, setAgentNameInput] = useState("");
   const [createdAgentSuccess, setCreatedAgentSuccess] = useState<string | null>(null);
 
-  // Dedicated Chat State
+  // Dedicated Chat State - strictly isolated per agent/JD id
+  const defaultWelcomeMessage = {
+    id: "welcome",
+    sender: "assistant" as const,
+    text: "Hello! I am your JD AI Assistant. I scan your Job Description Markdown context to answer any queries about requirements, technical skills, experience, remote policies, and role responsibilities. Ask me anything!",
+  };
+
   const [selectedAgentId, setSelectedAgentId] = useState<string>("current");
-  const [chatMessages, setChatMessages] = useState<Array<{ id: string; sender: "user" | "assistant"; text: string }>>([
-    {
-      id: "welcome",
-      sender: "assistant",
-      text: "Hello! I am your JD AI Assistant. I scan your Job Description Markdown context to answer any queries about requirements, technical skills, experience, remote policies, and role responsibilities. Ask me anything!",
-    },
-  ]);
+  const [chatHistories, setChatHistories] = useState<
+    Record<string, Array<{ id: string; sender: "user" | "assistant"; text: string }>>
+  >({});
   const [chatInput, setChatInput] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
+
+  // Current active chat messages scoped to selectedAgentId
+  const currentChatMessages = chatHistories[selectedAgentId] || [defaultWelcomeMessage];
 
   // Settings & Regeneration State
   const [selectedSettingAgentId, setSelectedSettingAgentId] = useState<string | null>(null);
@@ -92,7 +100,7 @@ export default function Home() {
 
   // Derived Workflow Progress Step (1 to 5)
   const isStep1Done = isCompanySaved || Boolean(companyDetails.companyName.trim());
-  const isStep2Done = Boolean(jdText.trim());
+  const isStep2Done = Boolean(jdText.trim()) || Boolean(selectedFile);
   const isStep3Done = status === "READY" && markdown !== null;
   const isStep4Done = isStep3Done;
   const isStep5Done = agents.length > 0;
@@ -106,21 +114,41 @@ export default function Home() {
     setIsCompanySaved(true);
   }
 
+  // Reset workflow form for adding a new JD
+  function handleResetForNewJD() {
+    setJdId(null);
+    setStatus(null);
+    setError(null);
+    setMarkdown(null);
+    setJsonData(null);
+    setJdText("");
+    setSelectedFile(null);
+    setCreatedAgentSuccess(null);
+    setAgentNameInput("");
+    setJobTitle("New Role");
+  }
+
   // Step 3 Analyse Handler
   async function handleAnalyseJD() {
-    if (!jdText.trim()) return;
+    if (!jdText.trim() && !selectedFile) return;
     setError(null);
     setMarkdown(null);
     setJsonData(null);
     setCreatedAgentSuccess(null);
 
     try {
-      const { jd_id } = await uploadJD(
+      const { jd_id, title: returnedTitle } = await uploadJD(
         companyDetails.projectName.trim() || "default-project",
-        jdText,
-        jobTitle.trim() || "Untitled JD"
+        {
+          text: selectedFile ? undefined : jdText,
+          file: selectedFile || undefined,
+        },
+        jobTitle.trim() || undefined
       );
       setJdId(jd_id);
+      if (returnedTitle && (!jobTitle || jobTitle === "New Role")) {
+        setJobTitle(returnedTitle);
+      }
       setStatus("UPLOADED");
       await analyzeJD(jd_id);
       pollStatus(jd_id);
@@ -177,21 +205,33 @@ export default function Home() {
     setAgentNameInput("");
   }
 
-  // File Upload Handler
+  // File Upload Handler (.txt, .pdf, .docx)
   function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = evt.target?.result as string;
-      if (text) {
-        setJdText(text);
-        if (!jobTitle || jobTitle === "Senior Backend Engineer") {
-          setJobTitle(file.name.replace(/\.[^/.]+$/, "").replace(/_/g, " "));
-        }
-      }
-    };
-    reader.readAsText(file);
+
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith(".txt") && !lower.endsWith(".pdf") && !lower.endsWith(".docx")) {
+      setError("Unsupported file format. Please upload .txt, .pdf, or .docx");
+      return;
+    }
+
+    setError(null);
+    setSelectedFile(file);
+
+    const baseName = file.name.replace(/\.[^/.]+$/, "").replace(/_/g, " ").replace(/-/g, " ");
+    setJobTitle(baseName);
+
+    if (lower.endsWith(".txt")) {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const text = evt.target?.result as string;
+        if (text) setJdText(text);
+      };
+      reader.readAsText(file);
+    } else {
+      setJdText(`[Attached file: ${file.name} (${Math.round(file.size / 1024)} KB)]`);
+    }
   }
 
   // Download File Helper
@@ -205,13 +245,19 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
-  // Dedicated Chat Send Handler
+  // Dedicated Chat Send Handler with isolated conversation history per Agent/JD
   async function handleSendChatMessage(textToSend?: string) {
     const q = (textToSend ?? chatInput).trim();
     if (!q || isChatLoading) return;
 
-    const userMsgId = Date.now().toString();
-    setChatMessages((prev) => [...prev, { id: userMsgId, sender: "user", text: q }]);
+    const targetKey = selectedAgentId;
+    const userMsg = { id: Date.now().toString(), sender: "user" as const, text: q };
+
+    setChatHistories((prev) => ({
+      ...prev,
+      [targetKey]: [...(prev[targetKey] || [defaultWelcomeMessage]), userMsg],
+    }));
+
     if (!textToSend) setChatInput("");
     setIsChatLoading(true);
 
@@ -219,8 +265,8 @@ export default function Home() {
       let targetJdId: string | null = null;
       let contextToUse: string | null = null;
 
-      if (selectedAgentId !== "current") {
-        const agent = agents.find((a) => a.id === selectedAgentId);
+      if (targetKey !== "current") {
+        const agent = agents.find((a) => a.id === targetKey);
         if (agent) {
           targetJdId = agent.jdId;
           contextToUse = agent.markdown;
@@ -231,22 +277,32 @@ export default function Home() {
       }
 
       const { answer } = await askJDChatbot(targetJdId, q, contextToUse);
-      setChatMessages((prev) => [
+      const assistantMsg = { id: (Date.now() + 1).toString(), sender: "assistant" as const, text: answer };
+
+      setChatHistories((prev) => ({
         ...prev,
-        { id: (Date.now() + 1).toString(), sender: "assistant", text: answer },
-      ]);
+        [targetKey]: [...(prev[targetKey] || []), assistantMsg],
+      }));
     } catch (e) {
-      setChatMessages((prev) => [
+      const errorMsg = {
+        id: (Date.now() + 1).toString(),
+        sender: "assistant" as const,
+        text: `⚠️ **Error:** ${(e as Error).message}`,
+      };
+      setChatHistories((prev) => ({
         ...prev,
-        {
-          id: (Date.now() + 1).toString(),
-          sender: "assistant",
-          text: `⚠️ **Error:** ${(e as Error).message}`,
-        },
-      ]);
+        [targetKey]: [...(prev[targetKey] || []), errorMsg],
+      }));
     } finally {
       setIsChatLoading(false);
     }
+  }
+
+  function handleClearChatHistory() {
+    setChatHistories((prev) => ({
+      ...prev,
+      [selectedAgentId]: [],
+    }));
   }
 
   // Agent Settings & Context Regeneration Handler
@@ -1355,13 +1411,25 @@ export default function Home() {
 
               {/* Step 2 & 3: Enter / Upload JD & Analyse */}
               <div className="card">
-                <div style={{ display: "flex", justifyContent: "space-between", alignContent: "center", marginBottom: "16px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
                   <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Step 2 & 3: Enter Job Description & Run Analysis</h3>
-                  {status && (
-                    <span className={`status-pill ${statusConfig[status]?.className}`}>
-                      {statusConfig[status]?.icon} {statusConfig[status]?.label}
-                    </span>
-                  )}
+                  <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                    {agents.length > 0 && (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        style={{ fontSize: "0.8rem", padding: "4px 10px" }}
+                        onClick={handleResetForNewJD}
+                      >
+                        ➕ New JD / Agent
+                      </button>
+                    )}
+                    {status && (
+                      <span className={`status-pill ${statusConfig[status]?.className}`}>
+                        {statusConfig[status]?.icon} {statusConfig[status]?.label}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 <div className="form-group" style={{ marginBottom: "16px" }}>
@@ -1379,16 +1447,35 @@ export default function Home() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <label>Job Description Content (Paste or Upload file) *</label>
                     <label className="btn-secondary" style={{ cursor: "pointer", fontSize: "0.8rem", padding: "4px 10px" }}>
-                      📁 Upload .txt File
-                      <input type="file" accept=".txt,.md" onChange={handleFileUpload} style={{ display: "none" }} />
+                      📁 Upload File (.txt, .pdf, .docx)
+                      <input type="file" accept=".txt,.pdf,.docx" onChange={handleFileUpload} style={{ display: "none" }} />
                     </label>
                   </div>
                   <textarea
                     className="textarea"
                     value={jdText}
-                    onChange={(e) => setJdText(e.target.value)}
-                    placeholder="Paste the complete Job Description text here..."
+                    onChange={(e) => {
+                      setJdText(e.target.value);
+                      setSelectedFile(null);
+                    }}
+                    placeholder="Paste the complete Job Description text here, or upload a .txt, .pdf, or .docx file..."
                   />
+                  {selectedFile && (
+                    <div style={{ marginTop: "6px", fontSize: "0.82rem", color: "#5b5ce2", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span>📄 Ready to parse: <strong>{selectedFile.name}</strong> ({(selectedFile.size / 1024).toFixed(1)} KB)</span>
+                      <button
+                        type="button"
+                        className="btn-ghost-dark"
+                        style={{ fontSize: "0.75rem", color: "#f04438", border: "none", padding: "2px 6px" }}
+                        onClick={() => {
+                          setSelectedFile(null);
+                          setJdText("");
+                        }}
+                      >
+                        ✕ Remove File
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {error && <div className="alert-error">❌ {error}</div>}
@@ -1396,7 +1483,7 @@ export default function Home() {
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
                   <button
                     onClick={handleAnalyseJD}
-                    disabled={!jdText.trim() || (status !== null && !TERMINAL_STATUSES.includes(status))}
+                    disabled={(!jdText.trim() && !selectedFile) || (status !== null && !TERMINAL_STATUSES.includes(status))}
                     className="btn-primary"
                   >
                     {status !== null && !TERMINAL_STATUSES.includes(status) ? (
@@ -1524,7 +1611,7 @@ export default function Home() {
                     ))}
                     {!markdown && agents.length === 0 && <option value="none">No Agent Created Yet</option>}
                   </select>
-                  <button className="btn-ghost-dark" onClick={() => setChatMessages([])}>
+                  <button className="btn-ghost-dark" onClick={handleClearChatHistory}>
                     Clear History
                   </button>
                   <button className="chat-close-btn" onClick={() => setActiveTab("workflow")} title="Close">
@@ -1545,7 +1632,7 @@ export default function Home() {
 
               {/* Message Thread */}
               <div className="chat-messages">
-                {chatMessages.map((msg) => (
+                {currentChatMessages.map((msg) => (
                   <div key={msg.id} className={`message-bubble ${msg.sender === "user" ? "message-user" : "message-assistant"}`}>
                     <ReactMarkdown>{msg.text}</ReactMarkdown>
                   </div>
