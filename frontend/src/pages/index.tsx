@@ -1,21 +1,26 @@
 "use client";
 
-import { useState, useEffect } from "react";
+// ============================================================================
+// REPLACE everything in your page.tsx from line 1 down to (but NOT including)
+// the line `return (` with this file's content. Your <style jsx global> CSS and
+// JSX stay exactly as they are (see the 3 small JSX edits listed in my reply).
+// ============================================================================
+
+import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   uploadJD,
   analyzeJD,
-  getAnalysisStatus,
   getMarkdown,
   getJson,
   askJDChatbot,
+  pollUntilDone,
+  TERMINAL_STATUSES,
   ProcessingStatus,
   CompanyDetails,
   CreatedAgent,
+  ChatTurn,
 } from "@/lib/api";
-
-const POLL_INTERVAL_MS = 1500;
-const TERMINAL_STATUSES: ProcessingStatus[] = ["READY", "NEEDS_REVIEW", "FAILED"];
 
 const statusConfig: Record<ProcessingStatus, { label: string; icon: string; className: string }> = {
   UPLOADED: { label: "Uploaded", icon: "↑", className: "status-uploaded" },
@@ -28,19 +33,29 @@ const statusConfig: Record<ProcessingStatus, { label: string; icon: string; clas
   FAILED: { label: "Failed", icon: "×", className: "status-failed" },
 };
 
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+const isAbort = (e: unknown) => (e as Error)?.name === "AbortError";
+
 export default function Home() {
   // Navigation
   const [activeTab, setActiveTab] = useState<"workflow" | "chat" | "settings">("workflow");
 
-  // Linear Workflow State (Step 1 -> 5)
+  // Linear Workflow State (Step 1 -> 5).
+  // NOTE: no fake defaults ("Acme Corp") - they ended up on real agents and confused chat context.
   const [companyDetails, setCompanyDetails] = useState<CompanyDetails>({
-    companyName: "Acme Corp",
-    department: "Engineering",
-    projectName: "Backend Hiring Q3",
+    companyName: "",
+    department: "",
+    projectName: "",
   });
   const [isCompanySaved, setIsCompanySaved] = useState(false);
 
-  const [jobTitle, setJobTitle] = useState("Senior Backend Engineer");
+  const [jobTitle, setJobTitle] = useState("");
   const [jdText, setJdText] = useState("");
   const [jdId, setJdId] = useState<string | null>(null);
   const [status, setStatus] = useState<ProcessingStatus | null>(null);
@@ -53,6 +68,15 @@ export default function Home() {
   // Selected File for multi-format upload (.txt, .pdf, .docx)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
+  // Elapsed-time display while a (slow, local) analysis is running
+  const [analysisStartedAt, setAnalysisStartedAt] = useState<number | null>(null);
+  const [nowTs, setNowTs] = useState<number>(() => Date.now());
+  const elapsedLabel = analysisStartedAt ? `(${formatElapsed(nowTs - analysisStartedAt)})` : "";
+
+  // Cancellation handles for in-flight polling
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const regenAbortRef = useRef<AbortController | null>(null);
+
   // Agent Creation
   const [agents, setAgents] = useState<CreatedAgent[]>([]);
   const [agentNameInput, setAgentNameInput] = useState("");
@@ -62,7 +86,7 @@ export default function Home() {
   const defaultWelcomeMessage = {
     id: "welcome",
     sender: "assistant" as const,
-    text: "Hello! I am your JD AI Assistant. I scan your Job Description Markdown context to answer any queries about requirements, technical skills, experience, remote policies, and role responsibilities. Ask me anything!",
+    text: "Hello! I am your JD AI Assistant. I answer questions about this job description: requirements, technical skills, experience, work policy, and responsibilities. Ask me anything!",
   };
 
   const [selectedAgentId, setSelectedAgentId] = useState<string>("current");
@@ -84,6 +108,22 @@ export default function Home() {
   const [regenStatus, setRegenStatus] = useState<string | null>(null);
   const [regenSuccessMsg, setRegenSuccessMsg] = useState<string | null>(null);
 
+  // Tick once per second only while an analysis is running
+  useEffect(() => {
+    if (analysisStartedAt === null) return;
+    setNowTs(Date.now());
+    const t = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [analysisStartedAt]);
+
+  // Stop any polling when the page unmounts
+  useEffect(() => {
+    return () => {
+      pollAbortRef.current?.abort();
+      regenAbortRef.current?.abort();
+    };
+  }, []);
+
   // Auto-fill edit form when selecting an agent for settings
   useEffect(() => {
     if (selectedSettingAgentId) {
@@ -97,6 +137,13 @@ export default function Home() {
       setSelectedSettingAgentId(agents[0].id);
     }
   }, [selectedSettingAgentId, agents]);
+
+  // If "current" has no analysed context (e.g. after "New JD"), fall back to the newest agent
+  useEffect(() => {
+    if (selectedAgentId === "current" && !markdown && agents.length > 0) {
+      setSelectedAgentId(agents[0].id);
+    }
+  }, [selectedAgentId, markdown, agents]);
 
   // Derived Workflow Progress Step (1 to 5)
   const isStep1Done = isCompanySaved || Boolean(companyDetails.companyName.trim());
@@ -116,6 +163,8 @@ export default function Home() {
 
   // Reset workflow form for adding a new JD
   function handleResetForNewJD() {
+    pollAbortRef.current?.abort();
+    setAnalysisStartedAt(null);
     setJdId(null);
     setStatus(null);
     setError(null);
@@ -125,16 +174,22 @@ export default function Home() {
     setSelectedFile(null);
     setCreatedAgentSuccess(null);
     setAgentNameInput("");
-    setJobTitle("New Role");
+    setJobTitle("");
   }
 
-  // Step 3 Analyse Handler
+  // Step 3 Analyse Handler.
+  // The backend now returns immediately from /analyze (HTTP 202) and we poll for progress,
+  // so the UI shows live status + elapsed time instead of freezing for minutes.
   async function handleAnalyseJD() {
     if (!jdText.trim() && !selectedFile) return;
     setError(null);
     setMarkdown(null);
     setJsonData(null);
     setCreatedAgentSuccess(null);
+
+    pollAbortRef.current?.abort();
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
 
     try {
       const { jd_id, title: returnedTitle } = await uploadJD(
@@ -146,44 +201,36 @@ export default function Home() {
         jobTitle.trim() || undefined
       );
       setJdId(jd_id);
-      if (returnedTitle && (!jobTitle || jobTitle === "New Role")) {
-        setJobTitle(returnedTitle);
-      }
-      setStatus("UPLOADED");
-      await analyzeJD(jd_id);
-      pollStatus(jd_id);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }
+      if (returnedTitle && !jobTitle.trim()) setJobTitle(returnedTitle);
 
-  function pollStatus(id: string) {
-    const interval = setInterval(async () => {
-      try {
-        const { status: s, error_message } = await getAnalysisStatus(id);
-        setStatus(s);
-        if (TERMINAL_STATUSES.includes(s)) {
-          clearInterval(interval);
-          if (s === "FAILED") {
-            setError(error_message || "Processing failed.");
-            return;
-          }
-          const [mdRes, jsonRes] = await Promise.all([getMarkdown(id), getJson(id)]);
-          setMarkdown(mdRes.markdown);
-          setJsonData(jsonRes.json);
-          setSpecVersion(mdRes.specification_version || 1);
-        }
-      } catch (e) {
-        clearInterval(interval);
-        setError((e as Error).message);
+      setStatus("UPLOADED");
+      setAnalysisStartedAt(Date.now());
+      await analyzeJD(jd_id);
+
+      const final = await pollUntilDone(jd_id, { onStatus: setStatus, signal: controller.signal });
+      if (final.status === "FAILED") {
+        setError(final.error_message || "Processing failed.");
+        return;
       }
-    }, POLL_INTERVAL_MS);
+
+      const [mdRes, jsonRes] = await Promise.all([getMarkdown(jd_id), getJson(jd_id)]);
+      setMarkdown(mdRes.markdown);
+      setJsonData(jsonRes.json);
+      setSpecVersion(mdRes.specification_version || 1);
+    } catch (e) {
+      if (isAbort(e)) return;
+      setError((e as Error).message);
+      setStatus("FAILED"); // unlock the Analyse button
+    } finally {
+      if (pollAbortRef.current === controller) setAnalysisStartedAt(null);
+    }
   }
 
   // Step 5 Create Agent Handler
   function handleCreateAgent() {
     if (!markdown || !jdId) return;
-    const name = agentNameInput.trim() || `${jobTitle} Agent`;
+    const name = agentNameInput.trim() || `${jobTitle || "JD"} Agent`;
+    const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const newAgent: CreatedAgent = {
       id: `agent-${Date.now()}`,
       agentName: name,
@@ -195,8 +242,8 @@ export default function Home() {
       jsonData: jsonData || {},
       specificationVersion: specVersion,
       status: "ACTIVE",
-      createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      updatedAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      createdAt: stamp,
+      updatedAt: stamp,
     };
 
     setAgents((prev) => [newAgent, ...prev]);
@@ -213,6 +260,10 @@ export default function Home() {
     const lower = file.name.toLowerCase();
     if (!lower.endsWith(".txt") && !lower.endsWith(".pdf") && !lower.endsWith(".docx")) {
       setError("Unsupported file format. Please upload .txt, .pdf, or .docx");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setError("File is too large (max 5 MB).");
       return;
     }
 
@@ -253,6 +304,12 @@ export default function Home() {
     const targetKey = selectedAgentId;
     const userMsg = { id: Date.now().toString(), sender: "user" as const, text: q };
 
+    // Last few real turns (no welcome text, no error bubbles) give the model follow-up context.
+    const history: ChatTurn[] = (chatHistories[targetKey] || [])
+      .filter((m) => m.id !== "welcome" && !m.text.startsWith("⚠️"))
+      .slice(-6)
+      .map((m) => ({ role: m.sender, content: m.text }));
+
     setChatHistories((prev) => ({
       ...prev,
       [targetKey]: [...(prev[targetKey] || [defaultWelcomeMessage]), userMsg],
@@ -260,6 +317,12 @@ export default function Home() {
 
     if (!textToSend) setChatInput("");
     setIsChatLoading(true);
+
+    const pushAssistant = (text: string) =>
+      setChatHistories((prev) => ({
+        ...prev,
+        [targetKey]: [...(prev[targetKey] || []), { id: (Date.now() + 1).toString(), sender: "assistant" as const, text }],
+      }));
 
     try {
       let targetJdId: string | null = null;
@@ -276,23 +339,15 @@ export default function Home() {
         contextToUse = markdown || (jdText.trim() ? `# Job Description\n\n${jdText}` : null);
       }
 
-      const { answer } = await askJDChatbot(targetJdId, q, contextToUse);
-      const assistantMsg = { id: (Date.now() + 1).toString(), sender: "assistant" as const, text: answer };
+      if (!targetJdId && !contextToUse) {
+        pushAssistant("⚠️ **No JD context yet.** Analyse a job description (or create an agent) first, then ask me about it.");
+        return;
+      }
 
-      setChatHistories((prev) => ({
-        ...prev,
-        [targetKey]: [...(prev[targetKey] || []), assistantMsg],
-      }));
+      const { answer } = await askJDChatbot(targetJdId, q, contextToUse, history);
+      pushAssistant(answer);
     } catch (e) {
-      const errorMsg = {
-        id: (Date.now() + 1).toString(),
-        sender: "assistant" as const,
-        text: `⚠️ **Error:** ${(e as Error).message}`,
-      };
-      setChatHistories((prev) => ({
-        ...prev,
-        [targetKey]: [...(prev[targetKey] || []), errorMsg],
-      }));
+      pushAssistant(`⚠️ **Error:** ${(e as Error).message}`);
     } finally {
       setIsChatLoading(false);
     }
@@ -316,77 +371,67 @@ export default function Home() {
       return;
     }
 
+    regenAbortRef.current?.abort();
+    const controller = new AbortController();
+    regenAbortRef.current = controller;
+
     setIsRegenerating(true);
     setRegenStatus("Uploading updated JD...");
     setRegenSuccessMsg(null);
 
     try {
+      // FIX: uploadJD takes { text, file }, the old code passed a bare string here.
       const { jd_id } = await uploadJD(
         editCompany.projectName || target.companyDetails.projectName || "updated-project",
-        editJdText,
+        { text: editJdText },
         editTitle.trim() || target.title
       );
 
       setRegenStatus("Analyzing updated context...");
       await analyzeJD(jd_id);
 
-      // Poll until ready
-      const interval = setInterval(async () => {
-        try {
-          const { status: s, error_message } = await getAnalysisStatus(jd_id);
-          setRegenStatus(`Status: ${statusConfig[s]?.label || s}`);
+      const final = await pollUntilDone(jd_id, {
+        signal: controller.signal,
+        onStatus: (s) => setRegenStatus(`Status: ${statusConfig[s]?.label || s}`),
+      });
+      if (final.status === "FAILED") {
+        alert(`Regeneration failed: ${final.error_message || "Unknown error"}`);
+        return;
+      }
 
-          if (TERMINAL_STATUSES.includes(s)) {
-            clearInterval(interval);
-            if (s === "FAILED") {
-              alert(`Regeneration failed: ${error_message || "Unknown error"}`);
-              setIsRegenerating(false);
-              return;
-            }
+      const [mdRes, jsonRes] = await Promise.all([getMarkdown(jd_id), getJson(jd_id)]);
 
-            const [mdRes, jsonRes] = await Promise.all([getMarkdown(jd_id), getJson(jd_id)]);
+      // Re-point existing agent in-place
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === selectedSettingAgentId
+            ? {
+                ...a,
+                title: editTitle.trim() || a.title,
+                companyDetails: { ...editCompany },
+                jdId: jd_id,
+                jdText: editJdText,
+                markdown: mdRes.markdown,
+                jsonData: jsonRes.json,
+                specificationVersion: mdRes.specification_version || a.specificationVersion + 1,
+                updatedAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              }
+            : a
+        )
+      );
 
-            // Re-point existing agent in-place
-            setAgents((prev) =>
-              prev.map((a) => {
-                if (a.id === selectedSettingAgentId) {
-                  return {
-                    ...a,
-                    title: editTitle.trim() || a.title,
-                    companyDetails: { ...editCompany },
-                    jdId: jd_id,
-                    jdText: editJdText,
-                    markdown: mdRes.markdown,
-                    jsonData: jsonRes.json,
-                    specificationVersion: mdRes.specification_version || a.specificationVersion + 1,
-                    updatedAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-                  };
-                }
-                return a;
-              })
-            );
+      // Also update current workflow view state if it matches
+      if (target.jdId === jdId) {
+        setMarkdown(mdRes.markdown);
+        setJsonData(jsonRes.json);
+        setJdId(jd_id);
+        setJdText(editJdText);
+      }
 
-            // Also update current workflow view state if it matches
-            if (target.jdId === jdId) {
-              setMarkdown(mdRes.markdown);
-              setJsonData(jsonRes.json);
-              setJdId(jd_id);
-              setJdText(editJdText);
-            }
-
-            setRegenSuccessMsg(`Successfully regenerated context! Agent re-pointed to Specification v${mdRes.specification_version}`);
-            setIsRegenerating(false);
-            setRegenStatus(null);
-          }
-        } catch (err) {
-          clearInterval(interval);
-          alert(`Error polling regeneration: ${(err as Error).message}`);
-          setIsRegenerating(false);
-          setRegenStatus(null);
-        }
-      }, POLL_INTERVAL_MS);
+      setRegenSuccessMsg(`Successfully regenerated context! Agent re-pointed to Specification v${mdRes.specification_version}`);
     } catch (e) {
-      alert(`Regeneration failed: ${(e as Error).message}`);
+      if (!isAbort(e)) alert(`Regeneration failed: ${(e as Error).message}`);
+    } finally {
       setIsRegenerating(false);
       setRegenStatus(null);
     }
