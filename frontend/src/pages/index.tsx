@@ -308,7 +308,7 @@ export default function Home() {
     const history: ChatTurn[] = (chatHistories[targetKey] || [])
       .filter((m) => m.id !== "welcome" && !m.text.startsWith("⚠️"))
       .slice(-6)
-      .map((m) => ({ role: m.sender, content: m.text }));
+      .map((m) => ({ role: m.sender, content: m.text.slice(0, 1000) }));
 
     setChatHistories((prev) => ({
       ...prev,

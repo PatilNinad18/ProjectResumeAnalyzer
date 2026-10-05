@@ -18,7 +18,7 @@ import time
 from typing import Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -344,7 +344,13 @@ def get_versions(jd_id: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
-    content: str = Field(..., max_length=4000)
+    content: str = ""
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _trim(cls, v):
+        # Truncate instead of rejecting: a long earlier answer must never break the next question.
+        return str(v or "")[:1500]
 
 
 class ChatRequest(BaseModel):
