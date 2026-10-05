@@ -1,218 +1,177 @@
 # JD Understanding Agent & Candidate Screening System
 
-A production-grade reference implementation of the **JD Understanding Agent** with integrated **Hybrid RAG (Retrieval-Augmented Generation)** for an AI-powered Candidate Screening and Evaluation System. 
+A production-oriented **JD Understanding Agent** for an AI-powered Candidate Screening and Evaluation System.
 
-It analyzes raw Job Descriptions (JDs), enriches requirement interpretation with domain-specific evaluation standards via hybrid RAG, and produces a **canonical Candidate Evaluation Specification** rendered as both:
-1. `job_specification.md` — A crisp, scannable context document for downstream Candidate-Analysis LLMs.
-2. `job_specification.json` — The complete machine-readable source of truth for backend API consumers, storage, and database persistence.
+The system analyzes Job Descriptions (JDs), enriches requirement interpretation using a local Hybrid RAG pipeline, and produces a canonical **Candidate Evaluation Specification** as:
+
+- `job_specification.md` — concise, human-readable 8-section JD context
+- `job_specification.json` — complete machine-readable canonical specification
+
+The current setup uses **Ollama + Qwen3 4B for local/offline LLM inference**, so JD analysis does not require an external LLM API key.
 
 ---
 
-## 1. System Architecture
+## 1. Architecture
 
-```
-                                  ┌──────────────────────────────┐
-                                  │   Curated Knowledge Base     │
-                                  │   (7 Taxonomy Categories)    │
-                                  └──────────────┬───────────────┘
-                                                 │
-RAW JD (Text or File)                            ▼
-   │                             ┌───────────────────────────────┐
-   ├───▶ Preserve Original JD ──▶│ Atomic Query & Classification │
-   │                             └──────────────┬────────────────┘
-   │                                            │
-   │                                            ▼
-   │                             ┌───────────────────────────────┐
-   │                             │  Hybrid Retrieval & RRF:      │
-   │                             │  - Okapi BM25                 │
-   │                             │  - TF-IDF Cosine Similarity   │
-   │                             │  - Reciprocal Rank Fusion     │
-   │                             └──────────────┬────────────────┘
-   │                                            │
-   │                                            ▼
-   │                             ┌───────────────────────────────┐
-   │                             │  Context Selector & Budgeting │
-   │                             └──────────────┬────────────────┘
-   │                                            │
-   ▼                                            ▼
-┌────────────────────────────────────────────────────────────────┐
-│                   JD Understanding Agent                       │
-│    (Structured LLM prompt with <domain_knowledge_context>)     │
-└───────────────────────────────┬────────────────────────────────┘
-                                │
-                                ▼
-┌────────────────────────────────────────────────────────────────┐
-│   Canonical JobEvaluationSpecification (Pydantic Validated)    │
-├───────────────────────────────┬────────────────────────────────┤
-│       Markdown Renderer       │         JSON Serializer        │
-│               │               │                │               │
-│               ▼               │                ▼               │
-│      job_specification.md     │      job_specification.json    │
-│    (Crisp 8-Section View)     │     (Full Persistent Spec)     │
-└───────────────┬───────────────┴────────────────┬───────────────┘
-                │                                │
-                ▼                                ▼
-┌───────────────────────────────┐ ┌──────────────────────────────┐
-│  Dedicated JD Chat Interface  │ │  Downstream Candidate LLMs   │
-│   (Dual-Context RAG Chat)     │ │  (Resume Evaluator / Agents) │
-└───────────────────────────────┘ └──────────────────────────────┘
+```text
+JD (Text / TXT / PDF / DOCX)
+            |
+            v
+     JD Understanding Agent
+            |
+            +----> Local Hybrid RAG
+            |      BM25 + TF-IDF + RRF
+            |
+            v
+     Ollama / Qwen3 4B
+       Local Inference
+            |
+            v
+   Pydantic Validation
+            |
+       +----+----+
+       |         |
+       v         v
+ job_spec.md  job_spec.json
+       |
+       v
+   JD Chat / Downstream Agents
 ```
 
-Markdown and JSON never drift because both are deterministic representations of the same in-memory Pydantic object (`app/schemas/canonical.py`). A schema-aware `Markdown → JSON` converter (`app/services/markdown_to_json.py`) allows Talent Acquisition (TA) users to edit the rendered Markdown and parse those changes back into the canonical object.
+The raw JD is the authoritative source. RAG provides supporting interpretation knowledge and must not override explicit JD facts.
+
+Both Markdown and JSON are rendered from the same validated `JobEvaluationSpecification`, so they remain synchronized.
 
 ---
 
-## 2. Repository Layout
+## 2. Offline LLM Setup
 
-```
-ProjectResumeAnalyzer/
-├── backend/
-│   ├── app/
-│   │   ├── schemas/
-│   │   │   ├── canonical.py              Canonical Pydantic schema (single source of truth)
-│   │   │   └── rag_schemas.py            RAG schemas (KBDocument, ClassifiedRequirement, etc.)
-│   │   ├── services/
-│   │   │   ├── agent.py                  Orchestration: JD -> RAG -> LLM -> validated canonical spec
-│   │   │   ├── prompt.py                 System & user prompts with RAG context injection
-│   │   │   ├── llm_service.py            Model-agnostic LLMService -> ProviderAdapter (Gemini/Mock/Anthropic)
-│   │   │   ├── mock_extractor.py         Deterministic offline stand-in for LLM (dev/CI testing)
-│   │   │   ├── markdown_renderer.py      Canonical spec -> Crisp 8-Section Markdown (deterministic)
-│   │   │   ├── json_serializer.py        Canonical spec -> JSON serializer
-│   │   │   ├── markdown_to_json.py       Markdown -> Canonical spec (schema-aware parser)
-│   │   │   ├── validation.py             Pydantic + cross-field validation rules
-│   │   │   ├── storage.py                File/S3 storage abstraction
-│   │   │   └── rag/
-│   │   │       ├── __init__.py           Public RAG interface & pipeline runner
-│   │   │       ├── knowledge_base.py     Thread-safe singleton KnowledgeBase loader
-│   │   │       ├── query_generator.py    Atomic clause extractor & heuristic requirement classifier
-│   │   │       ├── retrieval.py          Pure stdlib BM25, TF-IDF Cosine, & RRF Rank Fusion
-│   │   │       ├── context_selector.py   Deduplication, relevance thresholding & prompt formatter
-│   │   │       └── knowledge_base/       Curated domain knowledge JSON documents:
-│   │   │           ├── 1_experience.json
-│   │   │           ├── 2_skills.json
-│   │   │           ├── 3_evidence_evaluation.json
-│   │   │           ├── 4_roles_seniority.json
-│   │   │           ├── 5_domains.json
-│   │   │           ├── 6_job_parameters.json
-│   │   │           └── 7_compliance.json
-│   │   ├── models/db_models.py           SQLAlchemy models (SQLite / PostgreSQL)
-│   │   ├── workers/worker.py             Background worker for asynchronous pipeline execution
-│   │   ├── api/routes.py                 FastAPI endpoints (JD management, analysis, chat)
-│   │   └── main.py                       FastAPI application entrypoint
-│   └── tests/
-│       ├── sample_jds/                   6 realistic test JDs across various domains
-│       ├── test_pipeline.py              Pipeline validation, round-tripping & Markdown tests (16 tests)
-│       └── test_rag.py                   Knowledge base, BM25, TF-IDF, RRF & prompt tests (44 tests)
-├── frontend/
-│   ├── src/
-│   │   ├── pages/index.tsx               Linear workflow, dedicated chat, settings, & spec viewer
-│   │   └── lib/api.ts                    Typed API client for backend communication
-│   └── package.json
-└── samples/
-    ├── job_specification.md              Sample rendered Markdown output
-    └── job_specification.json            Sample canonical JSON output
+### Current configuration
+
+```text
+Provider:      Ollama
+Model:         qwen3:4b
+Inference:     Local
+API Keys:      Not required
+External LLM:  Not required
+RAG:           Local
 ```
 
----
+Ollama downloads the model once and runs inference locally.
 
-## 3. Integrated RAG Engine
+### Install Ollama
 
-The RAG subsystem enriches the LLM prompt with domain knowledge for standardizing ambiguous requirements, evaluation rules, and compliance standards.
+Install Ollama from:
 
-### Key Features
-- **7 Taxonomy Knowledge Categories:** Experience, Technical Skills, Evidence & Evaluation, Roles & Seniority, Domains, Job Parameters, and Compliance.
-- **Hybrid Retrieval:** Combines lexical search (**Okapi BM25**) and semantic term vector search (**Sublinear TF-IDF Cosine Similarity**).
-- **Reciprocal Rank Fusion (RRF):** Fuses rankings ($k=60$) to balance exact term hits and semantic keyword overlap.
-- **Zero Heavy Dependencies:** Implemented using pure Python standard library (`math`, `re`, `collections`, `dataclasses`) without bulky vector database dependencies.
-- **Strict Source of Truth Preservation:** The raw JD is strictly isolated in `<jd_content>`, while retrieved knowledge is injected in `<domain_knowledge_context>` marked as *supporting interpretation guidance only*. RAG never overrides explicit JD facts.
-- **Dual-Context Chat Assistant:** The `/api/jds/{jd_id}/chat` and `/api/chat` endpoints perform dual-context retrieval, combining the JD Markdown context with supporting evaluation knowledge to answer recruiter queries accurately.
+https://ollama.com/
 
----
+Verify:
 
-## 4. Frontend & User Experience
+```bash
+ollama --version
+```
 
-The web interface (`frontend/`) provides an intuitive workflow:
+### Download Qwen3 4B
 
-1. **Linear JD Workflow:**
-   - Step 1: **Company Details** (Company name, department, hiring manager).
-   - Step 2: **Enter / Upload JD** (File upload or paste raw text).
-   - Step 3: **Analyse** (Triggers asynchronous LLM parsing & RAG enrichment).
-   - Step 4: **View / Download JD Context** (Tabbed preview of crisp 8-Section Markdown and full JSON with copy/download options).
-   - Step 5: **Create Agent** (Deploys a configured agent for downstream screening).
-2. **Dedicated JD Chat:**
-   - Full conversational interface separate from configuration setup.
-   - Interactive dropdown to switch between analyzed JDs.
-   - Dual-context conversational assistant for answering role, requirement, and evaluation questions.
-3. **Agent Settings & Context Regeneration:**
-   - Per-agent customizable settings (evaluation strictness, weighting, role level).
-   - One-click context regeneration when JD requirements change.
+```bash
+ollama pull qwen3:4b
+```
 
----
+Verify:
 
-## 5. Target 8-Section Markdown Structure
+```bash
+ollama list
+```
 
-The rendered `job_specification.md` is optimized for downstream candidate screening, strictly outputting **8 scannable sections**:
+Test the model:
 
-1. **Role Overview** — Title, seniority, location/work mode, environment, department, and team context.
-2. **Requirements** — `### Must-Have` (including merged experience) and `### Preferred` qualifications.
-3. **Responsibilities** — Core operational duties and primary expectations.
-4. **Evidence & Evaluation Rules** — Per-requirement evidence expectations, process evaluation rules, UNSCORED conditions, and prohibited inferences.
-5. **JD-Specific Evaluation Parameters** — Non-conventional parameters presented with title, purpose, and expected evidence.
-6. **Ambiguities & Missing Information** — Ambiguous statements (with TA confirmation flags) and missing parameters (with recommended actions).
-7. **Evaluation Priorities** — Priority matrix for downstream candidate evaluation.
-8. **Compliance** — Bias and compliance flags with concerns and recommended actions.
+```bash
+ollama run qwen3:4b
+```
+
+If Qwen responds, the local LLM is ready.
 
 ---
 
-## 6. Getting Started
-
-### Prerequisites
-- Python 3.10+
-- Node.js 18+ and npm
-
-### Backend Setup
+## 3. Backend Setup
 
 ```bash
 cd backend
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
-source .venv/bin/activate
-
-pip install -r requirements.txt
-cp .env.example .env
 ```
 
-#### Environment Variables (`.env`)
+### Windows
+
+```bash
+.venv\Scripts\activate
+```
+
+### Linux/macOS
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Create `.env`:
 
 ```ini
-# Mock provider for offline testing / development (no API key needed):
-LLM_PROVIDER=mock
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3:4b
+OLLAMA_BASE_URL=http://localhost:11434
 
-# Or configure Gemini:
-LLM_PROVIDER=gemini
-LLM_MODEL=gemini-3.6-flash
-GEMINI_API_KEY=your_gemini_api_key_here
-
-# Optional:
 ENABLE_RAG=true
 DATABASE_URL=sqlite:///./jd_agent.db
 ```
 
-#### Running the Backend Server
+No OpenAI, Gemini, Anthropic, or other external API key is required for Ollama mode.
+
+---
+
+## 4. Optional: Custom Ollama Model Directory
+
+If the Ollama models should be stored on another drive, configure `OLLAMA_MODELS`.
+
+Example on Windows:
+
+```powershell
+$env:OLLAMA_MODELS="D:\OllamaModels"
+```
+
+For a permanent configuration, add it through Windows Environment Variables.
+
+Do not commit local model files or machine-specific paths to Git.
+
+---
+
+## 5. Run the Backend
+
+From `backend/`:
 
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-#### Running the Asynchronous Worker (Optional in Dev)
+Backend:
 
-```bash
-python -m app.workers.worker
+```text
+http://127.0.0.1:8000
 ```
 
-### Frontend Setup
+FastAPI docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+---
+
+## 6. Run the Frontend
 
 ```bash
 cd frontend
@@ -220,55 +179,398 @@ npm install
 npm run dev
 ```
 
-Visit `http://localhost:3000` to access the application.
+Open the URL provided by Vite.
 
 ---
 
-## 7. Running Tests
+## 7. End-to-End Workflow
 
-The test suite contains **78 automated tests** across document parsing, multi-JD isolation, RAG components, and end-to-end pipeline execution:
+```text
+1. Create/select JD
+2. Paste JD or upload TXT/PDF/DOCX
+3. Run analysis
+4. Retrieve local RAG context
+5. Generate structured output with Qwen3 4B
+6. Validate with Pydantic
+7. Generate Markdown + JSON
+8. Review JD specification
+9. Chat with the active JD
+10. Use the specification for downstream candidate evaluation
+```
 
-```bash
-cd backend
+The application supports multiple JDs with independent analysis and chat contexts.
 
-# Run the complete test suite (78 tests)
-python -m pytest tests/test_document_parser.py tests/test_multi_jd_isolation.py tests/test_rag.py tests/test_pipeline.py -v
+---
 
-# Run document parsing & multi-JD isolation tests
-python -m pytest tests/test_document_parser.py tests/test_multi_jd_isolation.py -v
+## 8. Supported JD Input
 
-# Run RAG unit tests (44 tests)
-python -m pytest tests/test_rag.py -v
+The system supports:
 
-# Run Pipeline integration tests (16 tests)
-python -m pytest tests/test_pipeline.py -v
+- Raw text
+- `.txt`
+- `.pdf`
+- `.docx`
+
+The original JD remains the primary source of truth throughout the pipeline.
+
+---
+
+## 9. Hybrid RAG
+
+The local RAG system provides supporting knowledge for requirement interpretation, evidence rules, and compliance.
+
+### Knowledge categories
+
+1. Experience
+2. Technical Skills
+3. Evidence & Evaluation
+4. Roles & Seniority
+5. Domains
+6. Job Parameters
+7. Compliance
+
+### Retrieval
+
+```text
+Query
+  |
+  +--> BM25
+  |
+  +--> TF-IDF Cosine
+  |
+  v
+Reciprocal Rank Fusion
+  |
+  v
+Context Selection
+  |
+  v
+Ollama / Qwen3 4B
+```
+
+The RAG implementation is lightweight and local.
+
+---
+
+## 10. Canonical Specification
+
+The canonical schema is:
+
+```text
+backend/app/schemas/canonical.py
+```
+
+It is the single source of truth for the JD Understanding pipeline.
+
+```text
+JobEvaluationSpecification
+        |
+        +--> Markdown Renderer --> job_specification.md
+        |
+        +--> JSON Serializer  --> job_specification.json
+```
+
+The specification contains role information, responsibilities, conventional requirements, preferred requirements, evidence rules, non-conventional parameters, ambiguities, compliance rules, and candidate-analysis instructions.
+
+---
+
+## 11. Generated Markdown
+
+`job_specification.md` is rendered as 8 sections:
+
+1. Role Overview
+2. Requirements
+3. Responsibilities
+4. Evidence & Evaluation Rules
+5. JD-Specific Evaluation Parameters
+6. Ambiguities & Missing Information
+7. Evaluation Priorities
+8. Compliance
+
+It is optimized as context for downstream candidate-analysis agents and the JD chat assistant.
+
+---
+
+## 12. JD Chat
+
+The chat assistant answers questions about the currently active JD.
+
+Examples:
+
+```text
+Which company is hiring?
+
+What are the must-have technical skills?
+
+Is the role remote or onsite?
+
+What experience is required?
+
+What are the main responsibilities?
+
+Which skills are preferred?
+```
+
+Chat uses:
+
+```text
+Active JD Markdown
+       +
+Supporting RAG knowledge
+       |
+       v
+Ollama / Qwen3 4B
+       |
+       v
+Answer
+```
+
+The active JD context must remain authoritative for JD-specific facts.
+
+---
+
+## 13. Multi-JD Support
+
+Each JD maintains its own context:
+
+```text
+JD 1
+├── Raw JD
+├── Analysis
+├── job_specification.md
+├── job_specification.json
+└── Chat context
+
+JD 2
+├── Raw JD
+├── Analysis
+├── job_specification.md
+├── job_specification.json
+└── Chat context
+```
+
+Users can switch between analyzed JDs without mixing their contexts.
+
+---
+
+## 14. API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/jds` | List JDs |
+| POST | `/api/jds` | Create/upload JD |
+| GET | `/api/jds/{jd_id}` | Get JD metadata |
+| POST | `/api/jds/{jd_id}/analyze` | Run JD analysis |
+| GET | `/api/jds/{jd_id}/analysis` | Get analysis status/result |
+| GET | `/api/jds/{jd_id}/markdown` | Get generated Markdown |
+| GET | `/api/jds/{jd_id}/json` | Get canonical JSON |
+| POST | `/api/jds/{jd_id}/markdown-to-json` | Parse edited Markdown |
+| POST | `/api/jds/{jd_id}/json-to-markdown` | Render Markdown |
+| GET | `/api/jds/{jd_id}/versions` | Get specification versions |
+| POST | `/api/jds/{jd_id}/chat` | Chat with a specific JD |
+| POST | `/api/chat` | Chat with supplied Markdown context |
+
+---
+
+## 15. Repository Structure
+
+```text
+ProjectResumeAnalyzer/
+├── backend/
+│   ├── app/
+│   │   ├── schemas/
+│   │   │   ├── canonical.py
+│   │   │   └── rag_schemas.py
+│   │   ├── services/
+│   │   │   ├── agent.py
+│   │   │   ├── prompt.py
+│   │   │   ├── llm_service.py
+│   │   │   ├── markdown_renderer.py
+│   │   │   ├── json_serializer.py
+│   │   │   ├── markdown_to_json.py
+│   │   │   ├── validation.py
+│   │   │   └── rag/
+│   │   ├── models/
+│   │   ├── workers/
+│   │   ├── api/
+│   │   └── main.py
+│   └── tests/
+├── frontend/
+│   ├── src/
+│   └── package.json
+└── samples/
+    ├── job_specification.md
+    └── job_specification.json
 ```
 
 ---
 
-## 8. API Surface
+## 16. Testing
 
-| Method | Path | Description |
-|---|---|---|
-| `GET`  | `/api/jds` | List all Job Descriptions with status & spec summary |
-| `POST` | `/api/jds` | Upload a JD (supports `.txt`, `.pdf`, `.docx` files or raw text) |
-| `GET`  | `/api/jds/{jd_id}` | Retrieve JD metadata and version info |
-| `POST` | `/api/jds/{jd_id}/analyze` | Enqueue JD Understanding & RAG pipeline |
-| `GET`  | `/api/jds/{jd_id}/analysis` | Poll processing status (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`) |
-| `GET`  | `/api/jds/{jd_id}/markdown` | Get rendered 8-section `job_specification.md` |
-| `GET`  | `/api/jds/{jd_id}/json` | Get canonical `job_specification.json` |
-| `POST` | `/api/jds/{jd_id}/markdown-to-json` | Parse edited Markdown back into validated canonical JSON |
-| `POST` | `/api/jds/{jd_id}/json-to-markdown` | Deterministically re-render Markdown from JSON payload |
-| `GET`  | `/api/jds/{jd_id}/versions` | View specification version history |
-| `POST` | `/api/jds/{jd_id}/chat` | Ask questions about a specific JD with dual-context RAG |
-| `POST` | `/api/chat` | Direct chat endpoint with custom Markdown context |
+Run all backend tests:
+
+```bash
+cd backend
+python -m pytest -v
+```
+
+RAG tests:
+
+```bash
+python -m pytest tests/test_rag.py -v
+```
+
+Pipeline tests:
+
+```bash
+python -m pytest tests/test_pipeline.py -v
+```
+
+Before committing JD pipeline changes, verify:
+
+- Ollama is running
+- `qwen3:4b` is installed
+- JD analysis completes
+- Pydantic validation succeeds
+- Markdown is generated
+- JSON is generated
+- Markdown and JSON remain consistent
+- Chat uses the currently selected JD
 
 ---
 
-## 9. Key Design Principles
+## 17. Troubleshooting
 
-- **Canonical Specification as Source of Truth:** `JobEvaluationSpecification` (Pydantic) guarantees synchronization between JSON and Markdown formats.
-- **Fail-Safe RAG Execution:** RAG errors are caught and logged; the extraction pipeline seamlessly falls back to core LLM parsing if retrieval fails.
-- **No Uncontrolled Hallucination:** Anti-fabrication guardrails prevent the LLM from inventing numeric scoring weights or unstated requirements.
-- **Preserved Source Citations:** Verbatim source citations from the original JD are retained in the JSON schema for auditing and traceability.
-- **Prompt Injection Defense:** Raw JD content is quarantined in `<jd_content>` tags to prevent adversarial instruction overrides.
+### Ollama is not running
+
+```bash
+ollama list
+```
+
+Start Ollama and retry.
+
+### Qwen3 4B is missing
+
+```bash
+ollama pull qwen3:4b
+```
+
+### Backend uses the wrong provider
+
+Check `.env`:
+
+```ini
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3:4b
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+Restart Uvicorn after changing `.env`.
+
+### Local inference is slow
+
+Local inference is expected to be slower than cloud inference. GPU acceleration is recommended.
+
+The current development configuration uses:
+
+```text
+Context window:          16,384 tokens
+Maximum generated output: 8,192 tokens
+```
+
+These values can be tuned after measuring quality and latency.
+
+### JSON validation fails
+
+Inspect the Pydantic validation error first. Do not increase the output limit automatically. The canonical schema should remain the source of truth.
+
+---
+
+## 18. Offline Data Flow
+
+```text
+             CLIENT MACHINE
+                  |
+                  v
+             Raw JD
+                  |
+                  v
+          Local FastAPI Backend
+             /                      /                   Local RAG      Ollama
+                       Qwen3 4B
+            \            /
+             \          /
+                  v
+        Canonical Pydantic Spec
+             /                       v             v
+     Markdown             JSON
+            \             /
+             \           /
+                JD Chat
+```
+
+No external LLM API is required in Ollama mode.
+
+---
+
+## 19. Key Design Principles
+
+- **JD is authoritative:** The model must not invent requirements absent from the JD.
+- **RAG is supporting knowledge:** Retrieved knowledge cannot override explicit JD facts.
+- **Canonical schema is the source of truth:** JSON and Markdown are generated from the same validated object.
+- **Offline-first inference:** Ollama + Qwen3 4B keeps LLM inference local.
+- **Multi-JD isolation:** Each JD has independent analysis and chat context.
+- **Traceability:** Requirements retain source information where supported by the schema.
+- **Fail-safe RAG:** RAG failures should not prevent core JD extraction.
+- **Validation before output:** LLM output is validated against the canonical Pydantic schema.
+
+---
+
+## 20. Quick Start
+
+```bash
+# Install Ollama first, then:
+ollama pull qwen3:4b
+ollama run qwen3:4b
+
+# Backend
+cd backend
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+pip install -r requirements.txt
+```
+
+Create `.env`:
+
+```ini
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3:4b
+OLLAMA_BASE_URL=http://localhost:11434
+ENABLE_RAG=true
+DATABASE_URL=sqlite:///./jd_agent.db
+```
+
+Start backend:
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+Start frontend in another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Then upload a JD, run the analysis, review the generated specification, and use the JD chat.
+
+---
+
+## License
+
+Add the project's applicable license here.
