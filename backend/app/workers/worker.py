@@ -41,7 +41,7 @@ settings = get_settings()
 
 def process_job_description_version(db: Session, jd_version_id: str) -> None:
     """The full PARSING -> READY/NEEDS_REVIEW/FAILED pipeline for one JD version."""
-    jd_version = db.query(JobDescriptionVersion).get(jd_version_id)
+    jd_version = db.get(JobDescriptionVersion, jd_version_id)
     if jd_version is None:
         logger.error("JobDescriptionVersion %s not found", jd_version_id)
         return

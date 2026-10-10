@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # provider; only set LLM_MODEL if you want to override that.
     llm_model: Optional[str] = os.environ.get("LLM_MODEL") or None
     ollama_base_url: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_use_schema: bool = os.environ.get("OLLAMA_USE_SCHEMA", "false").lower() in ("true", "1", "yes")
+    ollama_num_ctx: int = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
+    ollama_read_timeout: int = int(os.environ.get("OLLAMA_READ_TIMEOUT", "300"))
 
     # LLM API keys (only needed if using cloud providers like gemini/anthropic)
     anthropic_api_key: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")

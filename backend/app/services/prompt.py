@@ -88,7 +88,7 @@ def build_user_prompt(jd_text: str, rag_context: Optional[str] = None) -> str:
     if rag_context and rag_context.strip():
         parts.append(
             "<domain_knowledge_context>\n"
-            "SUPPORTING INTERPRETATION GUIDANCE ONLY. It must not override or add facts to the JD.\n\n"
+            "SUPPORTING INTERPRETATION GUIDANCE ONLY. NEVER override or add facts to the JD.\n\n"
             f"{rag_context}\n"
             "</domain_knowledge_context>"
         )

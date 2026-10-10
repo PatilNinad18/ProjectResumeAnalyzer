@@ -53,3 +53,7 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Internal tools & scratch
+.archify/
+.archify

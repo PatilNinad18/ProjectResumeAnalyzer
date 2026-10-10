@@ -416,3 +416,357 @@ def chat_direct(request: ChatRequest):
     if not request.markdown or not request.markdown.strip():
         raise HTTPException(400, "Markdown context is empty")
     return {"answer": _answer(request.markdown, request.question, request.history, None)}
+
+
+# ===========================================================================
+# INTERN 2 TRACK — New JD Lifecycle & Clarification Endpoints
+# ===========================================================================
+#
+# These endpoints operate against JDMasterContext (the authoritative domain
+# model). They do not depend on LLM; all logic is deterministic.
+#
+# Routes:
+#   GET  /api/jds/{jd_id}/master-context     - Full JDMasterContext (rich internal state)
+#   GET  /api/jds/{jd_id}/clarifications     - Clarification questions (with optional filter)
+#   POST /api/jds/{jd_id}/clarifications     - Submit TA answer / skip
+#   POST /api/jds/{jd_id}/finalize           - Finalize the JD (revalidation gate)
+#   POST /api/jds/{jd_id}/grounded-chat      - Deterministic grounded Q&A
+# ===========================================================================
+
+from typing import Dict as _Dict, Union as _Union
+
+from app.models.db_models import JDLifecycleStatusEnum as _JDLifecycleStatusEnum
+from app.schemas.master_context import (
+    ConfidenceBand as _ConfidenceBand,
+    ConfidenceBreakdown as _ConfidenceBreakdown,
+    DisjunctionGroup as _DisjunctionGroup,
+    JDMasterContext as _JDMasterContext,
+    JobContextInfo as _JobContextInfo,
+    OriginType as _OriginType,
+    ProvenanceRecord as _ProvenanceRecord,
+    QuestionStatus as _QuestionStatus,
+    RequirementPriority as _RequirementPriority,
+    ResponsibilityContext as _ResponsibilityContext,
+    RoleOverview as _RoleOverview,
+    SourceSpan as _SourceSpan,
+    StructuredRequirement as _StructuredRequirement,
+)
+from app.services.clarification.engine import generate_clarification_questions as _generate_clarification_questions
+from app.services.clarification.updater import (
+    ClarificationUpdateError,
+    submit_answer as _submit_answer,
+    attempt_finalization as _attempt_finalization,
+)
+from app.services.query_engine import answer_query as _answer_query
+
+
+class _ClarificationAnswerRequest(BaseModel):
+    question_key: str = Field(..., description="The stable question_key of the question to answer.")
+    answer_text: str = Field("", description="TA answer text. Required when status=ANSWERED.")
+    status: str = Field("ANSWERED", description="One of: ANSWERED, SKIPPED, EXPLICITLY_UNSPECIFIED")
+    answered_by: str = Field("ta_reviewer", description="User ID of the answerer.")
+    override_record: Optional[Dict] = Field(
+        None,
+        description="Required for BLOCKING+SKIPPED: {authorized_by, override_reason, timestamp}",
+    )
+
+
+class _FinalizeRequest(BaseModel):
+    actor: Optional[str] = Field(None, description="User ID performing the finalization.")
+
+
+class _GroundedChatRequest(BaseModel):
+    question: str = Field(..., description="Natural language question about this JD.")
+
+
+def _master_context_from_canonical(jd_id: str, canonical_dict: dict, raw_jd_text: str = "") -> _JDMasterContext:
+    """Build a JDMasterContext from canonical_json when master context was not pre-populated."""
+    role_dict = canonical_dict.get("role", {}) or {}
+    job_ctx_dict = canonical_dict.get("job_context", {}) or {}
+    conv_reqs = canonical_dict.get("conventional_requirements", {}) or {}
+    loc_dict = conv_reqs.get("location", {}) or {}
+
+    role_overview = _RoleOverview(
+        job_title=role_dict.get("job_title") or "",
+        seniority=role_dict.get("seniority"),
+        department=role_dict.get("department"),
+        location_city=loc_dict.get("city"),
+        location_country=loc_dict.get("country"),
+        work_mode=str(loc_dict.get("work_mode", "UNSPECIFIED")).upper(),
+    )
+    job_context = _JobContextInfo(
+        company_context=job_ctx_dict.get("company_context"),
+        business_context=job_ctx_dict.get("business_context"),
+        environment=job_ctx_dict.get("environment"),
+        team_size=job_ctx_dict.get("team_size"),
+    )
+    reqs: List[_Union[_StructuredRequirement, _DisjunctionGroup]] = []
+    for item in canonical_dict.get("must_have_requirements", []) or []:
+        reqs.append(
+            _StructuredRequirement(
+                text=item,
+                priority=_RequirementPriority.MUST_HAVE,
+                is_mandatory=True,
+                provenance=_ProvenanceRecord(origin_type=_OriginType.EXPLICIT_JD, author="extractor"),
+            )
+        )
+    for item in canonical_dict.get("preferred_requirements", []) or []:
+        reqs.append(
+            _StructuredRequirement(
+                text=item,
+                priority=_RequirementPriority.PREFERRED,
+                is_mandatory=False,
+                provenance=_ProvenanceRecord(origin_type=_OriginType.EXPLICIT_JD, author="extractor"),
+            )
+        )
+    resps: List[_ResponsibilityContext] = []
+    for r in canonical_dict.get("responsibilities", []) or []:
+        statement = r.get("description", "") if isinstance(r, dict) else str(r)
+        if statement:
+            resps.append(
+                _ResponsibilityContext(
+                    raw_statement=statement,
+                    source_span=_SourceSpan(raw_text=statement, section="Responsibilities"),
+                )
+            )
+
+    master = _JDMasterContext(
+        jd_id=jd_id,
+        raw_jd_text=raw_jd_text or "",
+        role_overview=role_overview,
+        job_context=job_context,
+        requirements=reqs,
+        responsibilities=resps,
+    )
+    _generate_clarification_questions(master)
+    return master
+
+
+def _get_spec_version_row(jd_id: str, db: Session) -> JobSpecificationVersion:
+    spec_version = (
+        db.query(JobSpecificationVersion)
+        .join(JobDescriptionVersion, JobSpecificationVersion.job_description_version_id == JobDescriptionVersion.id)
+        .join(JobDescription, JobDescriptionVersion.job_description_id == JobDescription.id)
+        .filter(JobDescription.id == jd_id)
+        .order_by(JobSpecificationVersion.created_at.desc())
+        .first()
+    )
+    if spec_version:
+        return spec_version
+
+    # Check if JobDescriptionVersion exists (uploaded but not analyzed)
+    jd_version = (
+        db.query(JobDescriptionVersion)
+        .join(JobDescription, JobDescriptionVersion.job_description_id == JobDescription.id)
+        .filter(JobDescription.id == jd_id)
+        .order_by(JobDescriptionVersion.version.desc())
+        .first()
+    )
+    if not jd_version:
+        raise HTTPException(404, f"No job description found for jd_id={jd_id!r}.")
+
+    # Auto-initialize initial spec_version and master context
+    import json
+    raw_jd = ""
+    try:
+        raw_jd = storage.get_text(jd_version.s3_raw_key)
+    except Exception:
+        pass
+
+    project_id = "unknown"
+    json_key = build_key(project_id, str(jd_id), jd_version.version, "json")
+    md_key = build_key(project_id, str(jd_id), jd_version.version, "markdown")
+
+    master = _master_context_from_canonical(jd_id, {}, raw_jd)
+    from app.services.projection.canonical_projector import project_to_canonical
+    spec = project_to_canonical(master)
+    json_dict = to_json_dict(spec)
+    markdown = render_markdown(spec)
+
+    storage.put_text(json_key, json.dumps(json_dict), "application/json")
+    storage.put_text(md_key, markdown, "text/markdown")
+
+    spec_version = JobSpecificationVersion(
+        job_description_version_id=jd_version.id,
+        specification_version=1,
+        s3_json_key=json_key,
+        s3_markdown_key=md_key,
+        canonical_json=json_dict,
+        prompt_version="v1",
+        model_version="deterministic-init",
+        master_context_json=master.model_dump(mode="json"),
+        lifecycle_status=_JDLifecycleStatusEnum(master.lifecycle_status.value),
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=0,
+        estimated_cost_usd=0,
+        is_valid=True,
+        needs_review=False,
+    )
+    db.add(spec_version)
+    db.commit()
+    db.refresh(spec_version)
+    return spec_version
+
+
+def _load_master_context(jd_id: str, db: Session) -> _JDMasterContext:
+    spec_version = _get_spec_version_row(jd_id, db)
+    if spec_version.master_context_json:
+        return _JDMasterContext.model_validate(spec_version.master_context_json)
+
+    # Dynamic fallback: build master context from canonical_json
+    raw_jd = ""
+    try:
+        raw_jd = storage.get_text(spec_version.jd_version.s3_raw_key)
+    except Exception:
+        pass
+
+    master = _master_context_from_canonical(jd_id, spec_version.canonical_json or {}, raw_jd)
+    _save_master_context(spec_version, master, db)
+    return master
+
+
+def _save_master_context(spec_version: JobSpecificationVersion, master: _JDMasterContext, db: Session) -> None:
+    spec_version.master_context_json = master.model_dump(mode="json")
+    spec_version.lifecycle_status = _JDLifecycleStatusEnum(master.lifecycle_status.value)
+    db.commit()
+
+
+@router.get("/jds/{jd_id}/master-context", summary="Get full JDMasterContext")
+def get_master_context(jd_id: str, db: Session = Depends(get_db)):
+    """
+    Returns the full JDMasterContext — the authoritative lossless domain model.
+    Includes all requirements, responsibilities, clarification history, audit trail, etc.
+    """
+    master = _load_master_context(jd_id, db)
+    return master.model_dump(mode="json")
+
+
+@router.get("/jds/{jd_id}/clarifications", summary="Get clarification questions")
+def get_clarifications(
+    jd_id: str,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns clarification questions. Optional query params: status, priority.
+    """
+    master = _load_master_context(jd_id, db)
+    questions = master.clarification_history
+    if status:
+        questions = [q for q in questions if q.status.value.upper() == status.upper()]
+    if priority:
+        questions = [q for q in questions if q.priority.value.upper() == priority.upper()]
+    return {
+        "jd_id": jd_id,
+        "lifecycle_status": master.lifecycle_status.value,
+        "total_questions": len(master.clarification_history),
+        "blocking_unresolved": len(master.unresolved_blocking_questions),
+        "is_ready_to_finalize": master.is_ready_to_finalize,
+        "questions": [q.model_dump(mode="json") for q in questions],
+    }
+
+
+@router.post("/jds/{jd_id}/clarifications", summary="Submit TA answer to a clarification question")
+def submit_clarification_answer(
+    jd_id: str,
+    request: _ClarificationAnswerRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Submit a TA answer, skip, or explicit-unspecified for a clarification question.
+    BLOCKING questions cannot be SKIPPED without an override_record.
+    """
+    try:
+        question_status = _QuestionStatus(request.status)
+    except ValueError:
+        raise HTTPException(400, f"Invalid status {request.status!r}. Use ANSWERED, SKIPPED, or EXPLICITLY_UNSPECIFIED.")
+
+    spec_version = _get_spec_version_row(jd_id, db)
+    master = _load_master_context(jd_id, db)
+
+    try:
+        master = _submit_answer(
+            master,
+            question_key=request.question_key,
+            answer_text=request.answer_text,
+            answered_by=request.answered_by,
+            status=question_status,
+            override_record=request.override_record,
+        )
+    except ClarificationUpdateError as exc:
+        raise HTTPException(400, str(exc))
+
+    _save_master_context(spec_version, master, db)
+    return {
+        "jd_id": jd_id,
+        "question_key": request.question_key,
+        "new_status": request.status,
+        "lifecycle_status": master.lifecycle_status.value,
+        "blocking_unresolved": len(master.unresolved_blocking_questions),
+        "is_ready_to_finalize": master.is_ready_to_finalize,
+        "message": f"Answer submitted. Lifecycle is now {master.lifecycle_status.value}.",
+    }
+
+
+@router.post("/jds/{jd_id}/finalize", summary="Finalize the JD")
+def finalize_jd(
+    jd_id: str,
+    request: _FinalizeRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Finalize the JD. Returns HTTP 400 if any BLOCKING question is unresolved.
+    On success, locks lifecycle_status=FINALIZED and seals finalized_at.
+    """
+    spec_version = _get_spec_version_row(jd_id, db)
+    master = _load_master_context(jd_id, db)
+
+    try:
+        master = _attempt_finalization(master, actor=request.actor)
+    except ClarificationUpdateError as exc:
+        raise HTTPException(400, str(exc))
+
+    _save_master_context(spec_version, master, db)
+    return {
+        "jd_id": jd_id,
+        "lifecycle_status": master.lifecycle_status.value,
+        "version": master.version,
+        "finalized_at": master.finalized_at.isoformat() if master.finalized_at else None,
+        "must_have_count": len(master.must_have_requirements),
+        "message": f"JD {jd_id!r} finalized at version {master.version}.",
+    }
+
+
+@router.post("/jds/{jd_id}/grounded-chat", summary="Grounded deterministic Q&A about a JD")
+def grounded_chat(
+    jd_id: str,
+    request: _GroundedChatRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Answer a natural language question about the JD using the deterministic
+    grounded query engine. Zero LLM calls. Zero fabrication.
+    All answers include provenance labels.
+    """
+    if not request.question.strip():
+        raise HTTPException(400, "Question is empty.")
+    master = _load_master_context(jd_id, db)
+    result = _answer_query(master, request.question)
+    return {
+        "jd_id": jd_id,
+        "query": result.query,
+        "query_type": result.query_type,
+        "fabricated": result.fabricated,
+        "summary": result.summary,
+        "answers": [
+            {
+                "text": a.text,
+                "provenance_label": a.provenance_label,
+                "section": a.section,
+                "source_quote": a.source_quote,
+            }
+            for a in result.answers
+        ],
+    }

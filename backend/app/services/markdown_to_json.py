@@ -178,7 +178,6 @@ def markdown_to_spec(md: str) -> MarkdownParseResult:
                     explicit_or_derived=ExplicitOrDerived.EXPLICIT,
                 )
             )
-            must_have_requirements.append(item)
         else:
             must_have_requirements.append(item)
 
@@ -347,7 +346,7 @@ def markdown_to_spec(md: str) -> MarkdownParseResult:
     # ------------------------------------------------------------------ #
     compliance_flags = []
     for b in _bullets(get("compliance")):
-        m = re.match(r'\*\*\"(.+?)\"\*\*\s*—\s*(.+?)\s*\(`(.+?)`\)\.\s*_(.+)_\s*', b)
+        m = re.match(r'\*\*\"(.+?)\"\*\*\s*[-—–\u2014\ufffd]+\s*(.+?)\s*\(`(.+?)`\)\.\s*_(.+)_\s*', b)
         if m:
             flagged_text, concern, category, action = m.groups()
             compliance_flags.append(

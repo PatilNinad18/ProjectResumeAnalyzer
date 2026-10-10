@@ -206,6 +206,8 @@ def _items(builder: Callable[[str], Dict[str, Any]]) -> Callable[[Any], List[Dic
         for it in v:
             if isinstance(it, dict):
                 out.append(it)
+            elif hasattr(it, "model_dump"):
+                out.append(it.model_dump())
             elif isinstance(it, str) and it.strip():
                 out.append(builder(it.strip()))
         return out
