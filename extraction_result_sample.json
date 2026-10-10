@@ -1,0 +1,399 @@
+{
+  "sections": [
+    {
+      "section_id": "sec_1",
+      "title": null,
+      "content": "We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in\nhardware and firmware development. The role is based in our Bangalore lab and requires\nfull-time on-site presence due to the hands-on nature of the work.\n\nRequired skills include proficiency in C and C++ for embedded systems, FPGA programming\nusing VHDL or Verilog, and PCB design with Altium Designer. Experience with JTAG\ndebugging and oscilloscope-based signal analysis is required. Familiarity with ARM\nCortex-M microcontrollers and FreeRTOS is essential.\n\nExperience with MATLAB and Simulink for hardware-in-the-loop simulation is preferred.\nKnowledge of LabVIEW is a plus.\n\nResponsibilities include designing and verifying digital hardware subsystems, writing\nlow-level firmware for real-time control applications, debugging hardware-software\ninterfaces using oscilloscopes and logic analyzers, collaborating with mechanical and\nRF teams, and owning the bring-up of new prototype boards from schematic review\nthrough validation.\n\nThe ideal candidate should be comfortable with ambiguous hardware problems and rapid\nprototyping cycles. Strong communication skills are important for cross-disciplinary\ncollaboration.",
+      "section_type": "general",
+      "line_start": 1,
+      "line_end": 22
+    }
+  ],
+  "requirements": [
+    {
+      "requirement_id": "req_f918a663",
+      "text": "We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in\nhardware and firmware development",
+      "clause_type": "RESPONSIBILITY",
+      "priority": "CONTEXTUAL",
+      "matched_entities": [
+        "skill_embedded",
+        "skill_firmware",
+        "role_embedded_engineer",
+        "domain_embedded"
+      ],
+      "entity_confidence": {
+        "skill_embedded": 0.95,
+        "skill_firmware": 0.95,
+        "role_embedded_engineer": 0.95,
+        "domain_embedded": 0.9
+      },
+      "source": {
+        "text": "We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in\nhardware and firmware development",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": true
+    },
+    {
+      "requirement_id": "req_050c7fd3",
+      "text": "The role is based in our Bangalore lab and requires\nfull-time on-site presence due to the hands-on nature of the work",
+      "clause_type": "AMBIGUOUS",
+      "priority": "CONTEXTUAL",
+      "matched_entities": [],
+      "entity_confidence": {},
+      "source": {
+        "text": "The role is based in our Bangalore lab and requires\nfull-time on-site presence due to the hands-on nature of the work",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_defadbb5",
+      "text": "Required skills include proficiency in C and C++ for embedded systems",
+      "clause_type": "REQUIREMENT",
+      "priority": "MANDATORY",
+      "matched_entities": [
+        "lang_c",
+        "skill_embedded",
+        "domain_embedded",
+        "lang_cpp"
+      ],
+      "entity_confidence": {
+        "lang_c": 0.95,
+        "skill_embedded": 0.95,
+        "domain_embedded": 0.9,
+        "lang_cpp": 0.75
+      },
+      "source": {
+        "text": "Required skills include proficiency in C and C++ for embedded systems",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_8f517712",
+      "text": "FPGA programming\nusing VHDL or Verilog",
+      "clause_type": "AMBIGUOUS",
+      "priority": "CONTEXTUAL",
+      "matched_entities": [
+        "lang_vhdl",
+        "lang_verilog",
+        "skill_fpga"
+      ],
+      "entity_confidence": {
+        "lang_vhdl": 0.95,
+        "lang_verilog": 0.95,
+        "skill_fpga": 0.95
+      },
+      "source": {
+        "text": "FPGA programming\nusing VHDL or Verilog",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_12d36c29",
+      "text": "and PCB design with Altium Designer",
+      "clause_type": "RESPONSIBILITY",
+      "priority": "CONTEXTUAL",
+      "matched_entities": [
+        "tool_altium",
+        "skill_pcb_design"
+      ],
+      "entity_confidence": {
+        "tool_altium": 0.95,
+        "skill_pcb_design": 0.95
+      },
+      "source": {
+        "text": "and PCB design with Altium Designer",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_d439de1b",
+      "text": "Experience with JTAG\ndebugging and oscilloscope-based signal analysis is required",
+      "clause_type": "REQUIREMENT",
+      "priority": "MANDATORY",
+      "matched_entities": [
+        "skill_jtag"
+      ],
+      "entity_confidence": {
+        "skill_jtag": 0.95
+      },
+      "source": {
+        "text": "Experience with JTAG\ndebugging and oscilloscope-based signal analysis is required",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_7b3cf926",
+      "text": "Familiarity with ARM\nCortex-M microcontrollers and FreeRTOS is essential",
+      "clause_type": "AMBIGUOUS",
+      "priority": "MANDATORY",
+      "matched_entities": [
+        "fw_freertos",
+        "skill_arm_cortex"
+      ],
+      "entity_confidence": {
+        "fw_freertos": 0.95,
+        "skill_arm_cortex": 0.95
+      },
+      "source": {
+        "text": "Familiarity with ARM\nCortex-M microcontrollers and FreeRTOS is essential",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": true
+    },
+    {
+      "requirement_id": "req_73cd7d8e",
+      "text": "Experience with MATLAB and Simulink for hardware-in-the-loop simulation is preferred",
+      "clause_type": "REQUIREMENT",
+      "priority": "PREFERRED",
+      "matched_entities": [
+        "tool_matlab",
+        "tool_simulink"
+      ],
+      "entity_confidence": {
+        "tool_matlab": 0.95,
+        "tool_simulink": 0.95
+      },
+      "source": {
+        "text": "Experience with MATLAB and Simulink for hardware-in-the-loop simulation is preferred",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_e12f6e60",
+      "text": "Knowledge of LabVIEW is a plus",
+      "clause_type": "REQUIREMENT",
+      "priority": "PREFERRED",
+      "matched_entities": [
+        "tool_labview"
+      ],
+      "entity_confidence": {
+        "tool_labview": 0.95
+      },
+      "source": {
+        "text": "Knowledge of LabVIEW is a plus",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_5ba9cf50",
+      "text": "Responsibilities include designing and verifying digital hardware subsystems, writing\nlow-level firmware for real-time control applications, debugging hardware-software\ninterfaces using oscilloscopes and logic analyzers, collaborating with mechanical and\nRF teams",
+      "clause_type": "RESPONSIBILITY",
+      "priority": "CONTEXTUAL",
+      "matched_entities": [
+        "skill_firmware"
+      ],
+      "entity_confidence": {
+        "skill_firmware": 0.9
+      },
+      "source": {
+        "text": "Responsibilities include designing and verifying digital hardware subsystems, writing\nlow-level firmware for real-time control applications, debugging hardware-software\ninterfaces using oscilloscopes and logic analyzers, collaborating with mechanical and\nRF teams",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_2af88935",
+      "text": "and owning the bring-up of new prototype boards from schematic review\nthrough validation",
+      "clause_type": "RESPONSIBILITY",
+      "priority": "CONTEXTUAL",
+      "matched_entities": [],
+      "entity_confidence": {},
+      "source": {
+        "text": "and owning the bring-up of new prototype boards from schematic review\nthrough validation",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_e16baa7c",
+      "text": "The ideal candidate should be comfortable with ambiguous hardware problems and rapid\nprototyping cycles",
+      "clause_type": "AMBIGUOUS",
+      "priority": "PREFERRED",
+      "matched_entities": [],
+      "entity_confidence": {},
+      "source": {
+        "text": "The ideal candidate should be comfortable with ambiguous hardware problems and rapid\nprototyping cycles",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    },
+    {
+      "requirement_id": "req_14c4cc17",
+      "text": "Strong communication skills are important for cross-disciplinary\ncollaboration",
+      "clause_type": "AMBIGUOUS",
+      "priority": "CONTEXTUAL",
+      "matched_entities": [],
+      "entity_confidence": {},
+      "source": {
+        "text": "Strong communication skills are important for cross-disciplinary\ncollaboration",
+        "section": "general",
+        "line_number": 1
+      },
+      "is_explicit": true,
+      "requires_clarification": false
+    }
+  ],
+  "disjunction_groups": [
+    {
+      "group_id": "disj_33b8b799",
+      "operator": "OR",
+      "requirements": [
+        "req_8f517712_opt_912f",
+        "req_8f517712_opt_e396"
+      ],
+      "interpretation": "One of: FPGA programming\nusing VHDL or Verilog"
+    }
+  ],
+  "responsibilities": [
+    {
+      "responsibility_id": "req_f918a663",
+      "description": "We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in\nhardware and firmware development",
+      "tier": "PRIMARY",
+      "required_capabilities": [
+        "req_defadbb5"
+      ],
+      "rationale": "Classified as PRIMARY: core job function with clear action verbs. Requires capabilities: C, Embedded Systems, Embedded Systems Engineering",
+      "source": {
+        "text": "We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in\nhardware and firmware development",
+        "section": "general",
+        "line_number": 1
+      },
+      "interpretation_confidence": "HIGH"
+    },
+    {
+      "responsibility_id": "req_12d36c29",
+      "description": "and PCB design with Altium Designer",
+      "tier": "PRIMARY",
+      "required_capabilities": [],
+      "rationale": "Classified as PRIMARY: core job function with clear action verbs. No specific technical capabilities identified",
+      "source": {
+        "text": "and PCB design with Altium Designer",
+        "section": "general",
+        "line_number": 1
+      },
+      "interpretation_confidence": "HIGH"
+    },
+    {
+      "responsibility_id": "req_5ba9cf50",
+      "description": "Responsibilities include designing and verifying digital hardware subsystems, writing\nlow-level firmware for real-time control applications, debugging hardware-software\ninterfaces using oscilloscopes and logic analyzers, collaborating with mechanical and\nRF teams",
+      "tier": "PRIMARY",
+      "required_capabilities": [],
+      "rationale": "Classified as PRIMARY: core job function with clear action verbs. No specific technical capabilities identified",
+      "source": {
+        "text": "Responsibilities include designing and verifying digital hardware subsystems, writing\nlow-level firmware for real-time control applications, debugging hardware-software\ninterfaces using oscilloscopes and logic analyzers, collaborating with mechanical and\nRF teams",
+        "section": "general",
+        "line_number": 1
+      },
+      "interpretation_confidence": "HIGH"
+    },
+    {
+      "responsibility_id": "req_2af88935",
+      "description": "and owning the bring-up of new prototype boards from schematic review\nthrough validation",
+      "tier": "PRIMARY",
+      "required_capabilities": [],
+      "rationale": "Classified as PRIMARY: core job function with clear action verbs. No specific technical capabilities identified",
+      "source": {
+        "text": "and owning the bring-up of new prototype boards from schematic review\nthrough validation",
+        "section": "general",
+        "line_number": 1
+      },
+      "interpretation_confidence": "MEDIUM"
+    }
+  ],
+  "parameters": [
+    {
+      "parameter_name": "location",
+      "value": "our Bangalore lab and requires",
+      "category": "location",
+      "is_explicit": true,
+      "source": {
+        "text": "based in our Bangalore lab and requires",
+        "section": "metadata",
+        "line_number": null
+      }
+    },
+    {
+      "parameter_name": "work_mode",
+      "value": "onsite",
+      "category": "work_mode",
+      "is_explicit": true,
+      "source": {
+        "text": "on-site",
+        "section": "metadata",
+        "line_number": null
+      }
+    },
+    {
+      "parameter_name": "min_experience_years",
+      "value": "6",
+      "category": "experience",
+      "is_explicit": true,
+      "source": {
+        "text": "6+ years of experience",
+        "section": "experience",
+        "line_number": null
+      }
+    }
+  ],
+  "ambiguities": [
+    {
+      "ambiguity_id": "amb_e450bec2",
+      "text": "We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in\nhardware and firmware development",
+      "reason": "Experience range unclear (e.g., \"5+ years\")",
+      "suggested_interpretations": [],
+      "requires_ta_confirmation": true,
+      "source": {
+        "text": "We are looking for a Senior Embedded Systems Engineer with 6+ years of experience in\nhardware and firmware development",
+        "section": "general",
+        "line_number": 1
+      }
+    },
+    {
+      "ambiguity_id": "amb_345f7d02",
+      "text": "Familiarity with ARM\nCortex-M microcontrollers and FreeRTOS is essential",
+      "reason": "Vague proficiency level",
+      "suggested_interpretations": [],
+      "requires_ta_confirmation": true,
+      "source": {
+        "text": "Familiarity with ARM\nCortex-M microcontrollers and FreeRTOS is essential",
+        "section": "general",
+        "line_number": 1
+      }
+    }
+  ],
+  "extraction_mode": "deterministic",
+  "llm_enabled": false,
+  "ekg_entities_matched": 20,
+  "ekg_coverage_score": 0.6923076923076923
+}
