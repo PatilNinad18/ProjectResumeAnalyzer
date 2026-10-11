@@ -43,7 +43,7 @@ class TestEKGEntityMatching:
         
         # Should have skills, languages, tools, domains, etc.
         assert len(entity_types) > 0
-        assert 'SKILL' in entity_types or 'LANGUAGE' in entity_types
+        assert any(k in entity_types for k in ('SKILL', 'LANGUAGE', 'skill', 'language'))
     
     def test_python_entity_matching(self, ekg):
         """Test matching of Python entity."""

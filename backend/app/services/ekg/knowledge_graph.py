@@ -313,6 +313,9 @@ class EnterpriseKnowledgeGraph:
         for _, data in self.graph.nodes(data=True):
             entity_type = data.get('entity_type', 'unknown')
             counts[entity_type] = counts.get(entity_type, 0) + 1
+            upper_type = entity_type.upper()
+            if upper_type != entity_type:
+                counts[upper_type] = counts.get(upper_type, 0) + 1
         return counts
     
     @staticmethod

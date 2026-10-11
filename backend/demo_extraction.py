@@ -8,6 +8,10 @@ import json
 import sys
 from pathlib import Path
 
+# Configure utf-8 encoding for console output on Windows
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 # Add backend to path
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))

@@ -208,10 +208,16 @@ class TestDeterministicOfflineOperation:
 class TestEndToEndSampleJDExtraction:
     """Test full extraction pipeline on realistic sample JDs."""
 
+    def _read_sample_jd(self, filename: str) -> str:
+        from pathlib import Path
+        p = Path(__file__).parent / "sample_jds" / filename
+        if not p.exists():
+            p = Path("backend/tests/sample_jds") / filename
+        return p.read_text(encoding="utf-8")
+
     def test_technical_engineering_sample_extraction(self):
         """Extract technical engineering job description."""
-        with open("backend/tests/sample_jds/01_technical_engineering.txt") as f:
-            jd_text = f.read()
+        jd_text = self._read_sample_jd("01_technical_engineering.txt")
         
         pipeline = ExtractionPipeline()
         result = pipeline.process_jd(jd_text)
@@ -232,8 +238,7 @@ class TestEndToEndSampleJDExtraction:
 
     def test_hardware_engineering_sample_extraction(self):
         """Extract hardware engineering job description."""
-        with open("backend/tests/sample_jds/06_hardware_engineering.txt") as f:
-            jd_text = f.read()
+        jd_text = self._read_sample_jd("06_hardware_engineering.txt")
         
         pipeline = ExtractionPipeline()
         result = pipeline.process_jd(jd_text)
@@ -250,8 +255,7 @@ class TestEndToEndSampleJDExtraction:
 
     def test_senior_engineering_sample_extraction(self):
         """Extract senior engineering job description."""
-        with open("backend/tests/sample_jds/02_senior_engineering.txt") as f:
-            jd_text = f.read()
+        jd_text = self._read_sample_jd("02_senior_engineering.txt")
         
         pipeline = ExtractionPipeline()
         result = pipeline.process_jd(jd_text)

@@ -7,8 +7,9 @@ Invariants enforced here:
      always tracked independently.
   3. Lossless Internal State: This schema stores ALL internal state (graph
      bindings, Q&A audit history, clarification loop). It is never lossy.
-  4. Intern 1 Boundary: Intern 1 must produce StructuredRequirement,
-     DisjunctionGroup, and ResponsibilityContext conforming to this file.
+  4. Intern 1 Boundary: Intern 1 produces extraction AST (StructuredRequirement,
+     DisjunctionGroup, ResponsibilityContext, ExtractedParameter, DetectedAmbiguity,
+     ExtractionResult) conforming to this file.
      Everything else (clarification, projection, finalization) is Intern 2.
 
 IMPORTANT: Do not import from canonical.py here. This schema is upstream.
@@ -62,10 +63,12 @@ class OriginType(str, Enum):
 
 
 class RequirementPriority(str, Enum):
-    """Atomic requirement classification."""
+    """Atomic requirement classification (supports both Intern 1 & Intern 2 naming)."""
     MUST_HAVE = "MUST_HAVE"
+    MANDATORY = "MANDATORY"              # Intern 1 synonym for MUST_HAVE
     PREFERRED = "PREFERRED"
     INFORMATIONAL = "INFORMATIONAL"
+    CONTEXTUAL = "CONTEXTUAL"            # Intern 1 synonym for INFORMATIONAL/UNRESOLVED
     UNRESOLVED = "UNRESOLVED"            # Conservative fallback for ambiguous phrasing
 
 
@@ -81,6 +84,40 @@ class ConfidenceBand(str, Enum):
     MEDIUM = "MEDIUM"
     LOW = "LOW"
     UNKNOWN = "UNKNOWN"
+
+
+# ConfidenceLevel is an alias/enum matching ConfidenceBand for Intern 1 compatibility
+class ConfidenceLevel(str, Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    UNKNOWN = "UNKNOWN"
+
+
+class ClauseType(str, Enum):
+    """Syntactic/semantic classification of a JD clause (Intern 1)."""
+    REQUIREMENT = "REQUIREMENT"
+    RESPONSIBILITY = "RESPONSIBILITY"
+    CONTEXT = "CONTEXT"
+    METADATA = "METADATA"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class ResponsibilityTier(str, Enum):
+    """Three-tier hierarchy for extracted responsibilities (Intern 1)."""
+    PRIMARY = "PRIMARY"
+    SECONDARY = "SECONDARY"
+    SITUATIONAL = "SITUATIONAL"
+
+
+class EKGEntityType(str, Enum):
+    """Ontology categories for the Enterprise Knowledge Graph (Intern 1)."""
+    LANGUAGE = "language"
+    FRAMEWORK = "framework"
+    TOOL = "tool"
+    SKILL = "skill"
+    DOMAIN = "domain"
+    ROLE = "role"
 
 
 class InterpretationStatus(str, Enum):
@@ -123,12 +160,25 @@ class _Base(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
 
+class SourceReference(_Base):
+    """Pointer to source evidence used across Intern 1 extraction components."""
+    text: str = ""
+    section: Optional[str] = None
+    line_number: Optional[int] = None
+    span_start: Optional[int] = None
+    span_end: Optional[int] = None
+
+
 class SourceSpan(_Base):
-    """Precise pointer back to the verbatim JD text."""
+    """Precise pointer back to the verbatim JD text (Intern 2)."""
     raw_text: str = Field("", description="Verbatim text from the JD that produced this datum.")
     section: Optional[str] = Field(None, description="JD section (e.g. 'Requirements', 'Responsibilities').")
     start_char: Optional[int] = Field(None, description="Character offset of the start of the span.")
     end_char: Optional[int] = Field(None, description="Character offset of the end of the span (exclusive).")
+
+    @property
+    def text(self) -> str:
+        return self.raw_text
 
 
 class ProvenanceRecord(_Base):
@@ -136,7 +186,7 @@ class ProvenanceRecord(_Base):
     Immutable audit trail entry for a single datum.
     Every requirement, interpretation, and clarification answer must carry one.
     """
-    origin_type: OriginType
+    origin_type: OriginType = OriginType.EXPLICIT_JD
     source_span: Optional[SourceSpan] = None
     author: Optional[str] = Field(None, description="User ID, system name, or LLM model identifier.")
     timestamp: datetime = Field(default_factory=_utcnow)
@@ -158,84 +208,43 @@ class ConfidenceBreakdown(_Base):
     )
 
 
-# ---------------------------------------------------------------------------
-# Extraction-Layer Models (Intern 1 produces these)
-# ---------------------------------------------------------------------------
-
-class StructuredRequirement(_Base):
-    """
-    INTERN 1 BOUNDARY: Intern 1's extraction layer must produce instances of
-    this class for every atomic requirement identified in the JD.
-
-    One StructuredRequirement = one atomic requirement clause (no compound clauses).
-    Experience years are scoped to the DOMAIN they were stated with; skills
-    mentioned in the same clause receive min_years=None unless stated explicitly.
-    """
-    id: str = Field(default_factory=_new_id)
-    text: str = Field(..., description="Clean atomic requirement text, one concept per instance.")
-    priority: RequirementPriority = RequirementPriority.UNRESOLVED
-    confidence: ConfidenceBreakdown = Field(default_factory=ConfidenceBreakdown)
-    provenance: ProvenanceRecord
-    ekg_node_ids: List[str] = Field(
-        default_factory=list,
-        description="EKG node IDs matched to entities in this requirement.",
-    )
-    is_mandatory: bool = Field(
-        False,
-        description=(
-            "True ONLY when origin_type is EXPLICIT_JD or TA_CONFIRMED. "
-            "EKG_DERIVED and LLM_HYPOTHESIS origins MUST always be False here. "
-            "This is the Traceable Origin Invariant."
-        ),
-    )
-    # Structured experience scoping
-    min_years: Optional[float] = Field(
-        None,
-        description=(
-            "Minimum years required for THIS specific requirement's domain. "
-            "E.g. '5+ years backend' sets min_years=5.0 on the backend requirement only; "
-            "Python mentioned in the same clause gets min_years=None."
-        ),
-    )
-    max_years: Optional[float] = None
-    negated: bool = Field(
-        False,
-        description="True when the clause contains negation scoping this requirement (e.g. 'Python is not mandatory').",
-    )
-
-    @model_validator(mode="after")
-    def _enforce_traceable_origin_invariant(self) -> "StructuredRequirement":
-        """
-        Traceable Origin Invariant check:
-        EKG_DERIVED and LLM_HYPOTHESIS sources must NEVER mark is_mandatory=True.
-        """
-        unsafe_origins = {OriginType.EKG_DERIVED, OriginType.LLM_HYPOTHESIS}
-        if self.provenance.origin_type in unsafe_origins and self.is_mandatory:
-            raise ValueError(
-                f"Traceable Origin Invariant violated: origin_type={self.provenance.origin_type!r} "
-                f"cannot set is_mandatory=True. Only EXPLICIT_JD or TA_CONFIRMED may."
-            )
-        return self
+class EKGEntity(_Base):
+    """A node in the Enterprise Knowledge Graph (Intern 1)."""
+    entity_id: str
+    name: str
+    entity_type: EKGEntityType
+    aliases: List[str] = Field(default_factory=list)
+    source: str = "seed_data_v1"
+    confidence: float = 1.0
 
 
-class DisjunctionGroup(_Base):
-    """
-    INTERN 1 BOUNDARY: Represents a boolean logic group (OR/AND).
-    E.g. '(Verilog OR VHDL)' is preserved as a DisjunctionGroup with operator=OR,
-    NOT flattened into two separate StructuredRequirements.
-    """
-    id: str = Field(default_factory=_new_id)
-    operator: LogicOperator
-    requirements: List[Union[StructuredRequirement, "DisjunctionGroup"]] = Field(
-        ...,
-        description="Members of the logic group. May be nested DisjunctionGroups.",
-        min_length=2,
-    )
-    provenance: ProvenanceRecord
+class JDSection(_Base):
+    """A structural section of the JD extracted deterministically (Intern 1)."""
+    section_id: str
+    title: Optional[str] = None
+    content: str = ""
+    section_type: str = "general"
+    line_start: int = 1
+    line_end: int = 1
 
 
-# Required for the self-referential model
-DisjunctionGroup.model_rebuild()
+class ExtractedParameter(_Base):
+    """A scalar job parameter extracted from JD text (Intern 1)."""
+    parameter_name: str
+    value: Any
+    category: str = "general"
+    is_explicit: bool = True
+    source: Optional[Union[SourceReference, SourceSpan]] = None
+
+
+class DetectedAmbiguity(_Base):
+    """A detected ambiguity requiring TA/HR clarification (Intern 1)."""
+    ambiguity_id: str
+    text: str
+    reason: str
+    suggested_interpretations: List[str] = Field(default_factory=list)
+    requires_ta_confirmation: bool = True
+    source: Optional[Union[SourceReference, SourceSpan]] = None
 
 
 class MatchedEntity(_Base):
@@ -255,41 +264,329 @@ class GraphActivity(_Base):
     confidence: ConfidenceBand = ConfidenceBand.MEDIUM
 
 
-class ResponsibilityContext(_Base):
-    """
-    INTERN 1 BOUNDARY: One responsibility statement from the JD with full
-    3-tier interpretation context.
+# ---------------------------------------------------------------------------
+# Extraction-Layer Models (Unifying Intern 1 & Intern 2)
+# ---------------------------------------------------------------------------
 
-    Tier 1 (Deterministic): matched_entities and graph_derived_activities — from EKG.
-    Tier 2 (Optional LLM): llm_hypothesis — disabled by default.
-    Tier 3 (TA Confirmed): interpretation_status upgraded to TA_CONFIRMED.
+class StructuredRequirement(_Base):
+    """
+    Authoritative requirement model.
+    Satisfies both Intern 1's extraction pipeline output and Intern 2's master domain model.
     """
     id: str = Field(default_factory=_new_id)
-    raw_statement: str = Field(..., description="Verbatim responsibility statement from the JD.")
-    source_span: SourceSpan
-
-    # Tier 1 — EKG outputs (Intern 1 populates these)
-    matched_entities: List[MatchedEntity] = Field(default_factory=list)
-    graph_derived_activities: List[GraphActivity] = Field(
+    text: str = Field(..., description="Clean atomic requirement text, one concept per instance.")
+    clause_type: Optional[ClauseType] = None
+    priority: RequirementPriority = RequirementPriority.UNRESOLVED
+    confidence: ConfidenceBreakdown = Field(default_factory=ConfidenceBreakdown)
+    provenance: ProvenanceRecord = Field(default_factory=ProvenanceRecord)
+    ekg_node_ids: List[str] = Field(
         default_factory=list,
+        description="EKG node IDs matched to entities in this requirement.",
+    )
+    matched_entities: List[str] = Field(default_factory=list)
+    entity_confidence: Dict[str, float] = Field(default_factory=dict)
+    source: Optional[Union[SourceReference, SourceSpan]] = None
+    is_explicit: bool = True
+    requires_clarification: bool = False
+    is_mandatory: bool = Field(
+        False,
         description=(
-            "EKG-derived activities implied by this responsibility. "
-            "These are NEVER copied into must_have_requirements; "
-            "they are context only."
+            "True ONLY when origin_type is EXPLICIT_JD or TA_CONFIRMED. "
+            "EKG_DERIVED and LLM_HYPOTHESIS origins MUST always be False here. "
+            "This is the Traceable Origin Invariant."
         ),
     )
+    min_years: Optional[float] = None
+    max_years: Optional[float] = None
+    negated: bool = False
 
-    # Tier 2 — LLM hypothesis (disabled by default, Intern 1 populates if enabled)
-    llm_hypothesis: Optional[str] = Field(
-        None,
-        description="LLM-suggested interpretation. Only present when ENABLE_LLM_INTERPRETATION=True.",
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_intern_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Map requirement_id to id
+            if "requirement_id" in data and "id" not in data:
+                data["id"] = data["requirement_id"]
+
+            # Map matched_entities to ekg_node_ids
+            if "matched_entities" in data and ("ekg_node_ids" not in data or not data["ekg_node_ids"]):
+                data["ekg_node_ids"] = list(data["matched_entities"])
+
+            # Map ekg_node_ids to matched_entities
+            if "ekg_node_ids" in data and ("matched_entities" not in data or not data["matched_entities"]):
+                data["matched_entities"] = list(data["ekg_node_ids"])
+
+            # Build provenance from source if provenance is missing
+            if "provenance" not in data or data["provenance"] is None:
+                src = data.get("source")
+                is_explicit = data.get("is_explicit", True)
+                origin = OriginType.EXPLICIT_JD if is_explicit else OriginType.EKG_DERIVED
+                source_span = None
+                if src:
+                    if isinstance(src, dict):
+                        source_span = SourceSpan(
+                            raw_text=src.get("text", ""),
+                            section=src.get("section"),
+                        )
+                    elif hasattr(src, "text"):
+                        source_span = SourceSpan(
+                            raw_text=src.text,
+                            section=getattr(src, "section", None),
+                        )
+                data["provenance"] = ProvenanceRecord(
+                    origin_type=origin,
+                    source_span=source_span,
+                    rule_id="deterministic_extractor",
+                )
+
+            # Auto-assign is_mandatory if not explicitly given
+            if "is_mandatory" not in data:
+                p = data.get("priority")
+                if p in (RequirementPriority.MUST_HAVE, RequirementPriority.MANDATORY, "MUST_HAVE", "MANDATORY"):
+                    prov = data.get("provenance")
+                    origin = getattr(prov, "origin_type", None) if not isinstance(prov, dict) else prov.get("origin_type")
+                    if origin in (OriginType.EXPLICIT_JD, OriginType.TA_CONFIRMED, "EXPLICIT_JD", "TA_CONFIRMED"):
+                        data["is_mandatory"] = True
+                    else:
+                        data["is_mandatory"] = False
+                else:
+                    data["is_mandatory"] = False
+        return data
+
+    @model_validator(mode="after")
+    def _enforce_invariants_and_sync(self) -> "StructuredRequirement":
+        """
+        Enforce Traceable Origin Invariant and synchronize backward-compatible fields.
+        """
+        # Ensure source is always present for Intern 1 consumers
+        if self.source is None:
+            if self.provenance and self.provenance.source_span and self.provenance.source_span.raw_text:
+                self.source = SourceReference(
+                    text=self.provenance.source_span.raw_text,
+                    section=self.provenance.source_span.section,
+                )
+            elif self.text:
+                self.source = SourceReference(text=self.text)
+
+        # Ensure matched_entities and ekg_node_ids stay synchronized
+        if not self.matched_entities and self.ekg_node_ids:
+            self.matched_entities = list(self.ekg_node_ids)
+        elif not self.ekg_node_ids and self.matched_entities:
+            self.ekg_node_ids = list(self.matched_entities)
+
+        # Traceable Origin Invariant
+        unsafe_origins = {OriginType.EKG_DERIVED, OriginType.LLM_HYPOTHESIS}
+        if self.provenance.origin_type in unsafe_origins and self.is_mandatory:
+            raise ValueError(
+                f"Traceable Origin Invariant violated: origin_type={self.provenance.origin_type!r} "
+                f"cannot set is_mandatory=True. Only EXPLICIT_JD or TA_CONFIRMED may."
+            )
+        return self
+
+    @property
+    def requirement_id(self) -> str:
+        return self.id
+
+    @requirement_id.setter
+    def requirement_id(self, val: str) -> None:
+        self.id = val
+
+
+class DisjunctionGroup(_Base):
+    """
+    Represents a boolean logic group (OR/AND).
+    Supports both Intern 1 list-of-strings and Intern 2 nested requirement objects.
+    """
+    id: str = Field(default_factory=_new_id)
+    operator: Union[LogicOperator, str] = LogicOperator.OR
+    requirements: List[Any] = Field(
+        ...,
+        description="Members of the logic group. May be requirement IDs or StructuredRequirement objects.",
+        min_length=2,
     )
-    requires_ta_confirmation: bool = False
+    interpretation: Optional[str] = None
+    provenance: ProvenanceRecord = Field(default_factory=ProvenanceRecord)
 
-    # Tier 3 — TA confirmation (Intern 2 clarification updater sets this)
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_group(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "group_id" in data and "id" not in data:
+                data["id"] = data["group_id"]
+            if "provenance" not in data or data["provenance"] is None:
+                data["provenance"] = ProvenanceRecord(
+                    origin_type=OriginType.EXPLICIT_JD,
+                    rule_id="boolean_parser",
+                )
+        return data
+
+    @property
+    def group_id(self) -> str:
+        return self.id
+
+    @group_id.setter
+    def group_id(self, val: str) -> None:
+        self.id = val
+
+
+DisjunctionGroup.model_rebuild()
+
+
+class ResponsibilityContext(_Base):
+    """
+    Authoritative responsibility statement with 3-tier interpretation context.
+    Seamlessly satisfies both Intern 1 and Intern 2 schemas.
+    """
+    id: str = Field(default_factory=_new_id)
+    raw_statement: str = Field("", description="Verbatim responsibility statement from the JD.")
+    description: Optional[str] = Field(None, description="Description of the responsibility.")
+    tier: ResponsibilityTier = ResponsibilityTier.PRIMARY
+    required_capabilities: List[str] = Field(default_factory=list)
+    rationale: str = ""
+    source: Optional[Union[SourceReference, SourceSpan]] = None
+    source_span: Optional[SourceSpan] = None
+    interpretation_confidence: Optional[Union[ConfidenceLevel, ConfidenceBand, str]] = None
+
+    # Tier 1 & 2 extra fields (Intern 2)
+    matched_entities: List[Any] = Field(default_factory=list)
+    graph_derived_activities: List[GraphActivity] = Field(default_factory=list)
+    llm_hypothesis: Optional[str] = None
+    requires_ta_confirmation: bool = False
     interpretation_status: InterpretationStatus = InterpretationStatus.NOT_INTERPRETED
     confidence: ConfidenceBreakdown = Field(default_factory=ConfidenceBreakdown)
     provenance: List[ProvenanceRecord] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_resp(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "responsibility_id" in data and "id" not in data:
+                data["id"] = data["responsibility_id"]
+            if "description" in data and ("raw_statement" not in data or not data["raw_statement"]):
+                data["raw_statement"] = data["description"]
+            elif "raw_statement" in data and ("description" not in data or not data["description"]):
+                data["description"] = data["raw_statement"]
+
+            # Map source / source_span
+            src = data.get("source")
+            span = data.get("source_span")
+            if src and not span:
+                raw_text = src.get("text", "") if isinstance(src, dict) else getattr(src, "text", "")
+                section = src.get("section") if isinstance(src, dict) else getattr(src, "section", None)
+                data["source_span"] = SourceSpan(raw_text=raw_text, section=section)
+            elif span and not src:
+                raw_text = span.get("raw_text", "") if isinstance(span, dict) else getattr(span, "raw_text", "")
+                section = span.get("section") if isinstance(span, dict) else getattr(span, "section", None)
+                data["source"] = SourceReference(text=raw_text, section=section)
+        return data
+
+    @model_validator(mode="after")
+    def _sync_fields(self) -> "ResponsibilityContext":
+        if not self.raw_statement and self.description:
+            self.raw_statement = self.description
+        if not self.description and self.raw_statement:
+            self.description = self.raw_statement
+
+        if self.source is None:
+            if self.source_span:
+                self.source = SourceReference(
+                    text=self.source_span.raw_text,
+                    section=self.source_span.section,
+                )
+            elif self.raw_statement:
+                self.source = SourceReference(text=self.raw_statement)
+
+        if self.source_span is None and self.source:
+            self.source_span = SourceSpan(
+                raw_text=self.source.text if hasattr(self.source, "text") else str(self.source),
+                section=getattr(self.source, "section", None),
+            )
+        return self
+
+    @property
+    def responsibility_id(self) -> str:
+        return self.id
+
+    @responsibility_id.setter
+    def responsibility_id(self, val: str) -> None:
+        self.id = val
+
+
+class ExtractionResult(_Base):
+    """
+    Complete typed extraction AST from Intern 1 extraction pipeline.
+    Provides bridge to JDMasterContext for downstream processing.
+    """
+    sections: List[JDSection] = Field(default_factory=list)
+    requirements: List[Any] = Field(default_factory=list)
+    disjunction_groups: List[Any] = Field(default_factory=list)
+    responsibilities: List[Any] = Field(default_factory=list)
+    parameters: List[ExtractedParameter] = Field(default_factory=list)
+    ambiguities: List[DetectedAmbiguity] = Field(default_factory=list)
+    extraction_mode: str = "deterministic"
+    llm_enabled: bool = False
+    ekg_entities_matched: int = 0
+    ekg_coverage_score: float = 0.0
+
+    def to_master_context(self, jd_id: Optional[str] = None, raw_jd_text: str = "") -> "JDMasterContext":
+        """
+        Convert this ExtractionResult into an authoritative JDMasterContext.
+        """
+        if not raw_jd_text and self.sections:
+            raw_jd_text = "\n\n".join(s.content for s in self.sections if s.content)
+
+        role_overview = RoleOverview()
+        job_context = JobContextInfo()
+
+        for param in self.parameters:
+            name = param.parameter_name.lower()
+            val = str(param.value)
+            if "title" in name:
+                role_overview.job_title = val
+            elif "location" in name:
+                role_overview.location_city = val
+            elif "work_mode" in name:
+                role_overview.work_mode = val.upper()
+            elif "seniority" in name:
+                role_overview.seniority = val
+            elif "department" in name:
+                role_overview.department = val
+            elif "company" in name:
+                job_context.company_context = val
+            elif "team_size" in name:
+                job_context.team_size = val
+
+        # Map requirements and disjunction groups
+        master_reqs: List[Union[StructuredRequirement, DisjunctionGroup]] = []
+        for req in self.requirements:
+            if isinstance(req, StructuredRequirement):
+                master_reqs.append(req)
+            elif isinstance(req, dict):
+                master_reqs.append(StructuredRequirement.model_validate(req))
+
+        for dg in self.disjunction_groups:
+            if isinstance(dg, DisjunctionGroup):
+                master_reqs.append(dg)
+            elif isinstance(dg, dict):
+                master_reqs.append(DisjunctionGroup.model_validate(dg))
+
+        # Map responsibilities
+        master_resps: List[ResponsibilityContext] = []
+        for resp in self.responsibilities:
+            if isinstance(resp, ResponsibilityContext):
+                master_resps.append(resp)
+            elif isinstance(resp, dict):
+                master_resps.append(ResponsibilityContext.model_validate(resp))
+
+        master = JDMasterContext(
+            jd_id=jd_id or _new_id(),
+            raw_jd_text=raw_jd_text,
+            role_overview=role_overview,
+            job_context=job_context,
+            requirements=master_reqs,
+            responsibilities=master_resps,
+        )
+        return master
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +642,7 @@ class ComplianceFlagContext(_Base):
     concern: str
     category: str = Field("other", description="e.g. age, gender, disability, marital_status, other")
     recommended_action: str = "Flag for TA review. Do not use in automated scoring."
-    provenance: ProvenanceRecord
+    provenance: ProvenanceRecord = Field(default_factory=ProvenanceRecord)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +666,6 @@ class JobContextInfo(_Base):
     company_context: Optional[str] = None
     business_context: Optional[str] = None
     environment: Optional[str] = None
-    # These two carry explicit-unspecified tracking
     team_size: Optional[str] = None
     team_size_explicitly_unspecified: bool = False
     salary_range: Optional[str] = None
