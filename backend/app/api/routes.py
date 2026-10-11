@@ -10,6 +10,10 @@ ambiguity it stores ONE question for the TA (GET /jds/{id}/clarify/state). The T
 answers (POST /jds/{id}/clarify/answer), the spec is regenerated with the answer
 and reviewed again, until the LLM reports that no ambiguity is left.
 
+Once the TA has resolved an ambiguity, its bullet is removed from the
+"Ambiguities" / "Missing Information" sections of the Markdown (see
+_prune_resolved_ambiguities).
+
 NOTE: in-flight tracking is in-process memory, which is correct for a single
 uvicorn worker (local Ollama). For multi-worker production, replace
 _inflight/_errors/_clarify_clear with a Redis key or a status column and use
@@ -18,6 +22,7 @@ SQS/Celery instead of BackgroundTasks.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Dict, List, Literal, Optional, Set
@@ -50,6 +55,9 @@ storage = get_storage()
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 TERMINAL_STATUSES = {"READY", "NEEDS_REVIEW", "FAILED"}
+
+# Must match TA_DONT_KNOW in frontend/src/app/page.tsx
+TA_DONT_KNOW = "TA does not know; treat as unspecified."
 
 # ---------------------------------------------------------------------------
 # Background processing state
@@ -521,15 +529,100 @@ def _create_clarified_jd_version(db: Session, jd_id: str) -> JobDescriptionVersi
     return version
 
 
+# ---------------------------------------------------------------------------
+# Pruning of ambiguities the TA has already resolved
+# ---------------------------------------------------------------------------
+# Matches headings such as "## Ambiguities", "### 6. Missing Information", "## **Ambiguities**"
+_SECTION_RE = re.compile(r"^(#{1,6})\s*(?:\d+[.)]\s*)?\**\s*(ambiguities|missing information)\b", re.I)
+_BULLET_RE = re.compile(r"^[-*+]\s")
+_STOP = {"this", "that", "with", "from", "whether", "which", "their", "there", "have", "does",
+         "what", "when", "will", "about", "into", "than", "then", "such", "also", "being"}
+
+
+def _tokens(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower())
+            if (len(w) > 3 or w.isdigit()) and w not in _STOP}
+
+
+def _is_resolved(bullet_head: str, resolved_texts: List[str]) -> bool:
+    """True when a bullet's wording overlaps enough with an answered question/answer."""
+    bt = _tokens(bullet_head)
+    if not bt:
+        return False
+    for r in resolved_texts:
+        shared = bt & _tokens(r)
+        if len(shared) >= 2 and len(shared) / len(bt) >= 0.35:
+            return True
+    return False
+
+
+def _prune_body(body: List[str], resolved_texts: List[str], wipe: bool) -> List[str]:
+    """Remove resolved top-level bullets (and their nested lines) from one section body."""
+    blocks: List[list] = []          # [is_bullet, [lines]]
+    for ln in body:
+        if _BULLET_RE.match(ln):
+            blocks.append([True, [ln]])
+        elif blocks and blocks[-1][0] and ln.startswith((" ", "\t")):
+            blocks[-1][1].append(ln)  # nested child of the bullet above
+        else:
+            blocks.append([False, [ln]])
+
+    kept: List[str] = []
+    removed = False
+    for is_bullet, lines in blocks:
+        if is_bullet and (wipe or _is_resolved(lines[0], resolved_texts)):
+            removed = True
+            continue
+        kept.extend(lines)
+
+    if removed and not any(_BULLET_RE.match(l) for l in kept):
+        return ["", "_None remaining (resolved by TA clarification)._", ""]
+    return kept
+
+
+def _prune_resolved_ambiguities(md: str, qa: List[tuple], wipe_ambiguities: bool = False) -> str:
+    """
+    Remove Ambiguities / Missing Information bullets the TA has already answered.
+    Questions the TA skipped (TA_DONT_KNOW) stay, because they are still unresolved.
+    wipe_ambiguities=True empties the whole Ambiguities section (used when the LLM
+    reports that no ambiguity is left).
+    """
+    resolved_texts = [f"{q} {a}" for q, a in qa if a and a.strip() != TA_DONT_KNOW]
+    if not resolved_texts and not wipe_ambiguities:
+        return md
+
+    lines = md.splitlines()
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        m = _SECTION_RE.match(lines[i])
+        out.append(lines[i])
+        i += 1
+        if not m:
+            continue
+        level, name = len(m.group(1)), m.group(2).lower()
+        j = i
+        while j < len(lines):                      # section ends at next heading of same/higher level
+            h = re.match(r"^(#{1,6})\s", lines[j])
+            if h and len(h.group(1)) <= level:
+                break
+            j += 1
+        out.extend(_prune_body(lines[i:j], resolved_texts, wipe=wipe_ambiguities and name == "ambiguities"))
+        i = j
+    return "\n".join(out) + ("\n" if md.endswith("\n") else "")
+
+
 def _append_clarifications_to_markdown(db: Session, jd_id: str) -> None:
-    """Record-keeping only: the TA's Q&A is visible in the final Markdown."""
+    """Drop ambiguities the TA resolved, then record the Q&A at the end of the Markdown."""
     spec_row = _latest_spec_version_or_none(jd_id, db)
     qa = _answered_qa(jd_id, db)
     if spec_row is None or not qa:
         return
     md = storage.get_text(spec_row.s3_markdown_key)
+    md = _prune_resolved_ambiguities(md, qa)
     if "## Clarifications from TA" not in md:
-        storage.put_text(spec_row.s3_markdown_key, md + clarifications_markdown(qa), "text/markdown")
+        md += clarifications_markdown(qa)
+    storage.put_text(spec_row.s3_markdown_key, md, "text/markdown")
 
 
 def _review_latest_spec(db: Session, jd_id: str) -> None:
@@ -549,6 +642,13 @@ def _review_latest_spec(db: Session, jd_id: str) -> None:
             Clarification.jd_id == jd_id, Clarification.answer.is_(None)
         ).delete()
         if finding is None:
+            if qa:   # the TA resolved everything: nothing may remain under "Ambiguities"
+                md = storage.get_text(spec_row.s3_markdown_key)
+                storage.put_text(
+                    spec_row.s3_markdown_key,
+                    _prune_resolved_ambiguities(md, qa, wipe_ambiguities=True),
+                    "text/markdown",
+                )
             with _state_lock:
                 _clarify_clear.add(jd_id)
             logger.info("[clarify] jd_id=%s: no ambiguity left after %d answer(s)", jd_id, len(qa))
