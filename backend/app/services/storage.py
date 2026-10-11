@@ -24,7 +24,12 @@ from app.config import get_settings
 
 settings = get_settings()
 
-_ARTIFACT_EXT = {"raw": "txt", "markdown": "md", "json": "json"}
+_ARTIFACT_EXT = {
+    "raw": "txt",
+    "markdown": "md",
+    "json": "json",
+    "enriched_markdown": "md",
+}
 
 
 def build_key(project_id: str, jd_id: str, version: int, artifact: str) -> str:

@@ -578,6 +578,14 @@ class ExtractionResult(_Base):
             elif isinstance(resp, dict):
                 master_resps.append(ResponsibilityContext.model_validate(resp))
 
+        # Map detected ambiguities
+        master_ambs: List[DetectedAmbiguity] = []
+        for amb in self.ambiguities:
+            if isinstance(amb, DetectedAmbiguity):
+                master_ambs.append(amb)
+            elif isinstance(amb, dict):
+                master_ambs.append(DetectedAmbiguity.model_validate(amb))
+
         master = JDMasterContext(
             jd_id=jd_id or _new_id(),
             raw_jd_text=raw_jd_text,
@@ -585,6 +593,7 @@ class ExtractionResult(_Base):
             job_context=job_context,
             requirements=master_reqs,
             responsibilities=master_resps,
+            raw_ambiguities=master_ambs,
         )
         return master
 
@@ -715,6 +724,9 @@ class JDMasterContext(_Base):
 
     # --- Responsibilities (Intern 1 extraction populates) ---
     responsibilities: List[ResponsibilityContext] = Field(default_factory=list)
+
+    # --- Detected Ambiguities (Intern 1 extraction populates) ---
+    raw_ambiguities: List[DetectedAmbiguity] = Field(default_factory=list)
 
     # --- Clarification Loop (Intern 2 owns fully) ---
     clarification_history: List[ClarificationQuestionSchema] = Field(default_factory=list)

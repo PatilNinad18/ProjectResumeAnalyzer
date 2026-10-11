@@ -24,14 +24,17 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models.db_models import (
+    JDLifecycleStatusEnum,
     JobDescriptionVersion,
     JobSpecificationVersion,
     ProcessingJob,
     ProcessingStatusEnum,
 )
 from app.services.agent import JDUnderstandingAgent, JDUnderstandingError
+from app.services.extraction_pipeline import ExtractionPipeline
 from app.services.json_serializer import to_json_dict, to_json_str
 from app.services.markdown_renderer import render_markdown
+from app.services.projection.canonical_projector import project_to_canonical
 from app.services.storage import build_key, get_storage
 from app.services.validation import validate_payload
 
@@ -60,13 +63,27 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
 
         job.status = ProcessingStatusEnum.UNDERSTANDING
         db.commit()
-        agent = JDUnderstandingAgent()
-        spec, llm_result = agent.understand(
-            jd_text=raw_text,
+
+        # Unconditionally deterministic baseline analysis
+        start_proc = time.perf_counter()
+        pipeline = ExtractionPipeline(llm_enabled=False)
+        extraction_result = pipeline.process_jd(raw_text)
+        master_context = extraction_result.to_master_context(
             jd_id=str(jd_version.job_description_id),
-            jd_version=jd_version.version,
+            raw_jd_text=raw_text,
+        )
+        spec = project_to_canonical(
+            master_context,
+            jd_id=str(jd_version.job_description_id),
             specification_version=1,
         )
+        latency_ms = int((time.perf_counter() - start_proc) * 1000)
+        spec.metadata.prompt_version = "deterministic_v1"
+        spec.metadata.model_version = "deterministic_ekg"
+
+        # Generate clarification questions on master context
+        from app.services.clarification.engine import generate_clarification_questions
+        master_context = generate_clarification_questions(master_context, actor="worker_baseline")
 
         job.status = ProcessingStatusEnum.VALIDATING
         db.commit()
@@ -75,14 +92,63 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
 
         job.status = ProcessingStatusEnum.GENERATING
         db.commit()
-        markdown = render_markdown(spec)
+
+        # Attempt automatic Ollama enrichment; fall back cleanly to deterministic baseline on any failure
+        from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
+        enricher = GroundedEnrichmentService()
+        enrichment_report = None
+        enriched_md = None
+        enriched_key = None
+
+        if enricher.check_ollama_available():
+            try:
+                from app.services.projection.canonical_projector import _flatten_requirements
+                flat_reqs = _flatten_requirements(master_context.requirements)
+                requirements_to_enrich = [
+                    {
+                        "requirement_id": r.id,
+                        "text": r.text,
+                        "priority": r.priority.value if hasattr(r.priority, "value") else str(r.priority or "MUST_HAVE"),
+                    }
+                    for r in flat_reqs
+                    if getattr(r, "text", None)
+                ]
+                if not requirements_to_enrich and spec.evidence_requirements:
+                    requirements_to_enrich = [
+                        {
+                            "requirement_id": ev.requirement_id,
+                            "text": ev.requirement,
+                            "priority": ev.priority if isinstance(ev.priority, str) else ev.priority.value,
+                        }
+                        for ev in spec.evidence_requirements
+                        if ev.requirement
+                    ]
+
+                if requirements_to_enrich:
+                    enrichment_report = enricher.generate_enrichment_report(
+                        spec_version_id="temp",
+                        specification_version=1,
+                        source_checksum=jd_version.raw_text_checksum,
+                        requirements=requirements_to_enrich,
+                    )
+                    enriched_md = render_markdown(spec, enrichment_report=enrichment_report)
+            except Exception as exc:
+                logger.warning("Automatic Ollama enrichment failed; falling back to deterministic baseline: %s", exc)
+                enrichment_report = None
+                enriched_md = None
+
+        baseline_markdown = render_markdown(spec)
         json_str = to_json_str(spec)
 
-        project_id = "unknown"  # would be resolved via jd_version.job_description.project_id in a full impl
+        project_id = str(jd_version.job_description.project_id) if jd_version.job_description else "unknown"
         json_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "json")
         md_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "markdown")
         storage.put_text(json_key, json_str, "application/json")
-        storage.put_text(md_key, markdown, "text/markdown")
+        storage.put_text(md_key, baseline_markdown, "text/markdown")
+
+        if enriched_md:
+            enriched_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "enriched_markdown")
+            storage.put_text(enriched_key, enriched_md, "text/markdown")
 
         spec_version = JobSpecificationVersion(
             job_description_version_id=jd_version_id,
@@ -90,16 +156,41 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
             s3_json_key=json_key,
             s3_markdown_key=md_key,
             canonical_json=json.loads(json_str),
-            prompt_version=spec.metadata.prompt_version or "",
-            model_version=spec.metadata.model_version or "",
-            input_tokens=llm_result.usage.input_tokens,
-            output_tokens=llm_result.usage.output_tokens,
-            latency_ms=int(llm_result.usage.latency_ms),
-            estimated_cost_usd=int(llm_result.usage.estimated_cost_usd * 1_000_000),
+            master_context_json=master_context.model_dump(mode="json"),
+            enrichment_report_json=enrichment_report.model_dump(mode="json") if enrichment_report else None,
+            s3_enriched_markdown_key=enriched_key,
+            lifecycle_status=JDLifecycleStatusEnum.ANALYZED,
+            prompt_version=spec.metadata.prompt_version or "deterministic_v1",
+            model_version=spec.metadata.model_version or "deterministic_ekg",
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=latency_ms,
+            estimated_cost_usd=0,
             is_valid=report.valid,
             needs_review=needs_review,
         )
         db.add(spec_version)
+        db.flush()
+
+        from app.models.db_models import ClarificationQuestion, ClarificationQuestionPriorityEnum, ClarificationQuestionStatusEnum
+        for q in master_context.clarification_history:
+            try:
+                db.add(
+                    ClarificationQuestion(
+                        job_specification_version_id=spec_version.id,
+                        question_key=q.question_key,
+                        category=q.category.value if hasattr(q.category, "value") else str(q.category),
+                        priority=ClarificationQuestionPriorityEnum(q.priority.value),
+                        is_blocking=q.is_blocking,
+                        question_text=q.question_text,
+                        rationale=q.rationale or "",
+                        field_target=q.field_target,
+                        status=ClarificationQuestionStatusEnum(q.status.value),
+                        answer_text=q.answer_text,
+                    )
+                )
+            except Exception as q_exc:
+                logger.warning("Could not persist clarification question %s: %s", q.question_key, q_exc)
 
         job.status = ProcessingStatusEnum.NEEDS_REVIEW if needs_review else ProcessingStatusEnum.READY
         job.finished_at = datetime.now(timezone.utc)

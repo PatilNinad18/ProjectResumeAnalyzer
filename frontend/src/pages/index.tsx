@@ -12,7 +12,11 @@ import {
   uploadJD,
   analyzeJD,
   getMarkdown,
+  enrichJD,
   getJson,
+  getClarifications,
+  resolveClarifications,
+  ClarificationsResponse,
   askJDChatbot,
   pollUntilDone,
   TERMINAL_STATUSES,
@@ -64,6 +68,15 @@ export default function Home() {
   const [jsonData, setJsonData] = useState<Record<string, unknown> | null>(null);
   const [specVersion, setSpecVersion] = useState<number>(1);
   const [contextTab, setContextTab] = useState<"markdown" | "json">("markdown");
+  const [isEnriching, setIsEnriching] = useState<boolean>(false);
+  const [isEnrichedView, setIsEnrichedView] = useState<boolean>(false);
+  const [enrichError, setEnrichError] = useState<string | null>(null);
+
+  // Ambiguities & Clarification State
+  const [clarificationsData, setClarificationsData] = useState<ClarificationsResponse | null>(null);
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
+  const [isResolvingClarifications, setIsResolvingClarifications] = useState<boolean>(false);
+  const [resolveSuccessMsg, setResolveSuccessMsg] = useState<string | null>(null);
 
   // Selected File for multi-format upload (.txt, .pdf, .docx)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -175,6 +188,68 @@ export default function Home() {
     setCreatedAgentSuccess(null);
     setAgentNameInput("");
     setJobTitle("");
+    setIsEnrichedView(false);
+    setEnrichError(null);
+    setClarificationsData(null);
+    setClarificationAnswers({});
+    setResolveSuccessMsg(null);
+  }
+
+  // Handle Grounded TA Evidence Enrichment via Ollama
+  async function handleEnrichJD() {
+    if (!jdId) return;
+    setIsEnriching(true);
+    setEnrichError(null);
+    try {
+      const res = await enrichJD(jdId);
+      setMarkdown(res.enriched_markdown);
+      setIsEnrichedView(true);
+    } catch (e) {
+      const msg = (e as Error).message || "";
+      setEnrichError(
+        msg.includes("503") || msg.toLowerCase().includes("unavailable")
+          ? "Local Ollama service is unreachable or target model is not running. Start Ollama and try again."
+          : `Enrichment failed: ${msg}`
+      );
+    } finally {
+      setIsEnriching(false);
+    }
+  }
+
+  // Toggle between baseline and enriched markdown view
+  async function handleToggleEnrichment(enable: boolean) {
+    if (!jdId) return;
+    try {
+      const res = await getMarkdown(jdId, enable);
+      setMarkdown(res.markdown);
+      setIsEnrichedView(enable && Boolean(res.is_enriched));
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  // Submit TA answers for detected ambiguities & generate final specification
+  async function handleResolveClarifications() {
+    if (!jdId) return;
+    setIsResolvingClarifications(true);
+    setResolveSuccessMsg(null);
+    setError(null);
+    try {
+      const res = await resolveClarifications(jdId, clarificationAnswers);
+      setMarkdown(res.markdown);
+      setJsonData(res.json);
+      setSpecVersion(res.specification_version);
+      if (typeof res.is_enriched === "boolean") {
+        setIsEnrichedView(res.is_enriched);
+      }
+      setResolveSuccessMsg("✓ Ambiguities resolved! Final specification generated.");
+      const updatedClar = await getClarifications(jdId);
+      setClarificationsData(updatedClar);
+    } catch (e) {
+      setError(`Failed to resolve clarifications: ${(e as Error).message}`);
+    } finally {
+      setIsResolvingClarifications(false);
+    }
   }
 
   // Step 3 Analyse Handler.
@@ -186,6 +261,9 @@ export default function Home() {
     setMarkdown(null);
     setJsonData(null);
     setCreatedAgentSuccess(null);
+    setClarificationsData(null);
+    setClarificationAnswers({});
+    setResolveSuccessMsg(null);
 
     pollAbortRef.current?.abort();
     const controller = new AbortController();
@@ -213,10 +291,16 @@ export default function Home() {
         return;
       }
 
-      const [mdRes, jsonRes] = await Promise.all([getMarkdown(jd_id), getJson(jd_id)]);
+      const [mdRes, jsonRes, clarRes] = await Promise.all([
+        getMarkdown(jd_id),
+        getJson(jd_id),
+        getClarifications(jd_id).catch(() => null),
+      ]);
       setMarkdown(mdRes.markdown);
       setJsonData(jsonRes.json);
       setSpecVersion(mdRes.specification_version || 1);
+      setIsEnrichedView(Boolean(mdRes.is_enriched));
+      if (clarRes) setClarificationsData(clarRes);
     } catch (e) {
       if (isAbort(e)) return;
       setError((e as Error).message);
@@ -1552,13 +1636,13 @@ export default function Home() {
                         Analysis complete. Crisp Markdown and canonical JSON available below.
                       </span>
                     </div>
-                    <div style={{ display: "flex", gap: "10px" }}>
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
                       <div className="sub-tabs">
                         <button
                           className={`sub-tab-btn ${contextTab === "markdown" ? "active" : ""}`}
                           onClick={() => setContextTab("markdown")}
                         >
-                          Markdown View
+                          Markdown View {isEnrichedView && "(Enriched)"}
                         </button>
                         <button
                           className={`sub-tab-btn ${contextTab === "json" ? "active" : ""}`}
@@ -1567,6 +1651,57 @@ export default function Home() {
                           JSON Source of Truth
                         </button>
                       </div>
+                      {isEnrichedView ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span
+                            style={{
+                              fontSize: "0.78rem",
+                              fontWeight: 600,
+                              padding: "4px 10px",
+                              borderRadius: "16px",
+                              background: "#e0e7ff",
+                              color: "#4338ca",
+                              border: "1px solid #c7d2fe",
+                            }}
+                          >
+                            ✨ Enriched TA Guidance (Ollama)
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{ fontSize: "0.75rem", padding: "3px 8px" }}
+                            onClick={() => handleToggleEnrichment(false)}
+                            title="View original deterministic baseline markdown"
+                          >
+                            Show Baseline
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span
+                            style={{
+                              fontSize: "0.78rem",
+                              fontWeight: 600,
+                              padding: "4px 10px",
+                              borderRadius: "16px",
+                              background: "#f1f5f9",
+                              color: "#475569",
+                              border: "1px solid #e2e8f0",
+                            }}
+                          >
+                            ⚙ Deterministic Rule Engine
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{ fontSize: "0.75rem", padding: "3px 8px" }}
+                            onClick={() => handleToggleEnrichment(true)}
+                            title="Switch back to Ollama enriched markdown"
+                          >
+                            Show Enriched
+                          </button>
+                        </div>
+                      )}
                       <button
                         className="btn-secondary"
                         onClick={() =>
@@ -1588,6 +1723,184 @@ export default function Home() {
                         {JSON.stringify(jsonData, null, 2)}
                       </pre>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* Ambiguities & Clarifications Requiring TA Input */}
+              {isStep3Done && clarificationsData?.has_ambiguities && (
+                <div className="card" style={{ borderLeft: "4px solid #f59e0b" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }}>
+                    <div>
+                      <h3 style={{ margin: "0 0 4px 0", fontSize: "1.1rem", display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span>🔍 Ambiguities Requiring TA Clarification</span>
+                        {clarificationsData.lifecycle_status === "FINALIZED" ? (
+                          <span style={{ background: "#dcfce7", color: "#166534", fontSize: "0.75rem", padding: "2px 8px", borderRadius: "12px", fontWeight: 600 }}>
+                            ✓ Finalized
+                          </span>
+                        ) : (
+                          <span style={{ background: "#fef3c7", color: "#92400e", fontSize: "0.75rem", padding: "2px 8px", borderRadius: "12px", fontWeight: 600 }}>
+                            Action Required
+                          </span>
+                        )}
+                      </h3>
+                      <p style={{ margin: 0, fontSize: "0.85rem", color: "#667085" }}>
+                        The deterministic engine flagged the following ambiguous statements or missing parameters. Answer below to generate the final disambiguated specification.
+                      </p>
+                    </div>
+                  </div>
+
+                  {resolveSuccessMsg && (
+                    <div className="alert-success" style={{ marginBottom: "14px" }}>
+                      {resolveSuccessMsg}
+                    </div>
+                  )}
+
+                  {/* List of Ambiguities / Questions */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "16px" }}>
+                    {/* 1. First-class Clarification Questions (includes JD technical ambiguities, contextual phrasing, & metadata) */}
+                    {clarificationsData.questions && clarificationsData.questions.length > 0 && (
+                      clarificationsData.questions.map((q) => (
+                        <div
+                          key={q.question_key}
+                          style={{
+                            padding: "14px",
+                            background: "#f8fafc",
+                            borderRadius: "8px",
+                            border: "1px solid #e2e8f0",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "6px", gap: "8px" }}>
+                            <span style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", flex: 1 }}>
+                              {q.question_text}
+                            </span>
+                            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                              <span
+                                style={{
+                                  fontSize: "0.72rem",
+                                  fontWeight: 600,
+                                  padding: "2px 8px",
+                                  borderRadius: "4px",
+                                  background: "#f1f5f9",
+                                  color: "#475569",
+                                  textTransform: "capitalize",
+                                }}
+                              >
+                                {q.category.replace(/_/g, " ")}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: "0.72rem",
+                                  fontWeight: 600,
+                                  padding: "2px 8px",
+                                  borderRadius: "4px",
+                                  background: q.priority === "BLOCKING" ? "#fee2e2" : "#fef3c7",
+                                  color: q.priority === "BLOCKING" ? "#991b1b" : "#92400e",
+                                }}
+                              >
+                                {q.priority}
+                              </span>
+                            </div>
+                          </div>
+
+                          {q.rationale && (
+                            <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
+                              <strong>Context:</strong> {q.rationale}
+                            </div>
+                          )}
+
+                          {/* Quick-select chips if suggested_options are provided */}
+                          {q.suggested_options && q.suggested_options.length > 0 && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
+                              {q.suggested_options.map((opt, oIdx) => (
+                                <button
+                                  key={oIdx}
+                                  type="button"
+                                  onClick={() =>
+                                    setClarificationAnswers((prev) => ({
+                                      ...prev,
+                                      [q.question_key]: opt,
+                                    }))
+                                  }
+                                  style={{
+                                    fontSize: "0.75rem",
+                                    padding: "3px 8px",
+                                    borderRadius: "12px",
+                                    border: clarificationAnswers[q.question_key] === opt ? "1px solid #4f46e5" : "1px solid #cbd5e1",
+                                    background: clarificationAnswers[q.question_key] === opt ? "#e0e7ff" : "#fff",
+                                    color: clarificationAnswers[q.question_key] === opt ? "#4338ca" : "#334155",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  {opt}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+
+                          <input
+                            type="text"
+                            className="input-text"
+                            style={{ width: "100%" }}
+                            placeholder={q.answer || "Enter TA clarification or select an option above..."}
+                            value={clarificationAnswers[q.question_key] || ""}
+                            onChange={(e) =>
+                              setClarificationAnswers((prev) => ({
+                                ...prev,
+                                [q.question_key]: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      ))
+                    )}
+
+                    {/* 2. Any additional standalone ambiguities from JD not already covered */}
+                    {clarificationsData.ambiguities && clarificationsData.ambiguities.length > 0 && (
+                      clarificationsData.ambiguities
+                        .filter((a: any) => {
+                          const statement = (a.statement || "").trim().toLowerCase();
+                          return !(clarificationsData.questions || []).some((q) =>
+                            q.question_text.toLowerCase().includes(statement.slice(0, 30))
+                          );
+                        })
+                        .map((a: any, idx: number) => (
+                          <div key={`amb_${idx}`} style={{ padding: "14px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+                            <div style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", marginBottom: "4px" }}>
+                              "{a.statement}"
+                            </div>
+                            <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
+                              <strong>Why ambiguous:</strong> {a.why_ambiguous}
+                            </div>
+                            <input
+                              type="text"
+                              className="input-text"
+                              style={{ width: "100%" }}
+                              placeholder="Provide clarification (e.g. Mandatory, Preferred, or specific range)..."
+                              value={clarificationAnswers[`amb_${idx}`] || ""}
+                              onChange={(e) =>
+                                setClarificationAnswers((prev) => ({
+                                  ...prev,
+                                  [`amb_${idx}`]: e.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                        ))
+                    )}
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <button
+                      className="btn-primary"
+                      disabled={isResolvingClarifications}
+                      onClick={handleResolveClarifications}
+                      style={{ background: "#d97706", borderColor: "#b45309" }}
+                    >
+                      {isResolvingClarifications
+                        ? "⏳ Resolving & Generating Final Markdown..."
+                        : "✓ Confirm Answers & Generate Final Specification"}
+                    </button>
                   </div>
                 </div>
               )}

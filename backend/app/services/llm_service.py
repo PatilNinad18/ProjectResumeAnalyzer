@@ -627,14 +627,14 @@ class LLMService:
         settings = get_settings()
         provider_name = settings.llm_provider
         default_models = {
-            "ollama": "qwen3:4b",
+            "ollama": "qwen2.5:1.5b",
             "anthropic": "claude-sonnet-4-6",
             "gemini": "gemini-2.5-flash",
             "mock": "mock-extractor-v1",
         }
         adapters = {"ollama": OllamaAdapter, "anthropic": AnthropicAdapter, "gemini": GeminiAdapter, "mock": MockAdapter}
         self.adapter = adapter or adapters.get(provider_name, OllamaAdapter)()
-        self.model = model or settings.llm_model or default_models.get(provider_name, "qwen3:4b")
+        self.model = model or settings.llm_model or default_models.get(provider_name, "qwen2.5:1.5b")
         self.provider = provider_name
         # A failed local generation can cost minutes; only retry cheap cloud calls by default.
         self.max_retries = cfg_int("LLM_MAX_RETRIES", 0 if provider_name == "ollama" else 2)

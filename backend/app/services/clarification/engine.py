@@ -69,6 +69,12 @@ def generate_clarification_questions(
     # --- Tier 2: RECOMMENDED — Uninterpreted responsibilities with EKG matches ---
     new_questions.extend(_detect_uninterpreted_responsibilities(master, existing_keys))
 
+    # --- Tier 2: RECOMMENDED — Contextual phrasing requiring TA confirmation ---
+    new_questions.extend(_detect_contextual_ambiguities(master, existing_keys))
+
+    # --- Tier 2: RECOMMENDED — Ambiguities detected in JD text ---
+    new_questions.extend(_detect_raw_ambiguities(master, existing_keys))
+
     # --- Tier 3: OPTIONAL — Missing metadata (team size, salary) ---
     new_questions.extend(_detect_missing_metadata(master, existing_keys))
 
@@ -287,6 +293,81 @@ def _detect_uninterpreted_responsibilities(
                     ),
                     suggested_options=[],
                 ))
+
+    return questions
+
+
+def _detect_contextual_ambiguities(
+    master: JDMasterContext,
+    existing_keys: set,
+) -> List[ClarificationQuestionSchema]:
+    """
+    Generates questions for requirements flagged as CONTEXTUAL or INFORMATIONAL phrasing
+    where TA confirmation is required to confirm mandatory vs preferred vs informational status.
+    """
+    questions: List[ClarificationQuestionSchema] = []
+    from app.services.projection.canonical_projector import _flatten_requirements
+    flat_reqs = _flatten_requirements(master.requirements)
+    contextual = [
+        item for item in flat_reqs
+        if isinstance(item, StructuredRequirement)
+        and item.priority in {RequirementPriority.CONTEXTUAL, RequirementPriority.INFORMATIONAL}
+        and getattr(item, "text", None)
+    ]
+
+    seen_statements = {q.question_text.lower() for q in master.clarification_history}
+
+    for i, item in enumerate(contextual):
+        key = f"contextual_req_{item.id[:8]}_{i}"
+        statement_snip = item.text.strip()
+        if key not in existing_keys and statement_snip.lower() not in seen_statements:
+            questions.append(ClarificationQuestionSchema(
+                question_key=key,
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                priority=QuestionPriority.RECOMMENDED,
+                is_blocking=False,
+                field_target=f"requirements[id={item.id}].priority",
+                question_text=(
+                    f"\"{statement_snip[:130]}\" is contextual. "
+                    f"Should this be evaluated as mandatory, preferred, or role context?"
+                ),
+                rationale="Soft/contextual requirement in JD requiring TA confirmation to decide screening criteria.",
+                suggested_options=["MUST HAVE — mandatory", "PREFERRED — nice to have", "INFORMATIONAL — role context only"],
+            ))
+            seen_statements.add(statement_snip.lower())
+
+    return questions
+
+
+def _detect_raw_ambiguities(
+    master: JDMasterContext,
+    existing_keys: set,
+) -> List[ClarificationQuestionSchema]:
+    """
+    Generates questions for ambiguities detected in the JD text (e.g. unclear experience, vague qualifiers).
+    """
+    questions: List[ClarificationQuestionSchema] = []
+    raw_ambs = getattr(master, "raw_ambiguities", []) or []
+    seen_statements = {q.question_text.lower() for q in master.clarification_history}
+
+    for i, amb in enumerate(raw_ambs):
+        amb_id = getattr(amb, "ambiguity_id", f"amb_{i}")
+        key = f"jd_ambiguity_{amb_id}"
+        amb_text = getattr(amb, "text", "").strip()
+        if key not in existing_keys and amb_text and amb_text.lower() not in seen_statements:
+            reason = getattr(amb, "reason", "Ambiguous statement in JD")
+            opts = getattr(amb, "suggested_interpretations", []) or []
+            questions.append(ClarificationQuestionSchema(
+                question_key=key,
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                priority=QuestionPriority.RECOMMENDED,
+                is_blocking=False,
+                field_target=f"ambiguities[{amb_id}]",
+                question_text=f"Clarification needed on \"{amb_text[:130]}\": {reason}. How should this be evaluated?",
+                rationale=reason,
+                suggested_options=opts,
+            ))
+            seen_statements.add(amb_text.lower())
 
     return questions
 

@@ -165,7 +165,9 @@ class JobSpecificationVersion(Base):
         ForeignKey("job_specification_versions.id"),
         nullable=True,
     )
-    # --- end Intern 2 fields ---
+    # --- Grounded TA Evidence Enrichment fields ---
+    enrichment_report_json = Column(JSON, nullable=True)
+    s3_enriched_markdown_key = Column(String, nullable=True)
 
     input_tokens = Column(Integer, nullable=True)
     output_tokens = Column(Integer, nullable=True)

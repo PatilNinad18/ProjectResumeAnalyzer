@@ -56,7 +56,7 @@ async function request<T>(
   path: string,
   init: RequestInit & { timeoutMs?: number } = {}
 ): Promise<T> {
-  const { timeoutMs = 30_000, signal, ...rest } = init;
+  const { timeoutMs = 30_000, signal, headers, ...rest } = init;
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -66,8 +66,13 @@ async function request<T>(
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort);
 
+  const reqHeaders = new Headers(headers);
+  if (typeof rest.body === "string" && !reqHeaders.has("Content-Type")) {
+    reqHeaders.set("Content-Type", "application/json");
+  }
+
   try {
-    const res = await fetch(`${API_BASE}${path}`, { ...rest, signal: controller.signal });
+    const res = await fetch(`${API_BASE}${path}`, { ...rest, headers: reqHeaders, signal: controller.signal });
     if (!res.ok) {
       let detail = `Request failed (${res.status})`;
       try {
@@ -120,12 +125,68 @@ export async function getAnalysisStatus(jdId: string, signal?: AbortSignal): Pro
   return request(`/api/jds/${jdId}/analysis`, { signal, timeoutMs: 15_000 });
 }
 
-export async function getMarkdown(jdId: string): Promise<{ markdown: string; specification_version: number }> {
-  return request(`/api/jds/${jdId}/markdown`);
+export async function getMarkdown(
+  jdId: string,
+  enriched?: boolean
+): Promise<{ markdown: string; specification_version: number; is_enriched?: boolean }> {
+  const query = enriched === undefined ? "" : `?enriched=${enriched}`;
+  return request(`/api/jds/${jdId}/markdown${query}`);
+}
+
+export async function enrichJD(jdId: string): Promise<{
+  status: string;
+  enrichment_report: Record<string, unknown>;
+  enriched_markdown: string;
+}> {
+  return request(`/api/jds/${jdId}/enrich`, { method: "POST", timeoutMs: 300_000 });
 }
 
 export async function getJson(jdId: string): Promise<{ json: Record<string, unknown>; specification_version: number }> {
   return request(`/api/jds/${jdId}/json`);
+}
+
+export interface ClarificationQuestionItem {
+  question_key: string;
+  category: string;
+  priority: string;
+  question_text: string;
+  field_target: string;
+  status: string;
+  answer?: string | null;
+  rationale?: string;
+  suggested_options?: string[];
+}
+
+export interface ClarificationsResponse {
+  has_ambiguities: boolean;
+  questions: ClarificationQuestionItem[];
+  ambiguities: Array<Record<string, unknown>>;
+  missing_information: Array<Record<string, unknown>>;
+  specification_version: number;
+  lifecycle_status: string;
+}
+
+export async function getClarifications(jdId: string): Promise<ClarificationsResponse> {
+  return request(`/api/jds/${jdId}/clarifications`);
+}
+
+export async function resolveClarifications(
+  jdId: string,
+  answers: Record<string, string>,
+  answeredBy: string = "TA / Hiring Team"
+): Promise<{
+  status: string;
+  specification_version: number;
+  markdown: string;
+  json: Record<string, unknown>;
+  is_enriched?: boolean;
+}> {
+  return request(`/api/jds/${jdId}/clarifications/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answers, answered_by: answeredBy }),
+    timeoutMs: 300_000,
+  });
 }
 
 // ---------------------------------------------------------------------------

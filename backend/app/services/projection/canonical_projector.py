@@ -104,6 +104,7 @@ def project_to_canonical(
 
             # Build evidence spec for every MUST_HAVE
             evidence_specs.append({
+                "requirement_id": req.id,
                 "requirement": req.text,
                 "priority": "MUST_HAVE",
                 "explicit_or_derived": "explicit",
@@ -114,20 +115,28 @@ def project_to_canonical(
         elif req.priority == RequirementPriority.PREFERRED:
             preferred.append(req.text)
             evidence_specs.append({
+                "requirement_id": req.id,
                 "requirement": req.text,
                 "priority": "PREFERRED",
                 "explicit_or_derived": "explicit",
                 "confidence": _map_confidence(req.confidence.entity_match_confidence.value),
             })
 
-        elif req.priority in {RequirementPriority.UNRESOLVED, RequirementPriority.INFORMATIONAL}:
+        elif req.priority in {RequirementPriority.UNRESOLVED, RequirementPriority.INFORMATIONAL, RequirementPriority.CONTEXTUAL}:
             ambiguities_out.append({
                 "statement": req.text,
                 "why_ambiguous": (
                     "Priority was UNRESOLVED at time of finalization." if req.priority == RequirementPriority.UNRESOLVED
-                    else "Marked as INFORMATIONAL context only."
+                    else "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation."
                 ),
-                "ta_confirmation_required": req.priority == RequirementPriority.UNRESOLVED,
+                "ta_confirmation_required": True,
+            })
+            evidence_specs.append({
+                "requirement_id": req.id,
+                "requirement": req.text,
+                "priority": "PREFERRED",
+                "explicit_or_derived": "explicit",
+                "confidence": _map_confidence(req.confidence.entity_match_confidence.value),
             })
 
         # Build technical skill entries for EKG-matched requirements
@@ -149,6 +158,19 @@ def project_to_canonical(
                 "priority": _map_priority(req.priority),
                 "explicit_or_derived": "explicit",
             })
+
+    # Include detected ambiguities from raw text if not already present
+    raw_ambs = getattr(master, "raw_ambiguities", []) or []
+    existing_statements = {a["statement"].strip().lower() for a in ambiguities_out if "statement" in a}
+    for amb in raw_ambs:
+        amb_text = getattr(amb, "text", "").strip()
+        if amb_text and amb_text.lower() not in existing_statements:
+            ambiguities_out.append({
+                "statement": amb_text,
+                "why_ambiguous": getattr(amb, "reason", "Statement requiring TA confirmation."),
+                "ta_confirmation_required": True,
+            })
+            existing_statements.add(amb_text.lower())
 
     # --- Responsibilities ---
     responsibilities_out = [

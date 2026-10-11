@@ -218,6 +218,8 @@ def _obj(builder: Optional[Callable[[str], Dict[str, Any]]] = None) -> Callable[
     def _v(v: Any) -> Dict[str, Any]:
         if isinstance(v, dict):
             return v
+        if hasattr(v, "model_dump"):
+            return v.model_dump()
         if isinstance(v, str) and v.strip() and builder:
             return builder(v.strip())
         return {}
@@ -252,6 +254,7 @@ OptSource = Annotated[Optional[SourceRef], BeforeValidator(_to_source)]
 
 class EvidenceSpec(_Base):
     """What candidate evidence downstream Candidate Analysis should look for and how to weigh it."""
+    requirement_id: OptStr = None
     requirement: Str = ""
     priority: PriorityT = Priority.AMBIGUOUS
     explicit_or_derived: ExplicitT = ExplicitOrDerived.DERIVED

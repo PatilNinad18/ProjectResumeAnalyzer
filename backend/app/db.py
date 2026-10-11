@@ -35,6 +35,10 @@ def _migrate_sqlite() -> None:
                     conn.execute(text("ALTER TABLE job_specification_versions ADD COLUMN master_context_json JSON"))
                 if "parent_specification_version_id" not in columns:
                     conn.execute(text("ALTER TABLE job_specification_versions ADD COLUMN parent_specification_version_id VARCHAR"))
+                if "enrichment_report_json" not in columns:
+                    conn.execute(text("ALTER TABLE job_specification_versions ADD COLUMN enrichment_report_json JSON"))
+                if "s3_enriched_markdown_key" not in columns:
+                    conn.execute(text("ALTER TABLE job_specification_versions ADD COLUMN s3_enriched_markdown_key VARCHAR"))
     except Exception as exc:
         # Ignore or log migration failure (e.g. non-SQLite or already exists)
         pass

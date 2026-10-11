@@ -12,10 +12,11 @@ instead of BackgroundTasks.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
@@ -29,7 +30,7 @@ from app.models.db_models import (
     ProcessingJob,
 )
 from app.services.document_parser import DocumentParseError, parse_document
-from app.services.json_serializer import to_json_dict
+from app.services.json_serializer import to_json_dict, to_json_str
 from app.services.markdown_renderer import render_markdown
 from app.services.markdown_to_json import markdown_to_spec
 from app.services.storage import build_key, checksum, get_storage
@@ -282,10 +283,244 @@ def _latest_spec_version(jd_id: str, db: Session) -> JobSpecificationVersion:
 
 
 @router.get("/jds/{jd_id}/markdown")
-def get_markdown(jd_id: str, db: Session = Depends(get_db)):
+def get_markdown(jd_id: str, enriched: Optional[bool] = None, db: Session = Depends(get_db)):
     spec_version = _latest_spec_version(jd_id, db)
-    return {"markdown": storage.get_text(spec_version.s3_markdown_key),
-            "specification_version": spec_version.specification_version}
+    has_enriched = bool(spec_version.s3_enriched_markdown_key)
+    # Priority is ALWAYS Ollama enriched markdown first.
+    # Only if Ollama is unavailable/failed (not has_enriched) or caller explicitly asked for enriched=False do we return baseline.
+    if enriched is False:
+        use_enriched = False
+    else:
+        use_enriched = has_enriched
+
+    key = spec_version.s3_enriched_markdown_key if use_enriched else spec_version.s3_markdown_key
+    return {
+        "markdown": storage.get_text(key),
+        "specification_version": spec_version.specification_version,
+        "is_enriched": use_enriched,
+    }
+
+
+@router.get("/jds/{jd_id}/enrich")
+def get_enrichment(jd_id: str, db: Session = Depends(get_db)):
+    spec_version = _latest_spec_version(jd_id, db)
+    if not spec_version.enrichment_report_json:
+        raise HTTPException(404, "No enrichment report exists for this JD")
+    return spec_version.enrichment_report_json
+
+
+@router.post("/jds/{jd_id}/enrich")
+def enrich_jd(jd_id: str, db: Session = Depends(get_db)):
+    spec_version = _latest_spec_version(jd_id, db)
+    jd = db.get(JobDescription, jd_id)
+    if not jd:
+        raise HTTPException(404, "JD not found")
+
+    from app.services.enrichment import GroundedEnrichmentService, OllamaUnavailableError
+
+    enricher = GroundedEnrichmentService()
+    if not enricher.check_ollama_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Ollama service is unavailable or target model is missing. Start Ollama and try again.",
+        )
+
+    requirements_to_enrich = []
+    if spec_version.master_context_json and "requirements" in spec_version.master_context_json:
+        for req in spec_version.master_context_json["requirements"]:
+            requirements_to_enrich.append({
+                "requirement_id": req.get("id"),
+                "text": req.get("text"),
+                "priority": req.get("priority", "MUST_HAVE"),
+            })
+    elif spec_version.canonical_json and "evidence_requirements" in spec_version.canonical_json:
+        for ev in spec_version.canonical_json["evidence_requirements"]:
+            requirements_to_enrich.append({
+                "requirement_id": ev.get("requirement_id"),
+                "text": ev.get("requirement"),
+                "priority": ev.get("priority", "MUST_HAVE"),
+            })
+
+    checksum_val = (
+        spec_version.jd_version.raw_text_checksum
+        if spec_version.jd_version
+        else "unknown_checksum"
+    )
+
+    try:
+        report = enricher.generate_enrichment_report(
+            spec_version_id=str(spec_version.id),
+            specification_version=spec_version.specification_version,
+            source_checksum=checksum_val,
+            requirements=requirements_to_enrich,
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Enrichment generation failed for jd_id=%s", jd_id)
+        raise HTTPException(status_code=500, detail=f"Enrichment failed: {exc}")
+
+    # Generate and save enriched markdown without mutating baseline artifacts
+    from app.schemas.canonical import JobEvaluationSpecification
+    spec = JobEvaluationSpecification.model_validate(spec_version.canonical_json)
+    enriched_md = render_markdown(spec, enrichment_report=report)
+
+    enriched_key = build_key(str(jd.project_id), jd_id, spec_version.specification_version, "enriched_markdown")
+    storage.put_text(enriched_key, enriched_md, "text/markdown")
+
+    spec_version.enrichment_report_json = report.model_dump(mode="json")
+    spec_version.s3_enriched_markdown_key = enriched_key
+    db.commit()
+
+    return {
+        "status": "enriched",
+        "enrichment_report": report.model_dump(mode="json"),
+        "enriched_markdown": enriched_md,
+    }
+
+
+
+
+class ResolveClarificationsRequest(BaseModel):
+    answers: Dict[str, Any] = Field(default_factory=dict)
+    answered_by: str = "TA / Hiring Team"
+
+
+@router.post("/jds/{jd_id}/clarifications/resolve")
+def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db: Session = Depends(get_db)):
+    spec_version = _latest_spec_version(jd_id, db)
+    jd = db.get(JobDescription, jd_id)
+    if not jd:
+        raise HTTPException(404, "JD not found")
+
+    if not spec_version.master_context_json:
+        raise HTTPException(400, "No master context available to resolve clarifications")
+
+    from app.schemas.master_context import JDMasterContext, QuestionStatus, JDLifecycleStatus
+    from app.models.db_models import JDLifecycleStatusEnum
+    from app.services.clarification.updater import submit_answer, attempt_finalization
+    from app.services.projection.canonical_projector import project_to_canonical
+
+    master = JDMasterContext.model_validate(spec_version.master_context_json)
+
+    # Apply answers to master context
+    for q_key, ans_text in payload.answers.items():
+        if not ans_text:
+            continue
+        text_str = str(ans_text).strip()
+        if not text_str:
+            continue
+        try:
+            master = submit_answer(
+                master,
+                question_key=q_key,
+                answer_text=text_str,
+                answered_by=payload.answered_by,
+                status=QuestionStatus.ANSWERED,
+            )
+        except Exception as exc:
+            logger.warning("Could not submit answer for question %s: %s", q_key, exc)
+
+    # Attempt finalization
+    try:
+        master = attempt_finalization(master, actor=payload.answered_by)
+    except Exception as exc:
+        logger.info("Finalization deferred: %s", exc)
+
+    next_version = spec_version.specification_version + 1
+    new_spec = project_to_canonical(
+        master,
+        jd_id=jd_id,
+        specification_version=next_version,
+    )
+    new_spec.metadata.prompt_version = "clarification_resolved_v1"
+    new_spec.metadata.model_version = "deterministic_ekg"
+
+    # Carry forward existing enrichment report if available, else attempt generation if Ollama is available
+    from app.schemas.enrichment import TAEnrichmentReport
+    enrichment_report = None
+    enriched_md = None
+    enriched_key = None
+
+    if spec_version.enrichment_report_json:
+        try:
+            enrichment_report = TAEnrichmentReport.model_validate(spec_version.enrichment_report_json)
+            enrichment_report.source_specification_version = next_version
+            enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
+        except Exception as exc:
+            logger.warning("Could not carry forward enrichment report: %s", exc)
+
+    if enriched_md is None:
+        from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
+        enricher = GroundedEnrichmentService()
+        if enricher.check_ollama_available():
+            try:
+                from app.services.projection.canonical_projector import _flatten_requirements
+                flat_reqs = _flatten_requirements(master.requirements)
+                reqs = [
+                    {
+                        "requirement_id": r.id,
+                        "text": r.text,
+                        "priority": r.priority.value if hasattr(r.priority, "value") else str(r.priority or "MUST_HAVE"),
+                    }
+                    for r in flat_reqs
+                    if getattr(r, "text", None)
+                ]
+                if reqs:
+                    enrichment_report = enricher.generate_enrichment_report(
+                        spec_version_id=str(spec_version.id),
+                        specification_version=next_version,
+                        source_checksum=spec_version.jd_version.raw_text_checksum if spec_version.jd_version else "unknown",
+                        requirements=reqs,
+                    )
+                    enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
+            except Exception as exc:
+                logger.warning("Post-clarification Ollama enrichment skipped: %s", exc)
+
+    base_md = render_markdown(new_spec)
+    final_md = enriched_md if enriched_md is not None else base_md
+    json_str = to_json_str(new_spec)
+
+    project_id = str(jd.project_id)
+    json_key = build_key(project_id, jd_id, next_version, "json")
+    md_key = build_key(project_id, jd_id, next_version, "markdown")
+    storage.put_text(json_key, json_str, "application/json")
+    storage.put_text(md_key, base_md, "text/markdown")
+
+    if enriched_md:
+        enriched_key = build_key(project_id, jd_id, next_version, "enriched_markdown")
+        storage.put_text(enriched_key, enriched_md, "text/markdown")
+
+    new_spec_version = JobSpecificationVersion(
+        job_description_version_id=spec_version.job_description_version_id,
+        specification_version=next_version,
+        parent_specification_version_id=spec_version.id,
+        s3_json_key=json_key,
+        s3_markdown_key=md_key,
+        canonical_json=json.loads(json_str),
+        master_context_json=master.model_dump(mode="json"),
+        enrichment_report_json=enrichment_report.model_dump(mode="json") if enrichment_report else None,
+        s3_enriched_markdown_key=enriched_key,
+        lifecycle_status=JDLifecycleStatusEnum.FINALIZED if master.lifecycle_status == JDLifecycleStatus.FINALIZED else JDLifecycleStatusEnum.ANALYZED,
+        prompt_version="clarification_resolved_v1",
+        model_version="deterministic_ekg",
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=0,
+        estimated_cost_usd=0,
+        is_valid=True,
+        needs_review=False,
+    )
+    db.add(new_spec_version)
+    db.commit()
+
+    return {
+        "status": "finalized" if master.lifecycle_status == JDLifecycleStatus.FINALIZED else "updated",
+        "specification_version": next_version,
+        "markdown": final_md,
+        "json": new_spec_version.canonical_json,
+        "is_enriched": bool(enriched_key),
+    }
 
 
 @router.get("/jds/{jd_id}/json")
@@ -399,7 +634,9 @@ def chat_jd(jd_id: str, request: ChatRequest, db: Session = Depends(get_db)):
     markdown_content = request.markdown
     if not markdown_content:
         try:
-            markdown_content = storage.get_text(_latest_spec_version(jd_id, db).s3_markdown_key)
+            latest_spec = _latest_spec_version(jd_id, db)
+            spec_key = latest_spec.s3_enriched_markdown_key if latest_spec.s3_enriched_markdown_key else latest_spec.s3_markdown_key
+            markdown_content = storage.get_text(spec_key)
         except HTTPException:
             markdown_content = raw_jd  # not analyzed yet: answer from the raw JD
 
@@ -652,12 +889,18 @@ def get_clarifications(
     """
     Returns clarification questions. Optional query params: status, priority.
     """
+    spec_version = _get_spec_version_row(jd_id, db)
     master = _load_master_context(jd_id, db)
     questions = master.clarification_history
     if status:
         questions = [q for q in questions if q.status.value.upper() == status.upper()]
     if priority:
         questions = [q for q in questions if q.priority.value.upper() == priority.upper()]
+
+    canonical = spec_version.canonical_json or {}
+    ambiguities = canonical.get("ambiguities", [])
+    missing_info = canonical.get("missing_information", [])
+
     return {
         "jd_id": jd_id,
         "lifecycle_status": master.lifecycle_status.value,
@@ -665,6 +908,10 @@ def get_clarifications(
         "blocking_unresolved": len(master.unresolved_blocking_questions),
         "is_ready_to_finalize": master.is_ready_to_finalize,
         "questions": [q.model_dump(mode="json") for q in questions],
+        "ambiguities": ambiguities,
+        "missing_information": missing_info,
+        "has_ambiguities": bool(questions or ambiguities or missing_info),
+        "specification_version": spec_version.specification_version,
     }
 
 
