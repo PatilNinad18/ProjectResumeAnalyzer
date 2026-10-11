@@ -1,11 +1,5 @@
 "use client";
 
-// ============================================================================
-// REPLACE everything in your page.tsx from line 1 down to (but NOT including)
-// the line `return (` with this file's content. Your <style jsx global> CSS and
-// JSX stay exactly as they are (see the 3 small JSX edits listed in my reply).
-// ============================================================================
-
 import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import {
@@ -15,11 +9,14 @@ import {
   getJson,
   askJDChatbot,
   pollUntilDone,
+  getClarifyState,
+  submitClarifyAnswer,
   TERMINAL_STATUSES,
   ProcessingStatus,
   CompanyDetails,
   CreatedAgent,
   ChatTurn,
+  ClarifyState,
 } from "@/lib/api";
 
 const statusConfig: Record<ProcessingStatus, { label: string; icon: string; className: string }> = {
@@ -32,6 +29,8 @@ const statusConfig: Record<ProcessingStatus, { label: string; icon: string; clas
   NEEDS_REVIEW: { label: "Needs Review", icon: "!", className: "status-review" },
   FAILED: { label: "Failed", icon: "×", className: "status-failed" },
 };
+
+const TA_DONT_KNOW = "TA does not know; treat as unspecified.";
 
 function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -76,6 +75,12 @@ export default function Home() {
   // Cancellation handles for in-flight polling
   const pollAbortRef = useRef<AbortController | null>(null);
   const regenAbortRef = useRef<AbortController | null>(null);
+
+  // LLM-driven TA clarification loop
+  const [clarify, setClarify] = useState<ClarifyState | null>(null);
+  const [clarifyAnswer, setClarifyAnswer] = useState("");
+  const [isClarifyBusy, setIsClarifyBusy] = useState(false);
+  const clarifyOpen = clarify?.state === "AWAITING_TA";
 
   // Agent Creation
   const [agents, setAgents] = useState<CreatedAgent[]>([]);
@@ -175,17 +180,22 @@ export default function Home() {
     setCreatedAgentSuccess(null);
     setAgentNameInput("");
     setJobTitle("");
+    setClarify(null);
+    setClarifyAnswer("");
   }
 
   // Step 3 Analyse Handler.
   // The backend now returns immediately from /analyze (HTTP 202) and we poll for progress,
   // so the UI shows live status + elapsed time instead of freezing for minutes.
+  // The backend also runs the LLM ambiguity review before reporting READY.
   async function handleAnalyseJD() {
     if (!jdText.trim() && !selectedFile) return;
     setError(null);
     setMarkdown(null);
     setJsonData(null);
     setCreatedAgentSuccess(null);
+    setClarify(null);
+    setClarifyAnswer("");
 
     pollAbortRef.current?.abort();
     const controller = new AbortController();
@@ -217,11 +227,50 @@ export default function Home() {
       setMarkdown(mdRes.markdown);
       setJsonData(jsonRes.json);
       setSpecVersion(mdRes.specification_version || 1);
+      setClarify(await getClarifyState(jd_id).catch(() => null));
     } catch (e) {
       if (isAbort(e)) return;
       setError((e as Error).message);
       setStatus("FAILED"); // unlock the Analyse button
     } finally {
+      if (pollAbortRef.current === controller) setAnalysisStartedAt(null);
+    }
+  }
+
+  // TA answered (or skipped) the clarification question. The backend regenerates the
+  // specification with the answer folded into the JD, then the LLM reviews it again.
+  async function handleSubmitClarification(answer: string) {
+    if (!jdId || !answer.trim()) return;
+    setError(null);
+    setIsClarifyBusy(true);
+
+    pollAbortRef.current?.abort();
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
+
+    try {
+      await submitClarifyAnswer(jdId, answer.trim());
+      setClarifyAnswer("");
+      setStatus("UNDERSTANDING");
+      setAnalysisStartedAt(Date.now());
+
+      const final = await pollUntilDone(jdId, { onStatus: setStatus, signal: controller.signal });
+      if (final.status === "FAILED") {
+        setError(final.error_message || "Regeneration failed.");
+        return;
+      }
+
+      const [mdRes, jsonRes] = await Promise.all([getMarkdown(jdId), getJson(jdId)]);
+      setMarkdown(mdRes.markdown);
+      setJsonData(jsonRes.json);
+      setSpecVersion(mdRes.specification_version || 1);
+      setClarify(await getClarifyState(jdId).catch(() => null));
+    } catch (e) {
+      if (isAbort(e)) return;
+      setError((e as Error).message);
+      setStatus("FAILED");
+    } finally {
+      setIsClarifyBusy(false);
       if (pollAbortRef.current === controller) setAnalysisStartedAt(null);
     }
   }
@@ -1471,7 +1520,7 @@ export default function Home() {
                     )}
                     {status && (
                       <span className={`status-pill ${statusConfig[status]?.className}`}>
-                        {statusConfig[status]?.icon} {statusConfig[status]?.label}
+                        {statusConfig[status]?.icon} {statusConfig[status]?.label} {elapsedLabel}
                       </span>
                     )}
                   </div>
@@ -1533,7 +1582,7 @@ export default function Home() {
                   >
                     {status !== null && !TERMINAL_STATUSES.includes(status) ? (
                       <>
-                        <span className="spinner"></span> Analyzing JD...
+                        <span className="spinner"></span> Analyzing JD... {elapsedLabel}
                       </>
                     ) : (
                       "🚀 Analyse Job Description"
@@ -1541,6 +1590,61 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+
+              {/* Clarification loop: the LLM found an ambiguity and asks the TA one question */}
+              {isStep3Done && clarifyOpen && clarify && !isClarifyBusy && (
+                <div className="card" style={{ borderColor: "#fedf89" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                    <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Clarification needed</h3>
+                    <span className="status-pill status-review">
+                      ! Question {clarify.round} (max {clarify.max_rounds})
+                    </span>
+                  </div>
+                  {clarify.issue && (
+                    <p style={{ margin: "0 0 10px 0", fontSize: "0.85rem", color: "#667085" }}>
+                      <strong>Why we ask:</strong> {clarify.issue}
+                    </p>
+                  )}
+                  <p style={{ margin: "0 0 14px 0", fontSize: "0.98rem", fontWeight: 600 }}>{clarify.question}</p>
+                  <textarea
+                    className="textarea"
+                    style={{ minHeight: "90px" }}
+                    value={clarifyAnswer}
+                    onChange={(e) => setClarifyAnswer(e.target.value)}
+                    placeholder="Type your answer..."
+                  />
+                  {clarify.history.length > 0 && (
+                    <details style={{ marginTop: "12px", fontSize: "0.82rem", color: "#667085" }}>
+                      <summary>Previous answers ({clarify.history.length})</summary>
+                      {clarify.history.map((h, i) => (
+                        <p key={i} style={{ margin: "8px 0 0 0" }}>
+                          <strong>Q:</strong> {h.question}
+                          <br />
+                          <strong>A:</strong> {h.answer}
+                        </p>
+                      ))}
+                    </details>
+                  )}
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "14px" }}>
+                    <button className="btn-secondary" onClick={() => handleSubmitClarification(TA_DONT_KNOW)}>
+                      Skip (unknown)
+                    </button>
+                    <button
+                      className="btn-primary"
+                      disabled={!clarifyAnswer.trim()}
+                      onClick={() => handleSubmitClarification(clarifyAnswer)}
+                    >
+                      Submit answer →
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {isStep3Done && clarify?.state === "CLEAR" && clarify.history.length > 0 && (
+                <div className="alert-success">
+                  ✓ No remaining ambiguities. {clarify.history.length} TA clarification(s) applied.
+                </div>
+              )}
 
               {/* Step 4: View / Download JD Context */}
               {isStep3Done && markdown && (
@@ -1592,8 +1696,8 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Step 5: Create Agent */}
-              {isStep3Done && (
+              {/* Step 5: Create Agent (blocked while a clarification question is open) */}
+              {isStep3Done && !clarifyOpen && (
                 <div className="card" style={{ borderColor: "#6366f1" }}>
                   <h3 style={{ margin: "0 0 8px 0", fontSize: "1.1rem" }}>Step 5: Create JD Agent</h3>
                   <p style={{ margin: "0 0 16px 0", fontSize: "0.88rem", color: "#667085" }}>

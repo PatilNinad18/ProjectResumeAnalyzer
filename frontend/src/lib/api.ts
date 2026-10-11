@@ -49,6 +49,17 @@ export interface ChatTurn {
   content: string;
 }
 
+// LLM-driven TA clarification loop
+export interface ClarifyState {
+  jd_id: string;
+  state: "WORKING" | "AWAITING_TA" | "CLEAR" | "NOT_REVIEWED";
+  round?: number;
+  max_rounds: number;
+  question?: string;
+  issue?: string | null;
+  history: { question: string; answer: string }[];
+}
+
 // ---------------------------------------------------------------------------
 // Low-level request helper: timeout + FastAPI error parsing
 // ---------------------------------------------------------------------------
@@ -126,6 +137,23 @@ export async function getMarkdown(jdId: string): Promise<{ markdown: string; spe
 
 export async function getJson(jdId: string): Promise<{ json: Record<string, unknown>; specification_version: number }> {
   return request(`/api/jds/${jdId}/json`);
+}
+
+// ---------------------------------------------------------------------------
+// TA clarification loop (LLM reviews the spec -> ONE question -> TA answers -> regenerate -> review ...)
+// ---------------------------------------------------------------------------
+export async function getClarifyState(jdId: string): Promise<ClarifyState> {
+  return request(`/api/jds/${jdId}/clarify/state`, { timeoutMs: 15_000 });
+}
+
+/** Returns immediately (HTTP 202); the spec is regenerated and re-reviewed in the background. */
+export async function submitClarifyAnswer(jdId: string, answer: string): Promise<{ status: string; round: number }> {
+  return request(`/api/jds/${jdId}/clarify/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answer }),
+    timeoutMs: 15_000,
+  });
 }
 
 // ---------------------------------------------------------------------------

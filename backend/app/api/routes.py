@@ -5,17 +5,22 @@ POST /jds/{id}/analyze returns immediately (202). The LLM work runs in a
 background task and the client polls GET /jds/{id}/analysis until the status is
 READY / NEEDS_REVIEW / FAILED.
 
+After every analysis the LLM reviews the generated specification. If it finds an
+ambiguity it stores ONE question for the TA (GET /jds/{id}/clarify/state). The TA
+answers (POST /jds/{id}/clarify/answer), the spec is regenerated with the answer
+and reviewed again, until the LLM reports that no ambiguity is left.
+
 NOTE: in-flight tracking is in-process memory, which is correct for a single
 uvicorn worker (local Ollama). For multi-worker production, replace
-_inflight/_errors with a Redis key or a status column and use SQS/Celery
-instead of BackgroundTasks.
+_inflight/_errors/_clarify_clear with a Redis key or a status column and use
+SQS/Celery instead of BackgroundTasks.
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Set
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
@@ -23,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.db_models import (
+    Clarification,
     JobDescription,
     JobDescriptionVersion,
     JobSpecificationVersion,
@@ -30,6 +36,8 @@ from app.models.db_models import (
 )
 from app.services.document_parser import DocumentParseError, parse_document
 from app.services.json_serializer import to_json_dict
+from app.services.llm_clarifier import clarifications_markdown, effective_jd, next_question
+from app.services.llm_service import cfg_bool, cfg_int
 from app.services.markdown_renderer import render_markdown
 from app.services.markdown_to_json import markdown_to_spec
 from app.services.storage import build_key, checksum, get_storage
@@ -49,16 +57,30 @@ TERMINAL_STATUSES = {"READY", "NEEDS_REVIEW", "FAILED"}
 _state_lock = threading.Lock()
 _inflight: Dict[str, float] = {}   # jd_id -> start time
 _errors: Dict[str, str] = {}       # jd_id -> last failure message
+_clarify_clear: Set[str] = set()   # jd_ids whose latest spec was reviewed and found unambiguous
 
 
-def _run_processing(jd_id: str, jd_version_id: str) -> None:
-    """Runs in a worker thread, with its own DB session."""
+def _run_processing(jd_id: str, jd_version_id: Optional[str], with_clarifications: bool = False) -> None:
+    """
+    Runs in a worker thread, with its own DB session.
+
+    with_clarifications=True means the TA just answered a question: ALL answers are
+    folded into a new JD version, the spec is regenerated from it, and the LLM
+    reviews the new spec again (-> next question, or CLEAR).
+    """
     from app.db import SessionLocal
     from app.workers.worker import process_job_description_version
 
     db = SessionLocal()
     try:
+        if with_clarifications:
+            jd_version_id = _create_clarified_jd_version(db, jd_id).id
         process_job_description_version(db, jd_version_id)
+
+        if _latest_job_ok(db, jd_id):
+            if with_clarifications:
+                _append_clarifications_to_markdown(db, jd_id)
+            _review_latest_spec(db, jd_id)   # LLM decides: ask another question or finish
     except Exception as exc:  # noqa: BLE001
         logger.exception("Background analysis failed for jd_id=%s", jd_id)
         with _state_lock:
@@ -222,6 +244,7 @@ def analyze_jd(jd_id: str, background_tasks: BackgroundTasks, db: Session = Depe
             return {"jd_id": jd_id, "jd_version_id": jd_version.id, "status": "already_running"}
         _inflight[jd_id] = time.time()
         _errors.pop(jd_id, None)
+        _clarify_clear.discard(jd_id)
 
     background_tasks.add_task(_run_processing, jd_id, jd_version.id)
     return {"jd_id": jd_id, "jd_version_id": jd_version.id, "status": "queued"}
@@ -416,6 +439,198 @@ def chat_direct(request: ChatRequest):
     if not request.markdown or not request.markdown.strip():
         raise HTTPException(400, "Markdown context is empty")
     return {"answer": _answer(request.markdown, request.question, request.history, None)}
+
+
+# ===========================================================================
+# LLM-DRIVEN TA CLARIFICATION LOOP
+#
+#   generate spec -> LLM review -> ONE question -> TA answer -> regenerate -> review ... -> CLEAR
+#
+# Routes:
+#   GET  /api/jds/{jd_id}/clarify/state    - WORKING | AWAITING_TA | CLEAR | NOT_REVIEWED
+#   POST /api/jds/{jd_id}/clarify/answer   - submit the TA answer (202; regenerates + re-reviews)
+# ===========================================================================
+def _latest_spec_version_or_none(jd_id: str, db: Session) -> Optional[JobSpecificationVersion]:
+    return (
+        db.query(JobSpecificationVersion)
+        .join(JobDescriptionVersion)
+        .filter(JobDescriptionVersion.job_description_id == jd_id)
+        .order_by(JobSpecificationVersion.created_at.desc())
+        .first()
+    )
+
+
+def _latest_job_ok(db: Session, jd_id: str) -> bool:
+    job = (
+        db.query(ProcessingJob)
+        .join(JobDescriptionVersion)
+        .filter(JobDescriptionVersion.job_description_id == jd_id)
+        .order_by(ProcessingJob.created_at.desc())
+        .first()
+    )
+    return bool(job) and _status_str(job) in ("READY", "NEEDS_REVIEW")
+
+
+def _base_jd_text(jd_id: str, db: Session) -> str:
+    """The ORIGINAL JD (version 1). Answers are always re-applied on top of this, never stacked."""
+    v1 = (
+        db.query(JobDescriptionVersion)
+        .filter(JobDescriptionVersion.job_description_id == jd_id)
+        .order_by(JobDescriptionVersion.version.asc())
+        .first()
+    )
+    if not v1:
+        raise ValueError(f"No JD version for jd_id={jd_id}")
+    return storage.get_text(v1.s3_raw_key)
+
+
+def _answered_qa(jd_id: str, db: Session) -> List[tuple]:
+    rows = (
+        db.query(Clarification)
+        .filter(Clarification.jd_id == jd_id, Clarification.answer.isnot(None))
+        .order_by(Clarification.round_no)
+        .all()
+    )
+    return [(r.question, r.answer) for r in rows]
+
+
+def _create_clarified_jd_version(db: Session, jd_id: str) -> JobDescriptionVersion:
+    """New JD version = original JD + every TA answer so far."""
+    jd = db.get(JobDescription, jd_id)
+    latest = (
+        db.query(JobDescriptionVersion)
+        .filter(JobDescriptionVersion.job_description_id == jd_id)
+        .order_by(JobDescriptionVersion.version.desc())
+        .first()
+    )
+    new_no = (latest.version if latest else 0) + 1
+    raw = effective_jd(_base_jd_text(jd_id, db), _answered_qa(jd_id, db))
+    key = build_key(jd.project_id, jd.id, new_no, "raw")
+    storage.put_text(key, raw)
+
+    version = JobDescriptionVersion(
+        job_description_id=jd.id,
+        version=new_no,
+        s3_raw_key=key,
+        raw_text_checksum=checksum(raw),
+    )
+    jd.current_version = new_no
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    return version
+
+
+def _append_clarifications_to_markdown(db: Session, jd_id: str) -> None:
+    """Record-keeping only: the TA's Q&A is visible in the final Markdown."""
+    spec_row = _latest_spec_version_or_none(jd_id, db)
+    qa = _answered_qa(jd_id, db)
+    if spec_row is None or not qa:
+        return
+    md = storage.get_text(spec_row.s3_markdown_key)
+    if "## Clarifications from TA" not in md:
+        storage.put_text(spec_row.s3_markdown_key, md + clarifications_markdown(qa), "text/markdown")
+
+
+def _review_latest_spec(db: Session, jd_id: str) -> None:
+    """LLM reviews the generated spec. Stores ONE pending question, or marks the JD CLEAR."""
+    if not cfg_bool("CLARIFY_ENABLED", True):
+        return
+    try:
+        spec_row = _latest_spec_version_or_none(jd_id, db)
+        if spec_row is None:
+            return
+        qa = _answered_qa(jd_id, db)
+        finding = next_question(
+            _get_llm(), _base_jd_text(jd_id, db), storage.get_text(spec_row.s3_markdown_key), qa
+        )
+        # Drop any stale unanswered question before storing the new one.
+        db.query(Clarification).filter(
+            Clarification.jd_id == jd_id, Clarification.answer.is_(None)
+        ).delete()
+        if finding is None:
+            with _state_lock:
+                _clarify_clear.add(jd_id)
+            logger.info("[clarify] jd_id=%s: no ambiguity left after %d answer(s)", jd_id, len(qa))
+            db.commit()
+            return
+        db.add(Clarification(
+            jd_id=jd_id,
+            round_no=len(qa) + 1,
+            question=finding.question,
+            issue=finding.issue,
+        ))
+        db.commit()
+        logger.info("[clarify] jd_id=%s round %d question: %s", jd_id, len(qa) + 1, finding.question)
+    except Exception:  # noqa: BLE001  (never break the analysis because the review failed)
+        db.rollback()
+        logger.exception("Clarification review failed for jd_id=%s; continuing without it", jd_id)
+
+
+class ClarifyAnswerRequest(BaseModel):
+    answer: str = Field(..., min_length=1, max_length=2000)
+
+
+@router.get("/jds/{jd_id}/clarify/state")
+def clarify_state(jd_id: str, db: Session = Depends(get_db)):
+    with _state_lock:
+        working = jd_id in _inflight
+        clear = jd_id in _clarify_clear
+    base = {
+        "jd_id": jd_id,
+        "max_rounds": cfg_int("CLARIFY_MAX_ROUNDS", 5),
+        "history": [{"question": q, "answer": a} for q, a in _answered_qa(jd_id, db)],
+    }
+    if working:
+        return {**base, "state": "WORKING"}
+    pending = (
+        db.query(Clarification)
+        .filter(Clarification.jd_id == jd_id, Clarification.answer.is_(None))
+        .order_by(Clarification.round_no.desc())
+        .first()
+    )
+    if pending:
+        return {**base, "state": "AWAITING_TA", "round": pending.round_no,
+                "question": pending.question, "issue": pending.issue}
+    return {**base, "state": "CLEAR" if clear else "NOT_REVIEWED"}
+
+
+@router.post("/jds/{jd_id}/clarify/answer", status_code=202)
+def clarify_answer(
+    jd_id: str,
+    request: ClarifyAnswerRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    answer = request.answer.strip()
+    if not answer:
+        raise HTTPException(400, "Answer is empty.")
+    pending = (
+        db.query(Clarification)
+        .filter(Clarification.jd_id == jd_id, Clarification.answer.is_(None))
+        .order_by(Clarification.round_no.desc())
+        .first()
+    )
+    if not pending:
+        raise HTTPException(404, "No pending clarification question for this JD.")
+
+    with _state_lock:
+        if jd_id in _inflight:
+            raise HTTPException(409, "This JD is still being processed.")
+        _inflight[jd_id] = time.time()
+        _errors.pop(jd_id, None)
+        _clarify_clear.discard(jd_id)
+    try:
+        pending.answer = answer
+        db.commit()
+    except Exception:
+        db.rollback()
+        with _state_lock:
+            _inflight.pop(jd_id, None)
+        raise
+
+    background_tasks.add_task(_run_processing, jd_id, None, True)   # regenerate + re-review
+    return {"jd_id": jd_id, "status": "queued", "round": pending.round_no}
 
 
 # ===========================================================================
@@ -769,4 +984,4 @@ def grounded_chat(
             }
             for a in result.answers
         ],
-    }
+    }

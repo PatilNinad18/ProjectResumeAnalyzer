@@ -16,6 +16,9 @@ environment variables. Optional knobs (all have safe defaults):
     LLM_MAX_RETRIES=              default 0 for ollama (a retry costs minutes), 2 for cloud
     LLM_CHAT_MAX_TOKENS=1200
     ALLOW_MOCK_FALLBACK=false     NEVER enable in production: returns fake rule-based output
+    CLARIFY_ENABLED=true          LLM-driven TA clarification loop
+    CLARIFY_MAX_ROUNDS=5          safety cap on questions per JD
+    CLARIFY_REVIEW_MAX_TOKENS=500 output budget of one review call
 """
 from __future__ import annotations
 
@@ -96,6 +99,18 @@ class ProviderAdapter(abc.ABC):
     @abc.abstractmethod
     def complete_text(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> str:
         ...
+
+    def complete_json(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int, schema: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Small structured call with its OWN schema (used by the clarification reviewer).
+        Default for providers without grammar-constrained output (Anthropic, Gemini):
+        the prompt describes the JSON shape and the reply is parsed leniently.
+        OllamaAdapter overrides this to enforce `schema` with a grammar.
+        """
+        result = self.complete_structured(system_prompt, user_prompt, model, max_tokens)
+        return result.parsed_json or {}
 
 
 # --------------------------------------------------------------------------
@@ -381,6 +396,24 @@ class OllamaAdapter(ProviderAdapter):
             raise ValueError(f"provider=ollama returned unparseable or truncated JSON (finish_reason={finish}, chars={len(text)}).")
         return LLMResult(raw_text=text, parsed_json=parsed, usage=usage, prompt_version="", finish_reason=finish)
 
+    def complete_json(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int, schema: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Small structured call: the grammar enforces the SMALL `schema`, not the canonical one."""
+        lowered = model.lower()
+        if "qwen3" in lowered and "instruct" not in lowered:
+            user_prompt += "\n\n/no_think"  # soft switch honoured by hybrid Qwen3 builds
+        text, in_tok, out_tok, finish, latency_ms = self._stream_chat(
+            system_prompt=system_prompt, user_prompt=user_prompt, model=model,
+            max_tokens=max_tokens, temperature=0.0, response_format=schema,
+        )
+        _log_response(self.name, text, LLMUsage(in_tok, out_tok, latency_ms, model=model), finish)
+        parsed = _safe_json_extract(text)
+        if parsed is None:
+            _dump_full_response_for_debug(self.name, text)
+            raise ValueError(f"provider=ollama returned unparseable JSON (finish_reason={finish}, chars={len(text)}).")
+        return parsed
+
     def complete_text(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> str:
         text, in_tok, out_tok, finish, latency_ms = self._stream_chat(
             system_prompt=system_prompt, user_prompt=user_prompt, model=model,
@@ -558,6 +591,13 @@ class MockAdapter(ProviderAdapter):
         return LLMResult(raw_text=json.dumps(canonical_dict, indent=2, default=str),
                          parsed_json=canonical_dict, usage=usage, prompt_version="")
 
+    def complete_json(
+        self, system_prompt: str, user_prompt: str, model: str, max_tokens: int, schema: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        # The mock cannot review anything: report "no ambiguity" so the loop ends immediately.
+        logger.warning("provider=mock complete_json: returning has_ambiguity=false")
+        return {"jd_quote": "", "spec_quote": "", "issue": "", "has_ambiguity": False, "question": ""}
+
     def complete_text(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> str:
         logger.warning("provider=mock complete_text")
         question = user_prompt.split("User Question:", 1)[1] if "User Question:" in user_prompt else user_prompt
@@ -666,6 +706,24 @@ class LLMService:
             logger.warning("ALLOW_MOCK_FALLBACK=true: returning rule-based mock output (NOT a real analysis).")
             return MockAdapter().complete_structured(system_prompt, user_prompt, "mock-extractor-v1", max_tokens)
         raise RuntimeError(f"LLM call failed after {self.max_retries + 1} attempt(s): {last_exc}")
+
+    def complete_json(
+        self, system_prompt: str, user_prompt: str, schema: Dict[str, Any], max_tokens: int = 500
+    ) -> Dict[str, Any]:
+        """Small schema-constrained JSON call (used by the TA clarification reviewer)."""
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self.adapter.complete_json(
+                    system_prompt=system_prompt, user_prompt=user_prompt,
+                    model=self.model, max_tokens=max_tokens, schema=schema,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("LLM json call attempt %d/%d failed: %s", attempt + 1, self.max_retries + 1, exc)
+                last_exc = exc
+                if self._is_fatal(exc):
+                    raise
+        raise RuntimeError(f"LLM json call failed after {self.max_retries + 1} attempt(s): {last_exc}")
 
     def _chat_rag(self, question: str) -> str:
         try:

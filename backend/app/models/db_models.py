@@ -257,3 +257,21 @@ class ClarificationQuestion(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     spec_version = relationship("JobSpecificationVersion", back_populates="clarification_questions")
+
+
+class Clarification(Base):
+    """
+    LLM-driven TA clarification loop (one row per question the reviewer LLM asked).
+    answer IS NULL means the question is waiting for the TA.
+    NOTE: if the table already exists, add the new column once:
+        ALTER TABLE clarifications ADD COLUMN issue TEXT;
+    (or delete the dev SQLite file so create_all rebuilds it).
+    """
+    __tablename__ = "clarifications"
+
+    id = Column(Integer, primary_key=True)
+    jd_id = Column(String, index=True, nullable=False)
+    round_no = Column(Integer, nullable=False)
+    question = Column(Text, nullable=False)
+    issue = Column(Text, nullable=True)        # why the LLM is asking
+    answer = Column(Text, nullable=True)       # NULL = waiting for TA
