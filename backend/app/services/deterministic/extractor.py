@@ -73,7 +73,7 @@ class DeterministicExtractor:
             (r'^(?:minimum\s+|basic\s+|required\s+|desired\s+)?qualifications?\s*:?$', 'requirements'),
             (r'^(?:what\s+(?:we(?:\x27re|\s+are)?\s+looking\s+for|you(?:\x27ll)?\s+need|you\s+bring|we\s+expect))\s*:?$', 'requirements'),
             (r'^(?:candidate\s+profile|eligibility(?:\s+criteria)?|must\s+haves?)\s*:?$', 'requirements'),
-            (r'^(?:key\s+|primary\s+|core\s+|role\s*(?:&|and)\s*)?responsibilities?\s*:?$', 'responsibilities'),
+            (r'^(?:(?:key|primary|core|main|major|essential|job)\s+)*(?:role\s*(?:&|and)\s*)?responsibilities?\s*:?$', 'responsibilities'),
             (r'^(?:duties|role\s+overview|what\s+you\s+will\s+do|scope\s+of\s+work|your\s+role)\s*:?$', 'responsibilities'),
             (r'^(?:preferred\s+|nice\s+to\s+have|bonus\s+points?|plus|good\s+to\s+have|desired\s+)(?:skills?|qualifications?|requirements?)?\s*:?$', 'preferred'),
             (r'^(?:tech\s+stack|tools\s*(?:&|and)\s*technologies)\s*:?$', 'requirements'),

@@ -45,6 +45,7 @@ from app.schemas.canonical import (
     ConfidenceLevel,
 )
 from app.schemas.master_context import (
+    ClauseType,
     DisjunctionGroup,
     JDMasterContext,
     JDLifecycleStatus,
@@ -90,9 +91,28 @@ def project_to_canonical(
     evidence_specs: List[Dict[str, Any]] = []
     ambiguities_out: List[Dict[str, Any]] = []
 
+    # Collect known responsibility descriptions for deduplication
+    resp_descriptions = {
+        (r.raw_statement if hasattr(r, "raw_statement") else str(r)).strip().lower()
+        for r in master.responsibilities
+        if getattr(r, "raw_statement", None)
+    }
+
     # --- Flatten requirements ---
     all_reqs = _flatten_requirements(master.requirements)
     for req in all_reqs:
+        # Responsibilities belong exclusively to Section 3 Responsibilities,
+        # never duplicated into Section 2 Requirements (Must-Have/Preferred) or Section 4 Evidence.
+        is_resp = (
+            getattr(req, "clause_type", None) == ClauseType.RESPONSIBILITY
+            or (req.source and getattr(req.source, "section", "") in (
+                "responsibilities", "duties", "deliverables", "key_responsibilities", "expected_deliverables"
+            ))
+            or req.text.strip().lower() in resp_descriptions
+        )
+        if is_resp:
+            continue
+
         # Traceable Origin Invariant — enforced at runtime
         if req.is_mandatory:
             assert req.provenance.origin_type in {OriginType.EXPLICIT_JD, OriginType.TA_CONFIRMED}, (
@@ -221,6 +241,25 @@ def project_to_canonical(
         for r in master.responsibilities
         if r.raw_statement and not subhead_clean_re.match(r.raw_statement.strip())
     ]
+    seen_resp = {r["description"].strip().lower() for r in responsibilities_out}
+    for req in all_reqs:
+        if (
+            getattr(req, "clause_type", None) == ClauseType.RESPONSIBILITY
+            or (req.source and getattr(req.source, "section", "") in (
+                "responsibilities", "duties", "deliverables", "key_responsibilities", "expected_deliverables"
+            ))
+        ):
+            text_clean = req.text.strip()
+            if text_clean.lower() not in seen_resp and not subhead_clean_re.match(text_clean):
+                responsibilities_out.append({
+                    "description": text_clean,
+                    "kind": "primary",
+                    "source": {
+                        "text": text_clean,
+                        "section": getattr(req.source, "section", "responsibilities") if req.source else "responsibilities",
+                    },
+                })
+                seen_resp.add(text_clean.lower())
 
     # --- Missing info (omit if answered or explicitly marked unspecified) ---
     missing_info_out: List[Dict[str, Any]] = []

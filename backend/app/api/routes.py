@@ -327,12 +327,25 @@ def enrich_jd(jd_id: str, db: Session = Depends(get_db)):
 
     requirements_to_enrich = []
     if spec_version.master_context_json and "requirements" in spec_version.master_context_json:
+        mc_resps = {
+            r.get("raw_statement", "").strip().lower()
+            for r in spec_version.master_context_json.get("responsibilities", [])
+            if r.get("raw_statement")
+        }
         for req in spec_version.master_context_json["requirements"]:
-            requirements_to_enrich.append({
-                "requirement_id": req.get("id"),
-                "text": req.get("text"),
-                "priority": req.get("priority", "MUST_HAVE"),
-            })
+            txt = (req.get("text") or "").strip()
+            sec = req.get("source", {}).get("section", "") if isinstance(req.get("source"), dict) else ""
+            ctype = str(req.get("clause_type") or "").lower()
+            if (
+                ctype != "responsibility"
+                and sec not in ("responsibilities", "duties", "deliverables", "key_responsibilities", "expected_deliverables")
+                and txt.lower() not in mc_resps
+            ):
+                requirements_to_enrich.append({
+                    "requirement_id": req.get("id"),
+                    "text": req.get("text"),
+                    "priority": req.get("priority", "MUST_HAVE"),
+                })
     elif spec_version.canonical_json and "evidence_requirements" in spec_version.canonical_json:
         for ev in spec_version.canonical_json["evidence_requirements"]:
             requirements_to_enrich.append({
@@ -347,12 +360,44 @@ def enrich_jd(jd_id: str, db: Session = Depends(get_db)):
         else "unknown_checksum"
     )
 
+    clarification_context = []
+    role_context = {}
+    if spec_version.master_context_json:
+        mc = spec_version.master_context_json
+        for q in mc.get("clarification_history", []):
+            if q.get("status") == "ANSWERED" and q.get("answer_text"):
+                clarification_context.append({
+                    "question_key": q.get("question_key"),
+                    "question_text": q.get("question_text"),
+                    "answer_text": q.get("answer_text"),
+                    "answered_by": q.get("answered_by", "TA"),
+                })
+        ro = mc.get("role_overview", {})
+        jc = mc.get("job_context", {})
+        loc = (mc.get("conventional_requirements") or {}).get("location", {})
+        role_context = {
+            "role_title": ro.get("job_title") or ro.get("title", ""),
+            "team_size": jc.get("team_size"),
+            "salary_range": jc.get("salary_range"),
+            "work_mode": loc.get("work_mode"),
+        }
+
+    raw_jd = ""
+    if spec_version.jd_version and spec_version.jd_version.s3_raw_key:
+        try:
+            raw_jd = storage.get_text(spec_version.jd_version.s3_raw_key)
+        except Exception:
+            raw_jd = ""
+
     try:
         report = enricher.generate_enrichment_report(
             spec_version_id=str(spec_version.id),
             specification_version=spec_version.specification_version,
             source_checksum=checksum_val,
             requirements=requirements_to_enrich,
+            clarification_context=clarification_context,
+            role_context=role_context,
+            raw_jd_text=raw_jd,
         )
     except OllamaUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -436,46 +481,89 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
     new_spec.metadata.prompt_version = "clarification_resolved_v1"
     new_spec.metadata.model_version = "deterministic_ekg"
 
-    # Carry forward existing enrichment report if available, else attempt generation if Ollama is available
+    # Step 3: Pass original JD, initial analysis, deterministic extraction results,
+    # and updated clarification context back to Ollama to generate the final, refined Markdown.
     from app.schemas.enrichment import TAEnrichmentReport
+    from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
+    from app.services.projection.canonical_projector import _flatten_requirements
+
+    clarification_context = [
+        {
+            "question_key": q.question_key,
+            "question_text": q.question_text,
+            "answer_text": q.answer_text,
+            "answered_by": q.answered_by or payload.answered_by,
+        }
+        for q in master.clarification_history
+        if q.status == QuestionStatus.ANSWERED and q.answer_text
+    ]
+
+    raw_jd = ""
+    if spec_version.jd_version and spec_version.jd_version.s3_raw_key:
+        try:
+            raw_jd = storage.get_text(spec_version.jd_version.s3_raw_key)
+        except Exception:
+            raw_jd = ""
+
+    role_context = {
+        "role_title": getattr(master.role_overview, "job_title", None) or getattr(master.role_overview, "title", None) or (new_spec.role.job_title if hasattr(new_spec, "role") and new_spec.role else ""),
+        "team_size": master.job_context.team_size,
+        "salary_range": getattr(master.job_context, "salary_range", None),
+        "work_mode": getattr(master.role_overview, "work_mode", "UNSPECIFIED"),
+    }
+
+    resp_descs = {
+        (r.raw_statement if hasattr(r, "raw_statement") else str(r)).strip().lower()
+        for r in master.responsibilities
+        if getattr(r, "raw_statement", None)
+    }
+    flat_reqs = _flatten_requirements(master.requirements)
+    reqs = [
+        {
+            "requirement_id": r.id,
+            "text": r.text,
+            "priority": r.priority.value if hasattr(r.priority, "value") else str(r.priority or "MUST_HAVE"),
+        }
+        for r in flat_reqs
+        if getattr(r, "text", None)
+        and getattr(getattr(r, "clause_type", None), "value", str(getattr(r, "clause_type", ""))) != "responsibility"
+        and (not r.source or getattr(r.source, "section", "") not in (
+            "responsibilities", "duties", "deliverables", "key_responsibilities", "expected_deliverables"
+        ))
+        and r.text.strip().lower() not in resp_descs
+    ]
+
     enrichment_report = None
     enriched_md = None
     enriched_key = None
 
-    if spec_version.enrichment_report_json:
+    enricher = GroundedEnrichmentService()
+    if enricher.check_ollama_available():
+        try:
+            if reqs:
+                enrichment_report = enricher.generate_enrichment_report(
+                    spec_version_id=str(spec_version.id),
+                    specification_version=next_version,
+                    source_checksum=spec_version.jd_version.raw_text_checksum if spec_version.jd_version else "unknown",
+                    requirements=reqs,
+                    clarification_context=clarification_context,
+                    role_context=role_context,
+                    raw_jd_text=raw_jd,
+                )
+                enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
+        except Exception as exc:
+            logger.warning("Step 3 Ollama final refinement failed; falling back to deterministic baseline: %s", exc)
+            enrichment_report = None
+            enriched_md = None
+
+    # Fallback to existing enrichment report if available and Ollama was unavailable
+    if enriched_md is None and spec_version.enrichment_report_json:
         try:
             enrichment_report = TAEnrichmentReport.model_validate(spec_version.enrichment_report_json)
             enrichment_report.source_specification_version = next_version
             enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
         except Exception as exc:
-            logger.warning("Could not carry forward enrichment report: %s", exc)
-
-    if enriched_md is None:
-        from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
-        enricher = GroundedEnrichmentService()
-        if enricher.check_ollama_available():
-            try:
-                from app.services.projection.canonical_projector import _flatten_requirements
-                flat_reqs = _flatten_requirements(master.requirements)
-                reqs = [
-                    {
-                        "requirement_id": r.id,
-                        "text": r.text,
-                        "priority": r.priority.value if hasattr(r.priority, "value") else str(r.priority or "MUST_HAVE"),
-                    }
-                    for r in flat_reqs
-                    if getattr(r, "text", None)
-                ]
-                if reqs:
-                    enrichment_report = enricher.generate_enrichment_report(
-                        spec_version_id=str(spec_version.id),
-                        specification_version=next_version,
-                        source_checksum=spec_version.jd_version.raw_text_checksum if spec_version.jd_version else "unknown",
-                        requirements=reqs,
-                    )
-                    enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
-            except Exception as exc:
-                logger.warning("Post-clarification Ollama enrichment skipped: %s", exc)
+            logger.warning("Could not apply carried-forward enrichment report: %s", exc)
 
     base_md = render_markdown(new_spec)
     final_md = enriched_md if enriched_md is not None else base_md

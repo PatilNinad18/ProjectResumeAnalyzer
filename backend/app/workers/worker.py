@@ -102,7 +102,13 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
 
         if enricher.check_ollama_available():
             try:
+                from app.schemas.master_context import ClauseType
                 from app.services.projection.canonical_projector import _flatten_requirements
+                resp_descs = {
+                    (r.raw_statement if hasattr(r, "raw_statement") else str(r)).strip().lower()
+                    for r in master_context.responsibilities
+                    if getattr(r, "raw_statement", None)
+                }
                 flat_reqs = _flatten_requirements(master_context.requirements)
                 requirements_to_enrich = [
                     {
@@ -112,6 +118,11 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
                     }
                     for r in flat_reqs
                     if getattr(r, "text", None)
+                    and getattr(r, "clause_type", None) != ClauseType.RESPONSIBILITY
+                    and (not r.source or getattr(r.source, "section", "") not in (
+                        "responsibilities", "duties", "deliverables", "key_responsibilities", "expected_deliverables"
+                    ))
+                    and r.text.strip().lower() not in resp_descs
                 ]
                 if not requirements_to_enrich and spec.evidence_requirements:
                     requirements_to_enrich = [
@@ -124,12 +135,21 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
                         if ev.requirement
                     ]
 
+                role_context = {
+                    "role_title": getattr(master_context.role_overview, "job_title", None) or getattr(master_context.role_overview, "title", None) or (spec.role.job_title if hasattr(spec, "role") and spec.role else ""),
+                    "team_size": master_context.job_context.team_size,
+                    "salary_range": getattr(master_context.job_context, "salary_range", None),
+                    "work_mode": getattr(master_context.role_overview, "work_mode", "UNSPECIFIED"),
+                }
+
                 if requirements_to_enrich:
                     enrichment_report = enricher.generate_enrichment_report(
                         spec_version_id="temp",
                         specification_version=1,
                         source_checksum=jd_version.raw_text_checksum,
                         requirements=requirements_to_enrich,
+                        role_context=role_context,
+                        raw_jd_text=raw_text,
                     )
                     enriched_md = render_markdown(spec, enrichment_report=enrichment_report)
             except Exception as exc:

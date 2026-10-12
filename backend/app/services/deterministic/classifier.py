@@ -165,6 +165,20 @@ class RequirementClassifier:
                 reasoning="Moderate mandatory signal detected"
             )
 
+        # Section context overrides competency keywords for preferred and responsibility sections
+        if section_type in ['preferred', 'nice_to_have', 'bonus', 'nice to have']:
+            return ClassificationResult(
+                priority=RequirementPriority.PREFERRED,
+                confidence=0.85,
+                reasoning=f"Section context: {section_type}"
+            )
+        if section_type in ['responsibilities', 'duties', 'deliverables', 'key_responsibilities', 'expected_deliverables']:
+            return ClassificationResult(
+                priority=RequirementPriority.CONTEXTUAL,
+                confidence=0.70,
+                reasoning=f"Section context: {section_type} (job responsibility)"
+            )
+
         # Check competency / qualification indicators (years of experience, degree, proficiency, hands-on, skills, protocols)
         comp_signals = re.compile(
             r'\b(?:\d+\+?\s*years?|bachelor|master|degree|phd|proficiency|proficient|'

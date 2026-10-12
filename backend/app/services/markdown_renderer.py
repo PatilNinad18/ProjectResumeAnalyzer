@@ -36,6 +36,43 @@ def _bullet_list(items: list[str], empty: str = "_None identified._") -> str:
     return "\n".join(f"- {i}" for i in items)
 
 
+def _derive_tailored_evaluation_focus(req_text: str) -> str:
+    """
+    Generate dynamic, requirement-tailored evaluation guidance derived directly
+    from the requirement's specific action, subject, and deliverables.
+    Eliminates canned, repetitive template paragraphs.
+    """
+    cleaned = req_text.strip().rstrip(".").strip()
+    lower = cleaned.lower()
+
+    # Degree / Education
+    if any(k in lower for k in ("degree", "bachelor", "master", "b.e", "b.tech", "m.tech", "phd", "education")):
+        return f"Verify accredited academic credential or equivalent proven engineering foundation in '{cleaned}'."
+
+    # Experience tenure / years
+    if any(k in lower for k in ("year", "years", "industry experience", "tenure")):
+        return f"Evaluate verified career tenure and sustained hands-on depth ({cleaned}), assessing progressive ownership across complex engineering lifecycles."
+
+    # Cross-functional communication / Leadership / Team
+    if any(k in lower for k in ("communication", "lead", "leadership", "collaborat", "team", "teams", "ownership")):
+        return f"Assess cross-functional technical communication and stakeholder alignment regarding '{cleaned}', screening for joint debug ownership and interface agreements."
+
+    # Automation / Scripting / CI/CD
+    if any(k in lower for k in ("automation", "script", "python", "regression", "ci/cd", "infrastructure", "jenkins")):
+        return f"Verify verifiable automation deliverables and scripting depth in '{cleaned}', evaluating execution efficiency, test harness robustness, and pipeline integration."
+
+    # Architecture / Platforms / Systems
+    if any(k in lower for k in ("architect", "virtual platform", "vdk", "soc", "system modeling", "chiplet", "xpu")):
+        return f"Screen for direct architectural ownership and design trade-offs in '{cleaned}', verifying shipped artifacts and multi-subsystem platform integration."
+
+    # Protocols / Simulation / Emulation / Hardware modeling
+    if any(k in lower for k in ("c++", "systemc", "tlm", "pcie", "cxl", "ucie", "amba", "zebu", "palladium", "veloce", "rtl", "emulation")):
+        return f"Verify hands-on compliance and practical verification artifacts in '{cleaned}', checking cycle-accurate modeling depth rather than passive keyword familiarity."
+
+    # Default: dynamically incorporate the specific requirement text!
+    return f"Screen candidate resume for verifiable hands-on execution and deliverables in '{cleaned}', assessing practical depth and production track record."
+
+
 def render_markdown(
     spec: JobEvaluationSpecification,
     enrichment_report: Optional[Union[TAEnrichmentReport, dict]] = None,
@@ -99,10 +136,18 @@ def render_markdown(
             yrs = f" ({e.min_years}+ yrs)" if e.min_years is not None else ""
             must_have_lines.append(f"{e.description}{yrs}")
 
-    # Append the flat must_have_requirements list (deduplicate against experience lines)
+    # Collect responsibility descriptions to guarantee zero duplication between Sections 2 and 3
+    resp_texts = {
+        res.description.strip().lower()
+        for res in spec.responsibilities
+        if getattr(res, "description", None)
+    }
+
+    # Append the flat must_have_requirements list (deduplicate against experience lines and responsibilities)
     exp_descs = {line.split(" (")[0].strip().lower() for line in must_have_lines}
     for req in spec.must_have_requirements:
-        if req.strip().lower() not in exp_descs:
+        req_clean = req.strip().lower()
+        if req_clean not in exp_descs and req_clean not in resp_texts:
             must_have_lines.append(req)
 
     md.append(_bullet_list(must_have_lines))
@@ -110,7 +155,11 @@ def render_markdown(
 
     # --- Preferred ---
     md.append("### Preferred\n")
-    md.append(_bullet_list(spec.preferred_requirements))
+    pref_lines = [
+        p for p in spec.preferred_requirements
+        if p.strip().lower() not in resp_texts
+    ]
+    md.append(_bullet_list(pref_lines))
     md.append("")
 
     # ------------------------------------------------------------------ #
@@ -186,19 +235,8 @@ def render_markdown(
                 if screen_q:
                     md.append(f"> - **Screening Question:** {screen_q}")
             elif not any([ev.evidence_to_look_for, ev.strong_evidence, ev.weak_evidence, ev.moderate_evidence, ev.insufficient_evidence, ev.prohibited_inference]):
-                req_lower = ev.requirement.lower()
-                if any(k in req_lower for k in ("year", "years", "experience in semiconductor", "experience in system", "industry experience")):
-                    md.append("- **Evaluation Focus:** Verify sustained career progression and tenure in relevant industry domains; evaluate depth of hands-on technical contributions over time.")
-                elif any(k in req_lower for k in ("architect", "architecture", "vdk", "virtual platform", "soc", "system modeling", "infrastructure", "scalability")):
-                    md.append("- **Evaluation Focus:** Screen for demonstrated architectural ownership, end-to-end design trade-offs, and multi-subsystem integration deliverables.")
-                elif any(k in req_lower for k in ("c++", "systemc", "tlm", "pcie", "cxl", "ucie", "amba", "python", "virtualizer", "zebu", "palladium", "veloce", "rtl", "emulation")):
-                    md.append("- **Evaluation Focus:** Verify production-proven modeling templates, protocol compliance, and hands-on simulation/emulation deliverables rather than passive exposure.")
-                elif any(k in req_lower for k in ("communication", "lead", "leadership", "collaborat", "team", "teams", "ownership")):
-                    md.append("- **Evaluation Focus:** Evaluate cross-functional technical communication with silicon, software, and performance teams; assess architectural influence.")
-                elif any(k in req_lower for k in ("degree", "bachelor", "master", "b.e", "b.tech", "m.tech", "phd")):
-                    md.append("- **Evaluation Focus:** Verify formal academic credential or equivalent proven engineering experience in electrical/computer engineering or related discipline.")
-                else:
-                    md.append(f"- **Evaluation Focus:** Screen candidate resume for demonstrated hands-on experience and verified deliverables in '{ev.requirement[:65]}'.")
+                focus_text = _derive_tailored_evaluation_focus(ev.requirement)
+                md.append(f"- **Evaluation Focus:** {focus_text}")
 
             md.append("")
 

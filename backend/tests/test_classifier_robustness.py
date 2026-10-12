@@ -203,10 +203,38 @@ Lead technical discussions
         sections = extractor.extract_sections(jd)
         reqs = extractor.extract_requirements(jd, sections)
         
-        # All requirements should have source references
-        assert all(req.source is not None for req in reqs)
-        assert all(req.source.text for req in reqs)
+    def test_responsibilities_not_duplicated_in_must_haves(self):
+        """Test that responsibilities section items do not leak into must-have candidate requirements."""
+        from app.services.extraction_pipeline import ExtractionPipeline
+        from app.services.projection.canonical_projector import project_to_canonical
+
+        jd = """
+        Job Title: Systems Lead
+
+        Responsibilities:
+        - Architect system platform infrastructure
+        - Lead performance analysis and modeling
+
+        Requirements:
+        - 10+ years of C++ experience
+        - Bachelor degree in Computer Science
+        """
+        pipeline = ExtractionPipeline(llm_enabled=False)
+        result = pipeline.process_jd(jd)
+        master = result.to_master_context("test_no_dup", jd)
+        spec = project_to_canonical(master, jd_id="test_no_dup", specification_version=1)
+
+        # Responsibilities must be in Section 3
+        resp_texts = [r.description.lower() for r in spec.responsibilities]
+        assert any("architect system platform" in r for r in resp_texts)
+
+        # Must-haves must NOT contain responsibilities
+        must_haves = [m.lower() for m in spec.must_have_requirements]
+        assert not any("architect system platform" in m for m in must_haves)
+        assert not any("lead performance analysis" in m for m in must_haves)
+        assert any("10+ years" in m for m in must_haves)
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

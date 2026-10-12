@@ -30,16 +30,18 @@ CRITICAL RULES:
    You must ONLY produce enrichment for the provided requirement IDs.
    DO NOT create new requirement IDs or alter existing requirement IDs.
 2. DO NOT change requirement priority or whether a requirement is mandatory vs preferred.
-3. TECHNICAL CONCEPT SUMMARY: Explain the core technology or concept in clear, recruiter-friendly language
+3. NATURAL & NON-REPETITIVE GUIDANCE: Produce distinct, requirement-specific technical interpretations.
+   Avoid generic boilerplate or repeating identical sentences across different requirements.
+4. TECHNICAL CONCEPT SUMMARY: Explain the core technology or concept in clear, recruiter-friendly language
    so a non-engineer understands what it is, why production systems use it, and its technical significance.
-4. STRONG EVIDENCE SIGNALS: Describe concrete evidence that should appear on a candidate's resume
+5. STRONG EVIDENCE SIGNALS: Describe concrete evidence that should appear on a candidate's resume
    (e.g. specific frameworks, architectural patterns, throughput metrics, hardware targets, production deliverables).
-5. WEAK OR AMBIGUOUS SIGNALS: Describe signals that indicate superficial exposure or buzzword padding
+6. WEAK OR AMBIGUOUS SIGNALS: Describe signals that indicate superficial exposure or buzzword padding
    (e.g. passive mentions, simple tutorial projects, lack of ownership or metrics).
-6. SCREENING QUESTION: Provide 1-2 focused, conversational technical screening questions a recruiter
+7. SCREENING QUESTION: Provide 1-2 focused, conversational technical screening questions a recruiter
    or hiring manager can ask during an initial phone screen to test real depth.
-7. EVALUATION PRIORITIES: Provide 3-5 concise, grounded priority instructions for how evaluators should rank candidates based strictly on the verified requirements.
-8. Output MUST be a single valid JSON object strictly matching this schema:
+8. EVALUATION PRIORITIES: Provide 3-5 concise, grounded priority instructions for how evaluators should rank candidates based strictly on the verified requirements and resolved clarifications.
+9. Output MUST be a single valid JSON object strictly matching this schema:
 {
   "items": [
     {
@@ -111,20 +113,55 @@ class GroundedEnrichmentService:
                 logger.debug("Ollama availability check failed for %s: %s", candidate_url, exc)
         return False
 
-    def build_user_prompt(self, requirements: List[Dict[str, Any]]) -> str:
+    def build_user_prompt(
+        self,
+        requirements: List[Dict[str, Any]],
+        clarification_context: Optional[List[Dict[str, Any]]] = None,
+        role_context: Optional[Dict[str, Any]] = None,
+        is_final_refinement: bool = False,
+    ) -> str:
         """Format the requirements into a structured grounded prompt."""
-        req_lines = []
+        sections: List[str] = []
+        if role_context:
+            role_lines: List[str] = []
+            if role_context.get("role_title"):
+                role_lines.append(f"- Target Role: {role_context['role_title']}")
+            if role_context.get("team_size"):
+                role_lines.append(f"- Team Size: {role_context['team_size']}")
+            if role_context.get("salary_range"):
+                role_lines.append(f"- Salary Range: {role_context['salary_range']}")
+            if role_context.get("work_mode"):
+                role_lines.append(f"- Work Mode / Location: {role_context['work_mode']}")
+            if role_lines:
+                sections.append("### Structured Role Context:\n" + "\n".join(role_lines))
+
+        if clarification_context:
+            clarif_lines: List[str] = []
+            for c in clarification_context:
+                q_text = c.get("question_text") or c.get("question_key") or ""
+                a_text = c.get("answer_text") or ""
+                by = c.get("answered_by") or "TA"
+                if a_text:
+                    clarif_lines.append(f"- Q: {q_text}\n  A ({by}): {a_text}")
+            if clarif_lines:
+                sections.append("### Resolved Clarifications & Confirmed Scope:\n" + "\n".join(clarif_lines))
+
+        req_lines: List[str] = []
         for r in requirements:
             r_id = r.get("id") or r.get("requirement_id")
             r_text = r.get("text") or r.get("requirement", "")
             r_prio = r.get("priority", "MUST_HAVE")
             req_lines.append(f"- ID: {r_id}\n  Priority: {r_prio}\n  Requirement: {r_text}")
 
-        return (
-            "Please provide TA technical enrichment for the following verified requirements:\n\n"
-            + "\n".join(req_lines)
-            + "\n\nRespond with JSON matching the required schema."
+        header = (
+            "Please provide FINAL REFINED TA technical enrichment and candidate evaluation priorities incorporating the resolved clarifications above:\n\n"
+            if is_final_refinement and clarification_context
+            else "Please provide TA technical enrichment and candidate screening guidance for the following verified requirements:\n\n"
         )
+
+        sections.append(header + "\n".join(req_lines))
+        sections.append("Respond with JSON matching the required schema. Ensure every requirement ID gets natural, specific, non-repetitive guidance.")
+        return "\n\n".join(sections)
 
     def _call_ollama(self, system_prompt: str, user_prompt: str) -> str:
         """Execute chat completion against local Ollama instance."""
@@ -245,9 +282,13 @@ class GroundedEnrichmentService:
         specification_version: int,
         source_checksum: str,
         requirements: List[Dict[str, Any]],
+        clarification_context: Optional[List[Dict[str, Any]]] = None,
+        role_context: Optional[Dict[str, Any]] = None,
+        raw_jd_text: Optional[str] = None,
     ) -> TAEnrichmentReport:
         """
         Generate a TAEnrichmentReport anchored to the provided baseline version and requirements.
+        Optionally incorporates resolved clarifications and role context for final refinement.
         """
         if not requirements:
             return TAEnrichmentReport(
@@ -267,29 +308,42 @@ class GroundedEnrichmentService:
             if r_id:
                 known_reqs[r_id] = r_text
 
-        # Prioritize substantive technical requirements (filter out short noise fragments, cap at 8)
+        # Deduplicate and prioritize substantive requirements across the entire JD (up to 35 requirements)
         meaningful_reqs = []
+        seen_texts = set()
         for r in requirements:
             r_id = r.get("id") or r.get("requirement_id")
             r_text = (r.get("text") or r.get("requirement") or "").strip()
-            if not r_id or len(r_text) < 10:
+            if not r_id or len(r_text) < 4:
                 continue
+            norm_key = r_text.lower()
+            if norm_key in seen_texts:
+                continue
+            seen_texts.add(norm_key)
             prio = str(r.get("priority", "")).upper()
             rank = 0 if ("MUST" in prio or "MAND" in prio) else (1 if "PREF" in prio else 2)
             meaningful_reqs.append((rank, r))
 
         meaningful_reqs.sort(key=lambda x: x[0])
-        selected_reqs = [x[1] for x in meaningful_reqs[:8]]
+        # Include all substantive requirements up to 35 (no arbitrary 8 cap!)
+        selected_reqs = [x[1] for x in meaningful_reqs[:35]]
         if not selected_reqs:
-            selected_reqs = requirements[:8]
+            selected_reqs = requirements[:35]
 
-        batch_size = 4
+        batch_size = 5
         all_validated_items: List[RequirementEnrichmentItem] = []
         all_evaluation_priorities: List[str] = []
         total_batches = (len(selected_reqs) + batch_size - 1) // batch_size
+        is_final = bool(clarification_context)
+
         for batch_idx, i in enumerate(range(0, len(selected_reqs), batch_size), start=1):
             chunk = selected_reqs[i : i + batch_size]
-            prompt = self.build_user_prompt(chunk)
+            prompt = self.build_user_prompt(
+                chunk,
+                clarification_context=clarification_context if batch_idx == 1 else None,
+                role_context=role_context if batch_idx == 1 else None,
+                is_final_refinement=is_final,
+            )
             logger.info("Enriching batch %d/%d (%d requirements) via Ollama...", batch_idx, total_batches, len(chunk))
             try:
                 raw_output = self._call_ollama(SYSTEM_PROMPT, prompt)
