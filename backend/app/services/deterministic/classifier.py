@@ -164,6 +164,21 @@ class RequirementClassifier:
                 confidence=0.70,
                 reasoning="Moderate mandatory signal detected"
             )
+
+        # Check competency / qualification indicators (years of experience, degree, proficiency, hands-on, skills, protocols)
+        comp_signals = re.compile(
+            r'\b(?:\d+\+?\s*years?|bachelor|master|degree|phd|proficiency|proficient|'
+            r'hands-on|experience|knowledge\s+of|expertise\s+in|skills?|modeling|architecture|'
+            r'strong\s+(?:c\+\+|python|java|systemc|skills|experience|understanding|background)|'
+            r'pcie|cxl|ucie|amba|soc|vdk|virtualizer|rtos|freertos|arm|risc-v)\b',
+            re.IGNORECASE
+        )
+        if comp_signals.search(text):
+            return ClassificationResult(
+                priority=RequirementPriority.MANDATORY,
+                confidence=0.75,
+                reasoning="Core qualification or technical competency indicator detected"
+            )
         
         # Use section context if available
         if section_type:
@@ -280,16 +295,16 @@ class RequirementClassifier:
         Note: Section-based classification has lower confidence
         because clause text overrides section context.
         """
-        if section_type in ['preferred', 'nice_to_have', 'bonus']:
+        if section_type in ['preferred', 'nice_to_have', 'bonus', 'nice to have']:
             return ClassificationResult(
                 priority=RequirementPriority.PREFERRED,
                 confidence=0.60,
                 reasoning=f"Section context: {section_type}"
             )
-        elif section_type in ['requirements', 'qualifications', 'required_skills']:
+        elif section_type in ['requirements', 'qualifications', 'required_skills', 'skills', 'technical_skills', 'experience', 'education']:
             return ClassificationResult(
                 priority=RequirementPriority.MANDATORY,
-                confidence=0.50,
+                confidence=0.65,
                 reasoning=f"Section context: {section_type}"
             )
         

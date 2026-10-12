@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a Technical Talent Acquisition (TA) Specialist and Engineering Hiring Evaluator.
 Your role is to enrich verified job requirements with recruiter-friendly technical explanations,
-concrete resume evidence signals, and targeted screening questions.
+concrete resume evidence signals, targeted screening questions, and top candidate evaluation priorities.
 
 CRITICAL RULES:
 1. STRICT GROUNDING: You will be given a list of verified requirement IDs and texts.
@@ -38,7 +38,8 @@ CRITICAL RULES:
    (e.g. passive mentions, simple tutorial projects, lack of ownership or metrics).
 6. SCREENING QUESTION: Provide 1-2 focused, conversational technical screening questions a recruiter
    or hiring manager can ask during an initial phone screen to test real depth.
-7. Output MUST be a single valid JSON object strictly matching this schema:
+7. EVALUATION PRIORITIES: Provide 3-5 concise, grounded priority instructions for how evaluators should rank candidates based strictly on the verified requirements.
+8. Output MUST be a single valid JSON object strictly matching this schema:
 {
   "items": [
     {
@@ -48,6 +49,11 @@ CRITICAL RULES:
       "weak_or_ambiguous_signals": ["...", "..."],
       "screening_question": "..."
     }
+  ],
+  "evaluation_priorities": [
+    "Prioritize deep hands-on expertise in...",
+    "Verify architectural ownership in...",
+    "Screen for..."
   ]
 }
 """
@@ -178,7 +184,7 @@ class GroundedEnrichmentService:
         self,
         raw_text: str,
         known_reqs: Dict[str, str],
-    ) -> List[RequirementEnrichmentItem]:
+    ) -> tuple[List[RequirementEnrichmentItem], List[str]]:
         """
         Parse LLM response and strictly filter against known requirement IDs.
         Silently discards any hallucinated or fabricated requirement IDs.
@@ -193,9 +199,13 @@ class GroundedEnrichmentService:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             logger.warning("Failed to decode JSON from enrichment response: %s", exc)
-            return []
+            return [], []
 
         raw_items = parsed.get("items", []) if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+        eval_priorities = [
+            str(p).strip() for p in (parsed.get("evaluation_priorities", []) if isinstance(parsed, dict) else [])
+            if str(p).strip()
+        ]
         validated_items: List[RequirementEnrichmentItem] = []
 
         for item in raw_items:
@@ -227,7 +237,7 @@ class GroundedEnrichmentService:
                 )
             )
 
-        return validated_items
+        return validated_items, eval_priorities
 
     def generate_enrichment_report(
         self,
@@ -245,6 +255,7 @@ class GroundedEnrichmentService:
                 source_specification_version=specification_version,
                 source_checksum=source_checksum,
                 items=[],
+                evaluation_priorities=[],
                 status="completed",
                 model_version=self.model,
             )
@@ -274,6 +285,7 @@ class GroundedEnrichmentService:
 
         batch_size = 4
         all_validated_items: List[RequirementEnrichmentItem] = []
+        all_evaluation_priorities: List[str] = []
         total_batches = (len(selected_reqs) + batch_size - 1) // batch_size
         for batch_idx, i in enumerate(range(0, len(selected_reqs), batch_size), start=1):
             chunk = selected_reqs[i : i + batch_size]
@@ -281,19 +293,34 @@ class GroundedEnrichmentService:
             logger.info("Enriching batch %d/%d (%d requirements) via Ollama...", batch_idx, total_batches, len(chunk))
             try:
                 raw_output = self._call_ollama(SYSTEM_PROMPT, prompt)
-                batch_items = self._parse_and_validate_response(raw_output, known_reqs)
+                batch_items, batch_priorities = self._parse_and_validate_response(raw_output, known_reqs)
                 all_validated_items.extend(batch_items)
+                for prio in batch_priorities:
+                    if prio not in all_evaluation_priorities:
+                        all_evaluation_priorities.append(prio)
                 logger.info("Batch %d/%d completed: %d items validated", batch_idx, total_batches, len(batch_items))
             except Exception as exc:
                 logger.warning("Enrichment batch %d/%d failed: %s", batch_idx, total_batches, exc)
                 if not all_validated_items and i == 0:
                     raise
 
+        if not all_evaluation_priorities and selected_reqs:
+            top_skills = [
+                (r.get("text") or r.get("requirement", "")).strip()
+                for r in selected_reqs
+                if len((r.get("text") or r.get("requirement", "")).strip()) < 80
+            ][:3]
+            if top_skills:
+                all_evaluation_priorities.append(f"Prioritize candidate depth in core competencies: {'; '.join(top_skills)}.")
+            all_evaluation_priorities.append("Verify proven hands-on deliverables and production track record over keyword stuffing.")
+            all_evaluation_priorities.append("Evaluate cross-functional communication and architectural decision-making.")
+
         return TAEnrichmentReport(
             source_specification_version_id=spec_version_id,
             source_specification_version=specification_version,
             source_checksum=source_checksum,
             items=all_validated_items,
+            evaluation_priorities=all_evaluation_priorities,
             status="completed",
             model_version=self.model,
         )

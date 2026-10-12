@@ -73,6 +73,10 @@ class TAEnrichmentReport(BaseModel):
         default_factory=list,
         description="Enriched requirement items validated against deterministic IDs",
     )
+    evaluation_priorities: List[str] = Field(
+        default_factory=list,
+        description="Top grounded candidate evaluation priorities",
+    )
     status: str = Field(
         default="completed",
         description="Status of enrichment generation",

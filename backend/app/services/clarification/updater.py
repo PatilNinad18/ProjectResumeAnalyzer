@@ -76,9 +76,37 @@ def submit_answer(
 
     question = next((q for q in master.clarification_history if q.question_key == question_key), None)
     if question is None:
-        raise ClarificationUpdateError(
-            f"No question with key '{question_key}' found in master context jd_id={master.jd_id}."
-        )
+        if question_key.startswith("amb_") or question_key.startswith("jd_ambiguity_"):
+            target_id = question_key.replace("jd_ambiguity_", "")
+            question = next((
+                q for q in master.clarification_history
+                if target_id in q.question_key or (q.field_target and target_id in q.field_target)
+            ), None)
+
+        if question is None:
+            if question_key.startswith("amb_"):
+                try:
+                    idx = int(question_key.replace("amb_", ""))
+                    raw_ambs = getattr(master, "raw_ambiguities", []) or []
+                    if idx < len(raw_ambs):
+                        target_amb = raw_ambs[idx]
+                        target_amb.requires_ta_confirmation = False
+                        if not hasattr(target_amb, "suggested_interpretations") or target_amb.suggested_interpretations is None:
+                            target_amb.suggested_interpretations = []
+                        target_amb.suggested_interpretations.insert(0, f"TA Resolution: {answer_text}")
+                        master.add_audit_entry(
+                            "clarification_answered",
+                            f"Ambiguity '{question_key}' answered directly by TA.",
+                            actor=answered_by,
+                            question_key=question_key,
+                            answer_preview=answer_text[:80] if answer_text else None,
+                        )
+                        return master
+                except Exception:
+                    pass
+            raise ClarificationUpdateError(
+                f"No question with key '{question_key}' found in master context jd_id={master.jd_id}."
+            )
 
     # Guard: BLOCKING + SKIPPED requires an authorized override
     if (
@@ -236,35 +264,51 @@ def _apply_field_patch(
             master.job_context.salary_range = answer_text
         return
 
+    # --- ambiguities[id=...] or ambiguities[...] fields ---
+    if field_target.startswith("ambiguities[") or field_target.startswith("raw_ambiguities["):
+        amb_id = _extract_id_from_target(field_target)
+        raw_ambs = getattr(master, "raw_ambiguities", []) or []
+        for amb in raw_ambs:
+            cur_id = getattr(amb, "ambiguity_id", "") or str(getattr(amb, "id", ""))
+            if amb_id and (cur_id == amb_id or amb_id in cur_id):
+                amb.requires_ta_confirmation = False
+                if not hasattr(amb, "suggested_interpretations") or amb.suggested_interpretations is None:
+                    amb.suggested_interpretations = []
+                resolution_note = f"TA Resolution: {answer_text}"
+                if resolution_note not in amb.suggested_interpretations:
+                    amb.suggested_interpretations.insert(0, resolution_note)
+                break
+        return
+
     # --- requirements[id=...].priority fields ---
     if field_target.startswith("requirements[id=") and ".priority" in field_target:
         req_id = _extract_id_from_target(field_target)
         if req_id:
+            ans_clean = (answer_text or "").lower().strip()
+            if any(k in ans_clean for k in ("must have", "must_have", "mandatory", "required")):
+                new_priority = RequirementPriority.MUST_HAVE
+            elif any(k in ans_clean for k in ("preferred", "nice to have", "optional")):
+                new_priority = RequirementPriority.PREFERRED
+            elif any(k in ans_clean for k in ("informational", "context", "role context")):
+                new_priority = RequirementPriority.INFORMATIONAL
+            else:
+                new_priority = None
+
             for item in master.requirements:
                 if isinstance(item, StructuredRequirement) and item.id == req_id:
-                    priority_map = {
-                        "must have": RequirementPriority.MUST_HAVE,
-                        "must_have": RequirementPriority.MUST_HAVE,
-                        "must have — mandatory for all candidates": RequirementPriority.MUST_HAVE,
-                        "preferred": RequirementPriority.PREFERRED,
-                        "preferred — nice to have but not disqualifying": RequirementPriority.PREFERRED,
-                        "informational": RequirementPriority.INFORMATIONAL,
-                    }
-                    new_priority = priority_map.get(answer_text.lower().strip())
                     if new_priority:
                         item.priority = new_priority
-                        # If TA confirms MUST_HAVE, upgrade is_mandatory and provenance
+                        item.requires_clarification = False
                         if new_priority == RequirementPriority.MUST_HAVE:
                             item.is_mandatory = True
-                            item.provenance = ProvenanceRecord(
-                                origin_type=OriginType.TA_CONFIRMED,
-                                source_span=item.provenance.source_span,
-                                author=answered_by,
-                                rule_id=f"clarification:{question_key}",
-                            )
-                        # If TA says NOT required, demote to PREFERRED or INFORMATIONAL and clear is_mandatory
-                        elif new_priority in {RequirementPriority.PREFERRED, RequirementPriority.INFORMATIONAL}:
+                        else:
                             item.is_mandatory = False
+                        item.provenance = ProvenanceRecord(
+                            origin_type=OriginType.TA_CONFIRMED,
+                            source_span=item.provenance.source_span if item.provenance else None,
+                            author=answered_by,
+                            rule_id=f"clarification:{question_key}",
+                        )
                     return
 
         return
@@ -288,10 +332,13 @@ def _apply_field_patch(
 
 
 def _extract_id_from_target(field_target: str) -> Optional[str]:
-    """Extract the id value from patterns like 'requirements[id=abc-123].priority'."""
+    """Extract the id value from patterns like 'requirements[id=abc-123].priority' or 'ambiguities[amb_123]'."""
     import re
     match = re.search(r"\[id=([^\]]+)\]", field_target)
-    return match.group(1) if match else None
+    if match:
+        return match.group(1)
+    match2 = re.search(r"\[([^\]]+)\]", field_target)
+    return match2.group(1) if match2 else None
 
 
 def _update_lifecycle_status(master: JDMasterContext) -> None:

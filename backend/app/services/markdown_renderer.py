@@ -79,6 +79,8 @@ def render_markdown(
         md.append(f"- **Business Context:** {jc.business_context}")
     if jc.team_size:
         md.append(f"- **Team Size:** {jc.team_size}")
+    if getattr(jc, "salary_range", None):
+        md.append(f"- **Salary Range:** {jc.salary_range}")
     md.append("")
 
     # ------------------------------------------------------------------ #
@@ -183,6 +185,20 @@ def render_markdown(
                     md.append(f"> - **Weak / Ambiguous Signals:** {'; '.join(weak_sigs)}")
                 if screen_q:
                     md.append(f"> - **Screening Question:** {screen_q}")
+            elif not any([ev.evidence_to_look_for, ev.strong_evidence, ev.weak_evidence, ev.moderate_evidence, ev.insufficient_evidence, ev.prohibited_inference]):
+                req_lower = ev.requirement.lower()
+                if any(k in req_lower for k in ("year", "years", "experience in semiconductor", "experience in system", "industry experience")):
+                    md.append("- **Evaluation Focus:** Verify sustained career progression and tenure in relevant industry domains; evaluate depth of hands-on technical contributions over time.")
+                elif any(k in req_lower for k in ("architect", "architecture", "vdk", "virtual platform", "soc", "system modeling", "infrastructure", "scalability")):
+                    md.append("- **Evaluation Focus:** Screen for demonstrated architectural ownership, end-to-end design trade-offs, and multi-subsystem integration deliverables.")
+                elif any(k in req_lower for k in ("c++", "systemc", "tlm", "pcie", "cxl", "ucie", "amba", "python", "virtualizer", "zebu", "palladium", "veloce", "rtl", "emulation")):
+                    md.append("- **Evaluation Focus:** Verify production-proven modeling templates, protocol compliance, and hands-on simulation/emulation deliverables rather than passive exposure.")
+                elif any(k in req_lower for k in ("communication", "lead", "leadership", "collaborat", "team", "teams", "ownership")):
+                    md.append("- **Evaluation Focus:** Evaluate cross-functional technical communication with silicon, software, and performance teams; assess architectural influence.")
+                elif any(k in req_lower for k in ("degree", "bachelor", "master", "b.e", "b.tech", "m.tech", "phd")):
+                    md.append("- **Evaluation Focus:** Verify formal academic credential or equivalent proven engineering experience in electrical/computer engineering or related discipline.")
+                else:
+                    md.append(f"- **Evaluation Focus:** Screen candidate resume for demonstrated hands-on experience and verified deliverables in '{ev.requirement[:65]}'.")
 
             md.append("")
 
@@ -255,16 +271,26 @@ def render_markdown(
     # ------------------------------------------------------------------ #
     md.append("## 6. Ambiguities & Missing Information\n")
 
-    has_ambiguities = bool(spec.ambiguities)
+    resolved_ambs = [
+        a for a in spec.ambiguities
+        if not a.ta_confirmation_required or (a.suggested_interpretation and "TA Resolution:" in a.suggested_interpretation)
+    ]
+    unresolved_ambs = [a for a in spec.ambiguities if a not in resolved_ambs]
     has_missing = bool(spec.missing_information)
 
-    if has_ambiguities:
-        md.append("**Ambiguities**\n")
-        for a in spec.ambiguities:
-            ta_flag = " _(TA confirmation required)_" if a.ta_confirmation_required else ""
-            md.append(f"- **\"{a.statement}\"** — {a.why_ambiguous}{ta_flag}")
+    if resolved_ambs:
+        md.append("**Resolved Clarifications (TA Confirmed)**\n")
+        for a in resolved_ambs:
+            res_text = a.suggested_interpretation or "Confirmed by TA."
+            md.append(f"- **\"{a.statement}\"** — {res_text}")
+        md.append("")
+
+    if unresolved_ambs:
+        md.append("**Ambiguities Requiring TA Clarification**\n")
+        for a in unresolved_ambs:
+            md.append(f"- **\"{a.statement}\"** — {a.why_ambiguous} _(TA confirmation required)_")
             if a.suggested_interpretation:
-                md.append(f"  - Interpretation: {a.suggested_interpretation}")
+                md.append(f"  - Suggested Interpretation: {a.suggested_interpretation}")
             if a.evidence_required:
                 md.append(f"  - Evidence needed: {', '.join(a.evidence_required)}")
         md.append("")
@@ -278,15 +304,21 @@ def render_markdown(
                 md.append(f"  - Action: {mi.suggested_action}")
         md.append("")
 
-    if not has_ambiguities and not has_missing:
+    if not resolved_ambs and not unresolved_ambs and not has_missing:
         md.append("_None detected._\n")
 
     # ------------------------------------------------------------------ #
     # Section 7: Evaluation Priorities
     # ------------------------------------------------------------------ #
     md.append("## 7. Evaluation Priorities\n")
-    if spec.candidate_analysis_instructions:
-        for i, instr in enumerate(spec.candidate_analysis_instructions, start=1):
+    priorities = spec.candidate_analysis_instructions
+    if not priorities and enrichment_report:
+        priorities = (
+            getattr(enrichment_report, "evaluation_priorities", None)
+            or (enrichment_report.get("evaluation_priorities", []) if isinstance(enrichment_report, dict) else [])
+        )
+    if priorities:
+        for i, instr in enumerate(priorities, start=1):
             md.append(f"{i}. {instr}")
     else:
         md.append("_No explicit evaluation priorities extracted._")

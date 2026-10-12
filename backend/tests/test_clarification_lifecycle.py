@@ -481,3 +481,68 @@ def test_api_endpoints_full_workflow(monkeypatch):
     assert chat_data["query_type"] == "mandatory_requirements"
     assert len(chat_data["answers"]) > 0
     assert any("c" in a["text"].lower() or "freertos" in a["text"].lower() for a in chat_data["answers"])
+
+
+def test_clarification_answers_reflected_in_markdown():
+    """Verify that submitting TA clarifications updates the domain model and reflects in rendered Markdown."""
+    from app.services.deterministic.extractor import DeterministicExtractor
+    from app.schemas.master_context import ExtractionResult
+    from app.services.markdown_renderer import render_markdown
+
+    raw_text = (
+        "Job Title: Senior Systems Engineer\n"
+        "Location: San Francisco, CA (Hybrid)\n\n"
+        "Requirements:\n"
+        "- 5+ years of Linux systems engineering (mandatory)\n"
+        "- Strong Kubernetes and Docker background\n"
+        "- Experience with distributed systems architecture is preferred\n\n"
+        "Responsibilities:\n"
+        "- Architect scalable backend systems\n"
+    )
+
+    extractor = DeterministicExtractor()
+    sections = extractor.extract_sections(raw_text)
+    reqs = extractor.extract_requirements(raw_text, sections)
+    params = extractor.extract_parameters(raw_text, sections)
+    disj = extractor.detect_disjunctions(reqs)
+    ambs = extractor.detect_ambiguities(raw_text, reqs)
+
+    extraction = ExtractionResult(
+        sections=sections,
+        requirements=reqs,
+        disjunction_groups=disj,
+        responsibilities=[],
+        parameters=params,
+        ambiguities=ambs,
+        extraction_mode="deterministic",
+    )
+    master = extraction.to_master_context("test_clarif_jd", raw_text)
+    master = generate_clarification_questions(master)
+
+    answers = {
+        "org_metadata_team_size": "8 to 12 engineers",
+        "compensation_salary_range": "$160,000 - $190,000",
+    }
+    # If there are any ambiguity questions, answer them too
+    for q in master.clarification_history:
+        if "ambiguity" in q.question_key or "contextual" in q.question_key:
+            answers[q.question_key] = "Confirmed by TA: Strictly required for lead role"
+
+    for q_key, ans_text in answers.items():
+        master = submit_answer(master, question_key=q_key, answer_text=ans_text, answered_by="TA Lead")
+
+    master = attempt_finalization(master, actor="TA Lead")
+    spec = project_to_canonical(master, jd_id="test_clarif_jd", specification_version=2)
+    md = render_markdown(spec)
+
+    # 1. Section 1 must reflect team size and salary range
+    assert "- **Team Size:** 8 to 12 engineers" in md
+    assert "- **Salary Range:** $160,000 - $190,000" in md
+
+    # 2. Section 6 must reflect resolved clarifications under Resolved Clarifications
+    if any("ambiguity" in k or "contextual" in k for k in answers):
+        assert "**Resolved Clarifications (TA Confirmed)**" in md
+        assert "TA Resolution:" in md or "Confirmed by TA" in md
+
+    # 3. Missing Information must be empty since both metadata fields were answered
+    assert "**Missing Information**" not in md

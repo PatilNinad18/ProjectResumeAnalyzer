@@ -67,26 +67,38 @@ class DeterministicExtractor:
         
         # Section header patterns
         section_patterns = [
-            (r'^\s*(requirements?|qualifications?)\s*:?\s*$', 'requirements'),
-            (r'^\s*(responsibilities?|duties)\s*:?\s*$', 'responsibilities'),
-            (r'^\s*(about|company|organization)\s*:?\s*$', 'about'),
-            (r'^\s*(skills?|technical skills?)\s*:?\s*$', 'skills'),
-            (r'^\s*(experience|background)\s*:?\s*$', 'experience'),
-            (r'^\s*(education|qualifications?)\s*:?\s*$', 'education'),
-            (r'^\s*(nice to have|preferred|bonus)\s*:?\s*$', 'preferred'),
-            (r'^\s*(location|work mode|work arrangement)\s*:?\s*$', 'location'),
+            (r'^(?:qualifications?\s*(?:&|and)\s*requirements?|requirements?\s*(?:&|and)\s*qualifications?)\s*:?$', 'requirements'),
+            (r'^(?:(?:key|minimum|basic|job|core|technical|must[- ]have|required)\s+)*(?:technical\s+)?requirements?\s*:?$', 'requirements'),
+            (r'^(?:(?:key|minimum|basic|job|core|technical|must[- ]have|required)\s+)*(?:technical\s+)?skills?\s*:?$', 'requirements'),
+            (r'^(?:minimum\s+|basic\s+|required\s+|desired\s+)?qualifications?\s*:?$', 'requirements'),
+            (r'^(?:what\s+(?:we(?:\x27re|\s+are)?\s+looking\s+for|you(?:\x27ll)?\s+need|you\s+bring|we\s+expect))\s*:?$', 'requirements'),
+            (r'^(?:candidate\s+profile|eligibility(?:\s+criteria)?|must\s+haves?)\s*:?$', 'requirements'),
+            (r'^(?:key\s+|primary\s+|core\s+|role\s*(?:&|and)\s*)?responsibilities?\s*:?$', 'responsibilities'),
+            (r'^(?:duties|role\s+overview|what\s+you\s+will\s+do|scope\s+of\s+work|your\s+role)\s*:?$', 'responsibilities'),
+            (r'^(?:preferred\s+|nice\s+to\s+have|bonus\s+points?|plus|good\s+to\s+have|desired\s+)(?:skills?|qualifications?|requirements?)?\s*:?$', 'preferred'),
+            (r'^(?:tech\s+stack|tools\s*(?:&|and)\s*technologies)\s*:?$', 'requirements'),
+            (r'^(?:education(?:al)?(?:\s+background|\s+qualifications?)?|academic\s+background)\s*:?$', 'education'),
+            (r'^(?:experience|background|relevant\s+experience)\s*:?$', 'experience'),
+            (r'^(?:project\s+experience|soft\s+skills)\s*:?$', 'skills'),
+            (r'^(?:position\s+summary|role\s+summary|job\s+summary)\s*:?$', 'about'),
+            (r'^(?:expected\s+deliverables|key\s+deliverables|deliverables)\s*:?$', 'responsibilities'),
+            (r'^(?:growth\s+path|career\s+path|growth\s+opportunities)\s*:?$', 'about'),
+            (r'^(?:about\s+(?:us|the\s+company|the\s+role|the\s+team)|company\s+overview|who\s+we\s+are)\s*:?$', 'about'),
+            (r'^(?:location|work\s+mode|work\s+arrangement|workplace\s+type)\s*:?$', 'location'),
         ]
         
         current_section: Optional[Dict] = None
         current_content: List[str] = []
         
         for line_num, line in enumerate(lines, start=1):
-            # Check if line is a section header
+            clean_line = re.sub(r'^[#*_\-\s•]+|[#*_\-\s:]+$', '', line).strip()
+            # Check if line is a section header (headers are short and not full sentences)
             matched_section = None
-            for pattern, section_type in section_patterns:
-                if re.match(pattern, line.strip(), re.IGNORECASE):
-                    matched_section = section_type
-                    break
+            if clean_line and len(clean_line) <= 60 and not clean_line.endswith(('.', ';')):
+                for pattern, section_type in section_patterns:
+                    if re.search(pattern, clean_line, re.IGNORECASE):
+                        matched_section = section_type
+                        break
             
             if matched_section:
                 # Save previous section
@@ -95,11 +107,21 @@ class DeterministicExtractor:
                     current_section['line_end'] = line_num - 1
                     if current_section['content']:
                         sections.append(JDSection(**current_section))
+                elif current_content and any(c.strip() for c in current_content):
+                    # Save initial content appearing before first explicit section header
+                    sections.append(JDSection(
+                        section_id=f"sec_{len(sections) + 1}",
+                        title="Overview",
+                        section_type="general",
+                        line_start=1,
+                        line_end=line_num - 1,
+                        content='\n'.join(current_content).strip(),
+                    ))
                 
                 # Start new section
                 current_section = {
                     'section_id': f"sec_{len(sections) + 1}",
-                    'title': line.strip().rstrip(':'),
+                    'title': clean_line,
                     'section_type': matched_section,
                     'line_start': line_num,
                     'content': ''
@@ -115,6 +137,15 @@ class DeterministicExtractor:
             current_section['line_end'] = len(lines)
             if current_section['content']:
                 sections.append(JDSection(**current_section))
+        elif current_content and any(c.strip() for c in current_content):
+            sections.append(JDSection(
+                section_id="sec_1",
+                title=None,
+                content='\n'.join(current_content).strip(),
+                section_type="general",
+                line_start=1,
+                line_end=len(lines)
+            ))
         
         # If no sections found, treat entire text as single section
         if not sections:
@@ -146,20 +177,35 @@ class DeterministicExtractor:
         """
         requirements: List[StructuredRequirement] = []
         
+        job_title = None
+        try:
+            params = self.parameter_extractor.extract_parameters(jd_text, sections)
+            job_title = next((str(p.value).strip().lower() for p in params if p.parameter_name == "job_title"), None)
+        except Exception:
+            pass
+
+        has_dedicated_req_sections = any(
+            s.section_type in ("requirements", "skills", "responsibilities", "preferred", "education", "experience")
+            for s in sections
+        )
+
         # Process each section
         for section in sections:
-            section_reqs = self._extract_from_section(section)
+            # When explicit technical/skills/responsibility sections exist, skip overview/about/location
+            if has_dedicated_req_sections and section.section_type in ("about", "general", "location"):
+                continue
+            section_reqs = self._extract_from_section(section, job_title=job_title)
             requirements.extend(section_reqs)
         
         logger.info("[Deterministic] Extracted %d requirements", len(requirements))
         return requirements
     
-    def _extract_from_section(self, section: JDSection) -> List[StructuredRequirement]:
+    def _extract_from_section(self, section: JDSection, job_title: Optional[str] = None) -> List[StructuredRequirement]:
         """Extract requirements from a single section."""
         requirements: List[StructuredRequirement] = []
         
         # Split into sentences/clauses
-        clauses = self._split_into_clauses(section.content)
+        clauses = self._split_into_clauses(section.content, job_title=job_title)
         
         for clause_text in clauses:
             if not clause_text.strip() or len(clause_text) < 10:
@@ -202,77 +248,111 @@ class DeterministicExtractor:
         
         return requirements
     
-    def _split_into_clauses(self, text: str) -> List[str]:
+    def _split_into_clauses(self, text: str, job_title: Optional[str] = None) -> List[str]:
         """
-        Split text into atomic clauses.
-        
-        Similar to RAG query_generator but adapted for requirement extraction.
+        Split text into atomic clauses by line and sentence.
+        Preserves degree qualifications, lists of technologies, and decimal numbers.
+        Filters out embedded headings like 'Project Experience' and metadata lines.
         """
-        # Split by sentence endings
-        sentences = re.split(r'[.!?]+', text)
-        
+        raw_lines = text.split('\n')
         clauses: List[str] = []
-        for sent in sentences:
-            sent = sent.strip()
-            if not sent:
+
+        subhead_pattern = re.compile(
+            r'^(?:project\s+experience|soft\s+skills|technical\s+skills|required\s+technical\s+skills|'
+            r'preferred\s+skills|good\s+to\s+have|key\s+skills|core\s+competencies|role\s+summary|'
+            r'position\s+summary|job\s+summary|expected\s+deliverables|key\s+deliverables|deliverables|'
+            r'growth\s+path|career\s+path|overview|summary|job\s+title|location|responsibilities|'
+            r'qualifications|requirements|education)\s*:?$',
+            re.IGNORECASE
+        )
+
+        metadata_pattern = re.compile(
+            r'^(?:job\s+title|role(?:\s+type)?|priority|experience\s+level|seniority|location(?:\s*/\s*work\s+mode)?|'
+            r'work\s+mode|salary|department|company|employment\s+type|reporting\s+(?:to|structure)|team\s+size)\s*:',
+            re.IGNORECASE
+        )
+
+        for line in raw_lines:
+            # Strip markdown and bullet decorators (preserve years like 8+ years)
+            clean = re.sub(r'^[#*_\-\s•]+', '', line).strip()
+            clean = re.sub(r'^\d+[\.\)\-\]]\s*', '', clean).strip()
+            clean = re.sub(r'[*_]+$', '', clean).strip()
+
+            if not clean or len(clean) < 6:
                 continue
-            
-            # Further split by common delimiters
-            parts = re.split(r'[;,]\s*(?=[A-Z]|and\s|or\s)', sent)
-            for part in parts:
-                part = part.strip()
-                if len(part) > 10:  # Minimum clause length
-                    clauses.append(part)
-        
+
+            # Skip lines matching job title or metadata headers
+            if job_title and clean.lower() == job_title:
+                continue
+
+            if subhead_pattern.match(clean) or metadata_pattern.match(clean):
+                continue
+
+            # Split sentences on period only when followed by whitespace and capital letter
+            # (protects decimals like TLM 2.0, Python 3.11, 8.5+ years)
+            sentences = re.split(r'(?<=[a-zA-Z0-9])\.\s+(?=[A-Z])', clean)
+
+            for sent in sentences:
+                sent = sent.strip()
+                if not sent or len(sent) < 8:
+                    continue
+
+                if job_title and sent.lower() == job_title:
+                    continue
+
+                # Filter out dangling fragmented prepositions/conjunctions
+                lower_sent = sent.lower()
+                if lower_sent.startswith(("or ", "and ", "in ", "with ", "to ", "for ", "of ")) and len(sent) < 30:
+                    continue
+
+                clauses.append(sent)
+
         return clauses
-    
+
     def _classify_clause(self, text: str, section_type: str) -> ClauseType:
         """
-        Conservatively classify clause type.
-        
-        Uses keyword signals and section context.
+        Conservatively classify clause type using section context and keyword signals.
+        Section context takes precedence for dedicated requirements/responsibilities sections.
         """
         lower = text.lower()
-        
+
+        # Section context is the strongest indicator
+        if section_type in ['responsibilities', 'duties']:
+            return ClauseType.RESPONSIBILITY
+        elif section_type in ['requirements', 'qualifications', 'skills', 'experience', 'education', 'preferred']:
+            return ClauseType.REQUIREMENT
+        elif section_type in ['about', 'company', 'location']:
+            return ClauseType.CONTEXT
+
         # Responsibility indicators
         responsibility_keywords = [
             'design', 'develop', 'build', 'implement', 'maintain',
             'lead', 'manage', 'own', 'responsible for', 'drive',
             'collaborate', 'work with', 'support'
         ]
-        
+
         # Requirement indicators
         requirement_keywords = [
             'must have', 'required', 'minimum', 'years of experience',
             'proficiency in', 'knowledge of', 'experience with',
-            'bachelor', 'degree', 'certification'
+            'bachelor', 'degree', 'certification', 'hands-on', 'proficient'
         ]
-        
+
         # Context indicators
         context_keywords = [
             'company', 'team', 'culture', 'environment',
             'startup', 'enterprise', 'industry'
         ]
-        
-        # Check patterns
-        if any(kw in lower for kw in responsibility_keywords):
-            return ClauseType.RESPONSIBILITY
-        
+
         if any(kw in lower for kw in requirement_keywords):
             return ClauseType.REQUIREMENT
-        
+
+        if any(kw in lower for kw in responsibility_keywords):
+            return ClauseType.RESPONSIBILITY
+
         if any(kw in lower for kw in context_keywords):
             return ClauseType.CONTEXT
-        
-        # Use section context as fallback
-        if section_type in ['responsibilities', 'duties']:
-            return ClauseType.RESPONSIBILITY
-        elif section_type in ['requirements', 'qualifications', 'skills', 'experience']:
-            return ClauseType.REQUIREMENT
-        elif section_type in ['about', 'company']:
-            return ClauseType.CONTEXT
-        
-        # Default to ambiguous if unclear
+
         return ClauseType.AMBIGUOUS
     
     def _detect_priority(

@@ -535,6 +535,7 @@ class JobContext(_Base):
     company_context: OptStr = None
     business_context: OptStr = None
     team_size: OptStr = None
+    salary_range: OptStr = None
     environment: OptStr = Field(None, description="e.g. 'fast-paced startup'")
 
     @model_validator(mode="before")
@@ -552,6 +553,7 @@ class JobContext(_Base):
             bits = [_pick(d.get(k)) for k in ("platform_type", "target_audience", "key_value_proposition", "mission", "product")]
             d["business_context"] = "; ".join(b for b in bits if b) or None
         _alias(d, "team_size", "team")
+        _alias(d, "salary_range", "salary", "compensation", "compensation_band")
         _alias(d, "environment", "work_environment", "culture")
         return d
 

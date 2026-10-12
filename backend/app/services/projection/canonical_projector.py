@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from app.schemas.canonical import (
@@ -123,14 +124,18 @@ def project_to_canonical(
             })
 
         elif req.priority in {RequirementPriority.UNRESOLVED, RequirementPriority.INFORMATIONAL, RequirementPriority.CONTEXTUAL}:
-            ambiguities_out.append({
-                "statement": req.text,
-                "why_ambiguous": (
-                    "Priority was UNRESOLVED at time of finalization." if req.priority == RequirementPriority.UNRESOLVED
-                    else "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation."
-                ),
-                "ta_confirmation_required": True,
-            })
+            snip = req.text.strip()
+            is_confirmed = getattr(req.provenance, "origin_type", None) == OriginType.TA_CONFIRMED
+            if len(snip) >= 25 and not snip.lower().startswith(("in ", "or ", "and ")) and len(ambiguities_out) < 4:
+                ambiguities_out.append({
+                    "statement": req.text,
+                    "why_ambiguous": (
+                        "Priority was UNRESOLVED at time of finalization." if req.priority == RequirementPriority.UNRESOLVED
+                        else "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation."
+                    ),
+                    "suggested_interpretation": "TA Resolution: Confirmed as role context / informational." if is_confirmed else None,
+                    "ta_confirmation_required": not is_confirmed,
+                })
             evidence_specs.append({
                 "requirement_id": req.id,
                 "requirement": req.text,
@@ -159,40 +164,78 @@ def project_to_canonical(
                 "explicit_or_derived": "explicit",
             })
 
+    # Build answered questions map from master clarification history
+    answered_q_map = {}
+    for q in master.clarification_history:
+        if q.status == QuestionStatus.ANSWERED and q.answer_text:
+            answered_q_map[q.question_key] = q
+            if q.field_target:
+                answered_q_map[q.field_target] = q
+
     # Include detected ambiguities from raw text if not already present
     raw_ambs = getattr(master, "raw_ambiguities", []) or []
     existing_statements = {a["statement"].strip().lower() for a in ambiguities_out if "statement" in a}
     for amb in raw_ambs:
+        if len(ambiguities_out) >= 4:
+            break
         amb_text = getattr(amb, "text", "").strip()
-        if amb_text and amb_text.lower() not in existing_statements:
+        amb_id = getattr(amb, "ambiguity_id", "") or str(getattr(amb, "id", ""))
+        if amb_text and amb_text.lower() not in existing_statements and len(amb_text) >= 25:
+            matching_q = (
+                answered_q_map.get(f"ambiguities[{amb_id}]")
+                or answered_q_map.get(f"jd_ambiguity_{amb_id}")
+                or answered_q_map.get(f"amb_{amb_id}")
+            )
+            is_resolved = (
+                getattr(amb, "requires_ta_confirmation", True) is False
+                or bool(matching_q)
+                or any("TA Resolution:" in s for s in (getattr(amb, "suggested_interpretations", []) or []))
+            )
+            sugg_interp = None
+            if matching_q and matching_q.answer_text:
+                sugg_interp = f"TA Resolution: {matching_q.answer_text}"
+            elif getattr(amb, "suggested_interpretations", None):
+                for interp in amb.suggested_interpretations:
+                    if "TA Resolution:" in interp:
+                        sugg_interp = interp
+                        break
+                if not sugg_interp:
+                    sugg_interp = amb.suggested_interpretations[0]
+
             ambiguities_out.append({
                 "statement": amb_text,
                 "why_ambiguous": getattr(amb, "reason", "Statement requiring TA confirmation."),
-                "ta_confirmation_required": True,
+                "suggested_interpretation": sugg_interp,
+                "ta_confirmation_required": not is_resolved,
             })
             existing_statements.add(amb_text.lower())
 
     # --- Responsibilities ---
+    subhead_clean_re = re.compile(
+        r'^(?:project\s+experience|soft\s+skills|technical\s+skills|core\s+competencies|key\s+skills|overview|summary)\s*:?$',
+        re.IGNORECASE
+    )
     responsibilities_out = [
         {"description": r.raw_statement, "kind": "primary",
-         "source": {"text": r.source_span.raw_text, "section": r.source_span.section}}
+         "source": {"text": r.source_span.raw_text if r.source_span else "", "section": r.source_span.section if r.source_span else ""}}
         for r in master.responsibilities
+        if r.raw_statement and not subhead_clean_re.match(r.raw_statement.strip())
     ]
 
-    # --- Missing info (from EXPLICITLY_UNSPECIFIED and still-null metadata) ---
+    # --- Missing info (omit if answered or explicitly marked unspecified) ---
     missing_info_out: List[Dict[str, Any]] = []
     ctx = master.job_context
-    if ctx.team_size is None:
+    if ctx.team_size is None and not ctx.team_size_explicitly_unspecified:
         missing_info_out.append({
             "field": "team_size",
             "why_it_matters": "Team size affects culture fit expectations.",
-            "suggested_action": "Ask TA to confirm or mark as not available." if not ctx.team_size_explicitly_unspecified else None,
+            "suggested_action": "Ask TA to confirm or mark as not available.",
         })
-    if ctx.salary_range is None:
+    if ctx.salary_range is None and not ctx.salary_explicitly_unspecified:
         missing_info_out.append({
             "field": "salary_range",
             "why_it_matters": "Salary range affects candidate expectations and attraction.",
-            "suggested_action": "Ask TA to confirm or mark as not disclosed." if not ctx.salary_explicitly_unspecified else None,
+            "suggested_action": "Ask TA to confirm or mark as not disclosed.",
         })
 
     # --- Unanswered OPTIONAL questions as ta_confirmation_required items ---
@@ -229,6 +272,7 @@ def project_to_canonical(
         "business_context": ctx.business_context,
         "environment": ctx.environment,
         "team_size": ctx.team_size,
+        "salary_range": ctx.salary_range,
     }
 
     # --- Conventional requirements ---
@@ -245,6 +289,27 @@ def project_to_canonical(
         "work_mode": ro.work_mode.lower() if ro.work_mode else "unspecified",
     }
 
+    # --- Grounded candidate analysis / evaluation priorities ---
+    candidate_instructions: List[str] = []
+    if tech_skills:
+        top_tech = [t["name"] for t in tech_skills[:4]]
+        candidate_instructions.append(f"Prioritize candidates demonstrating hands-on production depth in core technical skills: {', '.join(top_tech)}.")
+    elif must_haves:
+        top_mh = [m[:80] for m in must_haves[:3]]
+        candidate_instructions.append(f"Prioritize proven track record meeting core mandatory competencies: {'; '.join(top_mh)}.")
+
+    if experience_reqs:
+        exp_desc = experience_reqs[0].get("description", "")
+        candidate_instructions.append(f"Screen for verified career progression and tenure meeting the experience standard ({exp_desc}).")
+
+    if responsibilities_out:
+        top_resp = responsibilities_out[0].get("description", "")
+        candidate_instructions.append(f"Evaluate demonstrated ownership of major deliverables: {top_resp[:120]}.")
+
+    if preferred:
+        top_pref = preferred[:3]
+        candidate_instructions.append(f"Differentiate competitive candidates through demonstrated depth in preferred skills: {', '.join(top_pref)}.")
+
     spec = JobEvaluationSpecification(
         metadata=MetadataInfo(jd_id=jd_id or master.jd_id, specification_version=specification_version),
         role=role_out,
@@ -258,6 +323,7 @@ def project_to_canonical(
         ambiguities=ambiguities_out,
         missing_information=missing_info_out,
         ta_confirmation_required=ta_confirmation_required,
+        candidate_analysis_instructions=candidate_instructions,
     )
 
     logger.info(

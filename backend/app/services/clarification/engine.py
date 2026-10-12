@@ -304,6 +304,7 @@ def _detect_contextual_ambiguities(
     """
     Generates questions for requirements flagged as CONTEXTUAL or INFORMATIONAL phrasing
     where TA confirmation is required to confirm mandatory vs preferred vs informational status.
+    Filters out noise fragments, degree clauses, and limits questions to high-signal items.
     """
     questions: List[ClarificationQuestionSchema] = []
     from app.services.projection.canonical_projector import _flatten_requirements
@@ -316,11 +317,26 @@ def _detect_contextual_ambiguities(
     ]
 
     seen_statements = {q.question_text.lower() for q in master.clarification_history}
+    dangling_prefixes = ("in ", "or ", "and ", "with ", "to ", "for ", "of ")
+    degree_keywords = ("degree", "bachelor", "master", "phd", "computer engineering", "electronics")
 
     for i, item in enumerate(contextual):
-        key = f"contextual_req_{item.id[:8]}_{i}"
+        if len(questions) >= 3:
+            break
+
         statement_snip = item.text.strip()
-        if key not in existing_keys and statement_snip.lower() not in seen_statements:
+        lower_snip = statement_snip.lower()
+
+        # Filter out short fragments or dangling conjunction clauses
+        if len(statement_snip) < 30:
+            continue
+        if lower_snip.startswith(dangling_prefixes):
+            continue
+        if any(dk in lower_snip for dk in degree_keywords) and len(statement_snip) < 80:
+            continue
+
+        key = f"contextual_req_{item.id[:8]}_{i}"
+        if key not in existing_keys and lower_snip not in seen_statements:
             questions.append(ClarificationQuestionSchema(
                 question_key=key,
                 category=QuestionCategory.TECHNICAL_SCOPE,
@@ -334,7 +350,7 @@ def _detect_contextual_ambiguities(
                 rationale="Soft/contextual requirement in JD requiring TA confirmation to decide screening criteria.",
                 suggested_options=["MUST HAVE — mandatory", "PREFERRED — nice to have", "INFORMATIONAL — role context only"],
             ))
-            seen_statements.add(statement_snip.lower())
+            seen_statements.add(lower_snip)
 
     return questions
 
@@ -345,16 +361,25 @@ def _detect_raw_ambiguities(
 ) -> List[ClarificationQuestionSchema]:
     """
     Generates questions for ambiguities detected in the JD text (e.g. unclear experience, vague qualifiers).
+    Caps total raw ambiguities to 3 to keep TA workflow focused.
     """
     questions: List[ClarificationQuestionSchema] = []
     raw_ambs = getattr(master, "raw_ambiguities", []) or []
     seen_statements = {q.question_text.lower() for q in master.clarification_history}
 
     for i, amb in enumerate(raw_ambs):
+        if len(questions) >= 3:
+            break
+
         amb_id = getattr(amb, "ambiguity_id", f"amb_{i}")
         key = f"jd_ambiguity_{amb_id}"
         amb_text = getattr(amb, "text", "").strip()
-        if key not in existing_keys and amb_text and amb_text.lower() not in seen_statements:
+        lower_text = amb_text.lower()
+
+        if len(amb_text) < 25 or lower_text.startswith(("in ", "or ", "and ")):
+            continue
+
+        if key not in existing_keys and amb_text and lower_text not in seen_statements:
             reason = getattr(amb, "reason", "Ambiguous statement in JD")
             opts = getattr(amb, "suggested_interpretations", []) or []
             questions.append(ClarificationQuestionSchema(
@@ -367,7 +392,7 @@ def _detect_raw_ambiguities(
                 rationale=reason,
                 suggested_options=opts,
             ))
-            seen_statements.add(amb_text.lower())
+            seen_statements.add(lower_text)
 
     return questions
 

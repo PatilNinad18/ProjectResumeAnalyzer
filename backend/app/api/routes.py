@@ -383,7 +383,7 @@ def enrich_jd(jd_id: str, db: Session = Depends(get_db)):
 
 class ResolveClarificationsRequest(BaseModel):
     answers: Dict[str, Any] = Field(default_factory=dict)
-    answered_by: str = "TA / Hiring Team"
+    answered_by: Optional[str] = "TA / Hiring Team"
 
 
 @router.post("/jds/{jd_id}/clarifications/resolve")

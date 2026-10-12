@@ -74,7 +74,7 @@ class ParameterExtractor:
         
         # Location patterns
         self.location_patterns = [
-            re.compile(r'(?:location|based\s+in|located\s+in)\s*:?\s*([^.,\n]+)', re.IGNORECASE),
+            re.compile(r'(?:location(?:\s*/\s*work\s*mode)?|based\s+in|located\s+in)\s*:?\s*([^.,\n]+)', re.IGNORECASE),
             re.compile(r'(?:office\s+location|work\s+location)\s*:?\s*([^.,\n]+)', re.IGNORECASE),
         ]
         
@@ -288,6 +288,7 @@ class ParameterExtractor:
             match = pattern.search(jd_text)
             if match:
                 location = match.group(1).strip()
+                location = re.sub(r'^(?:/\s*work\s*mode\s*:?)+', '', location, flags=re.IGNORECASE).strip()
                 
                 # Validate location (not too short)
                 if len(location) > 2:
