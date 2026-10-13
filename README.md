@@ -11,6 +11,132 @@ The current setup uses **Ollama + Qwen3 4B for local/offline LLM inference**, so
 
 ---
 
+## How It Works (Plain English)
+
+> **Short answer:** This project uses a real LLM (Qwen3 4B running locally via Ollama) — NOT a deterministic rule-based system. Rules are only used in two small, well-defined support roles.
+
+Here is exactly what happens when you upload a Job Description (JD):
+
+### Step 1 — Rule-Based Pre-processing (Deterministic)
+
+Before the LLM sees anything, a **pure Python, zero-dependency classifier** reads the raw JD text and splits it into atomic clauses (bullet points, sentences). Each clause is scored against keyword signal tables (e.g. "python", "years of experience", "remote") and assigned to one of 7 categories:
+
+| Category | Example keywords |
+|---|---|
+| `experience` | "years of experience", "prior experience" |
+| `technical_skills` | "python", "aws", "docker", "react" |
+| `responsibilities` | "design", "build", "deploy", "lead" |
+| `roles_seniority` | "senior", "junior", "principal", "intern" |
+| `domains` | "fintech", "healthcare", "saas", "AI/ML" |
+| `job_parameters` | "remote", "hybrid", "on-call", "contract" |
+| `compliance` | "visa sponsorship", "security clearance", "EEO" |
+
+This step is **100% deterministic** — same JD always gives the same classification. No LLM is called here. Its only job is to figure out *what kind* of knowledge to look up next.
+
+### Step 2 — Hybrid RAG Retrieval (Deterministic)
+
+The classified clauses are used as search queries against a **local knowledge base** of hiring evaluation standards. The retrieval uses two complementary algorithms fused together:
+
+- **BM25** (keyword matching): finds documents with exact or near-exact term matches
+- **TF-IDF Cosine Similarity** (vector matching): finds documents that are *conceptually similar*
+- **Reciprocal Rank Fusion (RRF)**: merges both result lists into one ranked list
+
+**No external search engine, no embeddings model, no GPU required** — this is plain Python math using only the standard library. The retrieved "knowledge snippets" tell the LLM things like *"when a JD says 3 years of Python, it means 3 years of relevant Python, not total employment"*.
+
+### Step 3 — LLM Call (Ollama / Qwen3 4B)
+
+Now the LLM is called. The LLM receives:
+
+```
+[System Prompt: strict extraction rules + required JSON shape]
+[User Prompt:
+  <jd_content> ... raw JD text ... </jd_content>
+  <domain_knowledge_context> ... RAG snippets ... </domain_knowledge_context>
+  "Generate the Candidate Evaluation Specification now."
+]
+```
+
+The LLM's job is to **read the JD and fill in a pre-defined JSON schema** — it extracts job title, skills, experience requirements, responsibilities, evidence rules, ambiguities, etc. It is explicitly told:
+
+- The JD is the only source of facts
+- RAG snippets are background guidance only and must not override JD facts
+- Never invent salary, years, skills, or any detail not in the JD
+- Output **only** the JSON object — no prose, no markdown, no reasoning
+
+Ollama constrains the LLM's output to match the exact JSON schema using a grammar, so the model cannot produce malformed JSON.
+
+**This is the only step where a language model is used.**
+
+### Step 4 — Deterministic Post-processing (Rule-Based)
+
+After the LLM responds, a small Python function runs three deterministic fixes:
+
+1. **Job title override** — if the JD starts with `"Job Title: ..."`, that exact string always wins over whatever the model guessed
+2. **Deduplication** — skills that appear in both the structured fields and the free-text must-have list are deduplicated using token matching
+3. **Skill surfacing** — any technical skill the LLM extracted but forgot to include in the requirements lists is added back
+
+### Step 5 — Pydantic Validation
+
+The LLM's JSON is validated against the `JobEvaluationSpecification` Pydantic schema. If it fails, the error is logged and the analysis is rejected — the LLM output is never silently accepted.
+
+### Step 6 — Output: Markdown + JSON
+
+The validated Python object is rendered into:
+- `job_specification.md` — 8 human-readable sections for TA teams
+- `job_specification.json` — machine-readable spec for downstream agents
+
+Both files are generated from the **same validated object**, so they are always in sync.
+
+### Step 7 — JD Chat
+
+Users can ask questions about the uploaded JD (e.g. *"Is the role remote?"*, *"What Python experience is required?"*). Chat calls the LLM again with:
+- The raw JD text (authoritative)
+- The generated `job_specification.md` (supporting)
+- Relevant RAG snippets (background only)
+- Conversation history (last 6 turns)
+
+The LLM answers in ≤150 words using only the provided context. It cannot invent facts.
+
+---
+
+### Summary: Which parts use the LLM vs rules?
+
+| Step | Approach |
+|---|---|
+| Clause splitting & classification | ✅ Deterministic rules (keyword scoring) |
+| Knowledge retrieval (RAG) | ✅ Deterministic math (BM25 + TF-IDF + RRF) |
+| JD understanding & extraction | 🤖 **LLM — Ollama / Qwen3 4B** |
+| Post-processing (dedup, title fix) | ✅ Deterministic rules |
+| Pydantic validation | ✅ Deterministic (schema check) |
+| Markdown + JSON rendering | ✅ Deterministic (template renderer) |
+| JD Chat answers | 🤖 **LLM — Ollama / Qwen3 4B** |
+
+The LLM (Qwen3 4B) is the brain. The rules are the guardrails that make its output reliable and consistent.
+
+---
+
+### What is Ollama? What is Qwen3 4B?
+
+- **Ollama** is a free tool that lets you run AI language models locally on your own computer — no internet, no cloud API, no API key needed.
+- **Qwen3 4B** is a 4-billion-parameter open-source language model made by Alibaba. It is small enough to run on a laptop CPU (slowly) or a GPU (fast). It understands instructions well and can produce structured JSON reliably.
+
+The two together mean: **this entire system runs 100% offline on your machine.** No data is ever sent to OpenAI, Google, or any cloud service unless you explicitly switch the provider in `.env`.
+
+### Can I use a different LLM?
+
+Yes. The system has four built-in providers you can switch via `LLM_PROVIDER` in `.env`:
+
+| Provider | Model | Requires |
+|---|---|---|
+| `ollama` | `qwen3:4b` (default) | Ollama installed locally |
+| `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` |
+| `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
+| `mock` | rule-based extractor | Nothing (dev/CI only) |
+
+The `mock` provider uses **only deterministic keyword rules** and is explicitly not a real LLM — it is only for testing without Ollama installed.
+
+---
+
 ## 1. Architecture
 
 ```text
@@ -21,6 +147,7 @@ JD (Text / TXT / PDF / DOCX)
             |
             +----> Local Hybrid RAG
             |      BM25 + TF-IDF + RRF
+            |      (Deterministic, no LLM)
             |
             v
      Ollama / Qwen3 4B
@@ -83,130 +210,106 @@ Verify:
 ollama list
 ```
 
-Test the model:
+---
 
-```bash
-ollama run qwen3:4b
-```
+## 3. Supported LLM Providers
 
-If Qwen responds, the local LLM is ready.
+| Provider | Setting | Model | Notes |
+|---|---|---|---|
+| Ollama (default) | `LLM_PROVIDER=ollama` | `qwen3:4b` | Local, offline, no API key |
+| Gemini | `LLM_PROVIDER=gemini` | `gemini-2.5-flash` | Requires `GEMINI_API_KEY` |
+| Anthropic | `LLM_PROVIDER=anthropic` | `claude-sonnet-4-6` | Requires `ANTHROPIC_API_KEY` |
+| Mock | `LLM_PROVIDER=mock` | rule-based | Dev / CI only, no real LLM |
+
+Switch providers by changing `LLM_PROVIDER` in `.env`. The model can be overridden separately via `LLM_MODEL`.
 
 ---
 
-## 3. Backend Setup
-
-```bash
-cd backend
-python -m venv .venv
-```
-
-### Windows
-
-```bash
-.venv\Scripts\activate
-```
-
-### Linux/macOS
-
-```bash
-source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Create `.env`:
-
-```ini
-LLM_PROVIDER=ollama
-LLM_MODEL=qwen3:4b
-OLLAMA_BASE_URL=http://localhost:11434
-
-ENABLE_RAG=true
-DATABASE_URL=sqlite:///./jd_agent.db
-```
-
-No OpenAI, Gemini, Anthropic, or other external API key is required for Ollama mode.
-
----
-
-## 4. Optional: Custom Ollama Model Directory
-
-If the Ollama models should be stored on another drive, configure `OLLAMA_MODELS`.
-
-Example on Windows:
-
-```powershell
-$env:OLLAMA_MODELS="D:\OllamaModels"
-```
-
-For a permanent configuration, add it through Windows Environment Variables.
-
-Do not commit local model files or machine-specific paths to Git.
-
----
-
-## 5. Run the Backend
-
-From `backend/`:
-
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-Backend:
+## 4. JD Understanding Pipeline
 
 ```text
-http://127.0.0.1:8000
-```
-
-FastAPI docs:
-
-```text
-http://127.0.0.1:8000/docs
+Raw JD
+  |
+  v
+[1] Clause Splitter (deterministic)
+      Split JD into atomic statements
+  |
+  v
+[2] Requirement Classifier (deterministic, keyword-scored)
+      Categories: experience / technical_skills / responsibilities /
+                  roles_seniority / domains / job_parameters / compliance
+  |
+  v
+[3] Hybrid RAG Retrieval (deterministic)
+      BM25 sparse + TF-IDF dense + RRF fusion
+      → domain-knowledge snippets
+  |
+  v
+[4] Prompt Builder
+      <jd_content> + <domain_knowledge_context>
+  |
+  v
+[5] LLM Call — Ollama / Qwen3 4B
+      JSON schema-constrained output
+  |
+  v
+[6] JSON Parsing + Pydantic Validation
+  |
+  v
+[7] Deterministic Post-processing
+      Title override, deduplication, skill surfacing
+  |
+  v
+JobEvaluationSpecification (canonical Python object)
+  |
+  +----> job_specification.md
+  +----> job_specification.json
 ```
 
 ---
 
-## 6. Run the Frontend
+## 5. JD Analysis Prompt
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+The LLM receives a strict system prompt that:
 
-Open the URL provided by Vite.
+- Designates `<jd_content>` as the only authoritative source of facts
+- Designates `<domain_knowledge_context>` as background guidance only
+- Prohibits inventing salary, years, skills, education, location, or any absent information
+- Distinguishes `"explicit"` (stated in JD) from `"derived"` (reasonable interpretation)
+- Defines the exact JSON key skeleton the model must follow
+- Caps every string at 25 words and limits list lengths (e.g. responsibilities ≤ 8)
+- Instructs the model to output **only** the raw JSON object — no prose, no fences
 
----
-
-## 7. End-to-End Workflow
-
-```text
-1. Create/select JD
-2. Paste JD or upload TXT/PDF/DOCX
-3. Run analysis
-4. Retrieve local RAG context
-5. Generate structured output with Qwen3 4B
-6. Validate with Pydantic
-7. Generate Markdown + JSON
-8. Review JD specification
-9. Chat with the active JD
-10. Use the specification for downstream candidate evaluation
-```
-
-The application supports multiple JDs with independent analysis and chat contexts.
+Ollama enforces the JSON shape with a grammar so the model cannot deviate from the schema.
 
 ---
 
-## 8. Supported JD Input
+## 6. JD Post-processing (Deterministic)
 
-The system supports:
+After the LLM returns its JSON, three deterministic fixups run:
 
-- Raw text
+1. **Job title authority** — If the JD starts with `Job Title: ...`, that line always overrides the model's output
+2. **Must-have deduplication** — Skills already captured in structured `experience` or `education` fields are removed from the flat `must_have_requirements` list to prevent double-rendering
+3. **Skill surfacing** — Technical skills the model extracted into `technical_skills` but omitted from the requirements lists are added back with the correct priority
+
+These fixups exist because a 4B model is unreliable at these mechanical tasks; deterministic code handles them instead.
+
+---
+
+## 7. Pydantic Validation
+
+The LLM output is validated against `JobEvaluationSpecification` (see `backend/app/schemas/canonical.py`):
+
+- All field types and constraints are checked
+- Unknown fields are ignored (tolerant parsing)
+- If validation fails, a `JDUnderstandingError` is raised — the output is never silently accepted
+
+---
+
+## 8. JD File Parsing
+
+Supported input formats:
+
 - `.txt`
 - `.pdf`
 - `.docx`
@@ -248,7 +351,7 @@ Context Selection
 Ollama / Qwen3 4B
 ```
 
-The RAG implementation is lightweight and local.
+The RAG implementation is lightweight and local. No external embedding model or vector database is required — it uses only Python's standard library math.
 
 ---
 
@@ -474,8 +577,8 @@ Local inference is expected to be slower than cloud inference. GPU acceleration 
 The current development configuration uses:
 
 ```text
-Context window:          16,384 tokens
-Maximum generated output: 8,192 tokens
+Context window:           16,384 tokens
+Maximum generated output:  8,192 tokens
 ```
 
 These values can be tuned after measuring quality and latency.
@@ -496,13 +599,16 @@ Inspect the Pydantic validation error first. Do not increase the output limit au
                   |
                   v
           Local FastAPI Backend
-             /                      /                   Local RAG      Ollama
-                       Qwen3 4B
+             /          \
+            /            \
+      Local RAG         Ollama
+    (Deterministic)    Qwen3 4B
             \            /
              \          /
                   v
         Canonical Pydantic Spec
-             /                       v             v
+             /          \
+            v             v
      Markdown             JSON
             \             /
              \           /
@@ -523,6 +629,7 @@ No external LLM API is required in Ollama mode.
 - **Traceability:** Requirements retain source information where supported by the schema.
 - **Fail-safe RAG:** RAG failures should not prevent core JD extraction.
 - **Validation before output:** LLM output is validated against the canonical Pydantic schema.
+- **Rules for the mechanical, LLM for the semantic:** Deterministic code handles deduplication and formatting; the LLM handles understanding and extraction.
 
 ---
 
