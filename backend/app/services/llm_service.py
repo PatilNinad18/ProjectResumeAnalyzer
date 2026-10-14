@@ -626,7 +626,7 @@ class LLMService:
     def __init__(self, adapter: Optional[ProviderAdapter] = None, model: Optional[str] = None):
         settings = get_settings()
         provider_name = settings.llm_provider
-        default_models = {
+        default_models = { 
             "ollama": "qwen2.5:1.5b",
             "anthropic": "claude-sonnet-4-6",
             "gemini": "gemini-2.5-flash",

@@ -13,105 +13,149 @@ The current setup uses **Ollama + Qwen3 4B for local/offline LLM inference**, so
 
 ## How It Works (Plain English)
 
-> **Short answer:** This project uses a real LLM (Qwen3 4B running locally via Ollama) — NOT a deterministic rule-based system. Rules are only used in two small, well-defined support roles.
-
-Here is exactly what happens when you upload a Job Description (JD):
-
-### Step 1 — Rule-Based Pre-processing (Deterministic)
-
-Before the LLM sees anything, a **pure Python, zero-dependency classifier** reads the raw JD text and splits it into atomic clauses (bullet points, sentences). Each clause is scored against keyword signal tables (e.g. "python", "years of experience", "remote") and assigned to one of 7 categories:
-
-| Category | Example keywords |
-|---|---|
-| `experience` | "years of experience", "prior experience" |
-| `technical_skills` | "python", "aws", "docker", "react" |
-| `responsibilities` | "design", "build", "deploy", "lead" |
-| `roles_seniority` | "senior", "junior", "principal", "intern" |
-| `domains` | "fintech", "healthcare", "saas", "AI/ML" |
-| `job_parameters` | "remote", "hybrid", "on-call", "contract" |
-| `compliance` | "visa sponsorship", "security clearance", "EEO" |
-
-This step is **100% deterministic** — same JD always gives the same classification. No LLM is called here. Its only job is to figure out *what kind* of knowledge to look up next.
-
-### Step 2 — Hybrid RAG Retrieval (Deterministic)
-
-The classified clauses are used as search queries against a **local knowledge base** of hiring evaluation standards. The retrieval uses two complementary algorithms fused together:
-
-- **BM25** (keyword matching): finds documents with exact or near-exact term matches
-- **TF-IDF Cosine Similarity** (vector matching): finds documents that are *conceptually similar*
-- **Reciprocal Rank Fusion (RRF)**: merges both result lists into one ranked list
-
-**No external search engine, no embeddings model, no GPU required** — this is plain Python math using only the standard library. The retrieved "knowledge snippets" tell the LLM things like *"when a JD says 3 years of Python, it means 3 years of relevant Python, not total employment"*.
-
-### Step 3 — LLM Call (Ollama / Qwen3 4B)
-
-Now the LLM is called. The LLM receives:
-
-```
-[System Prompt: strict extraction rules + required JSON shape]
-[User Prompt:
-  <jd_content> ... raw JD text ... </jd_content>
-  <domain_knowledge_context> ... RAG snippets ... </domain_knowledge_context>
-  "Generate the Candidate Evaluation Specification now."
-]
-```
-
-The LLM's job is to **read the JD and fill in a pre-defined JSON schema** — it extracts job title, skills, experience requirements, responsibilities, evidence rules, ambiguities, etc. It is explicitly told:
-
-- The JD is the only source of facts
-- RAG snippets are background guidance only and must not override JD facts
-- Never invent salary, years, skills, or any detail not in the JD
-- Output **only** the JSON object — no prose, no markdown, no reasoning
-
-Ollama constrains the LLM's output to match the exact JSON schema using a grammar, so the model cannot produce malformed JSON.
-
-**This is the only step where a language model is used.**
-
-### Step 4 — Deterministic Post-processing (Rule-Based)
-
-After the LLM responds, a small Python function runs three deterministic fixes:
-
-1. **Job title override** — if the JD starts with `"Job Title: ..."`, that exact string always wins over whatever the model guessed
-2. **Deduplication** — skills that appear in both the structured fields and the free-text must-have list are deduplicated using token matching
-3. **Skill surfacing** — any technical skill the LLM extracted but forgot to include in the requirements lists is added back
-
-### Step 5 — Pydantic Validation
-
-The LLM's JSON is validated against the `JobEvaluationSpecification` Pydantic schema. If it fails, the error is logged and the analysis is rejected — the LLM output is never silently accepted.
-
-### Step 6 — Output: Markdown + JSON
-
-The validated Python object is rendered into:
-- `job_specification.md` — 8 human-readable sections for TA teams
-- `job_specification.json` — machine-readable spec for downstream agents
-
-Both files are generated from the **same validated object**, so they are always in sync.
-
-### Step 7 — JD Chat
-
-Users can ask questions about the uploaded JD (e.g. *"Is the role remote?"*, *"What Python experience is required?"*). Chat calls the LLM again with:
-- The raw JD text (authoritative)
-- The generated `job_specification.md` (supporting)
-- Relevant RAG snippets (background only)
-- Conversation history (last 6 turns)
-
-The LLM answers in ≤150 words using only the provided context. It cannot invent facts.
+> **Important:** The system has **two completely separate pipelines**. One uses the LLM (Ollama / Qwen3 4B). The other is 100% deterministic and **does not need Ollama at all**. This is why you get output even when Ollama is not running.
 
 ---
 
-### Summary: Which parts use the LLM vs rules?
+### Why you get output without Ollama
 
-| Step | Approach |
-|---|---|
-| Clause splitting & classification | ✅ Deterministic rules (keyword scoring) |
-| Knowledge retrieval (RAG) | ✅ Deterministic math (BM25 + TF-IDF + RRF) |
-| JD understanding & extraction | 🤖 **LLM — Ollama / Qwen3 4B** |
-| Post-processing (dedup, title fix) | ✅ Deterministic rules |
-| Pydantic validation | ✅ Deterministic (schema check) |
-| Markdown + JSON rendering | ✅ Deterministic (template renderer) |
-| JD Chat answers | 🤖 **LLM — Ollama / Qwen3 4B** |
+When you click **Analyze**, the worker ([`worker.py`](backend/app/workers/worker.py)) runs **two stages**:
 
-The LLM (Qwen3 4B) is the brain. The rules are the guardrails that make its output reliable and consistent.
+```
+Stage 1 — Deterministic Baseline (ALWAYS runs, no Ollama needed)
+  ExtractionPipeline → EKG entity matching → rule-based extractor
+  → produces: master_context, canonical spec, markdown, JSON
+       ↓
+Stage 2 — Ollama Enrichment (OPTIONAL, only if Ollama is running)
+  GroundedEnrichmentService.check_ollama_available()
+    → if True:  call Ollama → enrich the markdown with deeper evidence rules
+    → if False: silently skip, use Stage 1 output as-is
+```
+
+**Stage 1 always completes and saves a result to the database.** Stage 2 is a best-effort enrichment that improves quality but is not required. If Ollama is off, Stage 2 is skipped with a log warning and the Stage 1 result is returned as the final output.
+
+This means:
+- **Without Ollama** → you get a deterministic rule-based extraction (fast, no LLM quality)
+- **With Ollama** → you get the same deterministic baseline, enriched by the LLM (slower, higher quality)
+
+---
+
+### Pipeline 1 — Deterministic Baseline (No LLM)
+
+This pipeline runs on every JD analysis regardless of Ollama. It uses **pure Python keyword rules + the Entity Knowledge Graph (EKG)**.
+
+```
+Raw JD Text
+    │
+    ▼
+[1] Section Identifier (deterministic)
+    Finds sections: Requirements, Responsibilities, etc.
+    │
+    ▼
+[2] Requirement Extractor + EKG entity matching (deterministic)
+    Matches skills/tools against a built-in entity knowledge graph
+    │
+    ▼
+[3] Parameter Extractor (deterministic)
+    Extracts: work mode, location, travel, salary, education, etc.
+    │
+    ▼
+[4] Disjunction Detector (deterministic)
+    Finds "or" conditions: "Python OR Java", "BS OR equivalent experience"
+    │
+    ▼
+[5] Ambiguity Detector (deterministic)
+    Flags vague phrases: "strong communication", "fast learner", etc.
+    │
+    ▼
+[6] Responsibility Interpreter (deterministic)
+    Classifies responsibilities into 3 tiers
+    │
+    ▼
+ExtractionResult → JDMasterContext (canonical domain model)
+    │
+    ▼
+Clarification Question Generator (deterministic)
+    Generates questions TA should answer about missing info
+    │
+    ▼
+Canonical Projector → JobEvaluationSpecification
+    │
+    ├──▶ job_specification.json
+    └──▶ job_specification.md  ← baseline (no LLM)
+```
+
+**No Ollama. No API key. Zero external dependencies.** This runs entirely offline.
+
+---
+
+### Pipeline 2 — Ollama Enrichment (Optional, LLM-powered)
+
+If Ollama is running and the model is available, an additional enrichment step runs **on top of the deterministic baseline**:
+
+```
+JobEvaluationSpecification (from Pipeline 1)
+    │
+    ▼
+GroundedEnrichmentService.check_ollama_available()
+    │
+    ├── Ollama NOT running → skip, return baseline as-is
+    │
+    └── Ollama IS running
+            │
+            ▼
+        Ollama / Qwen3 4B
+        (enriches evidence rules, evaluation guidance,
+         strong/moderate/weak evidence descriptions
+         for each requirement)
+            │
+            ▼
+        job_specification.md  ← enriched version
+        (stored separately from baseline; baseline is preserved)
+```
+
+The enriched markdown is stored separately. The baseline markdown is **always** preserved. The API returns enriched markdown by default when it exists.
+
+---
+
+### RAG (used in both pipelines)
+
+Before the LLM is called for enrichment or for chat, a **local Hybrid RAG** retrieves relevant knowledge snippets from a built-in knowledge base. This is 100% deterministic — no embedding model, no GPU:
+
+```
+Query
+  │
+  ├──▶ BM25 (keyword search)
+  ├──▶ TF-IDF Cosine Similarity (vector-like search, stdlib math only)
+  │
+  ▼
+Reciprocal Rank Fusion (RRF) — merges both ranked lists
+  │
+  ▼
+Top-K snippets → injected into LLM prompt as background guidance only
+```
+
+RAG failures never block the pipeline — the system continues without context if retrieval fails.
+
+---
+
+### JD Chat (uses LLM if Ollama is running)
+
+Chat calls Ollama directly. If Ollama is off, the chat endpoint raises a 503 error — unlike analysis, chat has no deterministic fallback because a conversational answer requires the LLM.
+
+---
+
+### Summary: What runs with and without Ollama
+
+| Feature | Without Ollama | With Ollama |
+|---|---|---|
+| JD Analysis (baseline) | ✅ Works — deterministic EKG extraction | ✅ Works |
+| Evidence enrichment | ❌ Skipped (baseline markdown used) | ✅ LLM enriches evidence rules |
+| JD Chat | ❌ Returns 503 error | ✅ Works |
+| Clarification questions | ✅ Works — deterministic | ✅ Works |
+| Finalization / resolve | ✅ Works — deterministic | ✅ Works (+ optional enrichment) |
+
+> **In short:** Ollama makes the output *better*, but the system is designed to work without it. The deterministic pipeline is the foundation; Ollama is an optional upgrade layer.
 
 ---
 

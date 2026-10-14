@@ -133,16 +133,31 @@ export async function getMarkdown(
   return request(`/api/jds/${jdId}/markdown${query}`);
 }
 
-export async function enrichJD(jdId: string): Promise<{
-  status: string;
-  enrichment_report: Record<string, unknown>;
-  enriched_markdown: string;
-}> {
-  return request(`/api/jds/${jdId}/enrich`, { method: "POST", timeoutMs: 300_000 });
-}
-
 export async function getJson(jdId: string): Promise<{ json: Record<string, unknown>; specification_version: number }> {
   return request(`/api/jds/${jdId}/json`);
+}
+
+// ---------------------------------------------------------------------------
+// Long-running background tasks (enrichment, clarification resolve)
+// The POST returns immediately (HTTP 202); call waitForTask() to wait for the result,
+// then fetch it with getMarkdown / getJson / getClarifications.
+// ---------------------------------------------------------------------------
+export type TaskKind = "enrich" | "resolve";
+
+export interface TaskStatusResponse {
+  kind: TaskKind;
+  status: "idle" | "running" | "done" | "failed";
+  error: string | null;
+  elapsed_seconds: number | null;
+}
+
+/** Starts Ollama enrichment in the background (HTTP 202). Follow with waitForTask(jdId, "enrich"). */
+export async function enrichJD(jdId: string): Promise<{ status: string }> {
+  return request(`/api/jds/${jdId}/enrich`, { method: "POST", timeoutMs: 15_000 });
+}
+
+export async function getTaskStatus(jdId: string, kind: TaskKind, signal?: AbortSignal): Promise<TaskStatusResponse> {
+  return request(`/api/jds/${jdId}/tasks/${kind}`, { signal, timeoutMs: 15_000 });
 }
 
 export interface ClarificationQuestionItem {
@@ -170,22 +185,17 @@ export async function getClarifications(jdId: string): Promise<ClarificationsRes
   return request(`/api/jds/${jdId}/clarifications`);
 }
 
+/** Starts "apply TA answers + generate final spec" in the background (HTTP 202). Follow with waitForTask(jdId, "resolve"). */
 export async function resolveClarifications(
   jdId: string,
   answers: Record<string, string>,
   answeredBy: string = "TA / Hiring Team"
-): Promise<{
-  status: string;
-  specification_version: number;
-  markdown: string;
-  json: Record<string, unknown>;
-  is_enriched?: boolean;
-}> {
+): Promise<{ status: string }> {
   return request(`/api/jds/${jdId}/clarifications/resolve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ answers, answered_by: answeredBy }),
-    timeoutMs: 300_000,
+    timeoutMs: 15_000,
   });
 }
 
@@ -238,6 +248,52 @@ export async function pollUntilDone(
       if ((e as Error).name === "AbortError") throw e;
       errors += 1;
       if (errors >= maxConsecutiveErrors) throw e;
+    }
+    await sleep(intervalMs, signal);
+  }
+}
+
+/**
+ * Poll a background task (enrich / resolve) until it is done.
+ * Resolves when the task finished successfully; throws Error(message) if it failed.
+ */
+export async function waitForTask(
+  jdId: string,
+  kind: TaskKind,
+  opts: {
+    signal?: AbortSignal;
+    onTick?: (s: TaskStatusResponse) => void;
+    intervalMs?: number;
+    timeoutMs?: number;
+    maxConsecutiveErrors?: number;
+  } = {}
+): Promise<TaskStatusResponse> {
+  const { signal, onTick, intervalMs = 3000, timeoutMs = 30 * 60_000, maxConsecutiveErrors = 5 } = opts;
+  const started = Date.now();
+  let errors = 0;
+
+  for (;;) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(`Timed out waiting for "${kind}" to finish. Check the backend logs.`);
+    }
+    try {
+      const s = await getTaskStatus(jdId, kind, signal);
+      errors = 0;
+      onTick?.(s);
+      if (s.status === "done") return s;
+      if (s.status === "failed") throw new Error(s.error || `The "${kind}" task failed. Check the backend logs.`);
+      if (s.status === "idle") {
+        throw new Error(`The "${kind}" task was not found on the server (it may have restarted). Please try again.`);
+      }
+    } catch (e) {
+      if ((e as Error).name === "AbortError") throw e;
+      // A real task failure carries a message from the server; network blips are retried.
+      if (e instanceof TypeError || /Cannot reach the backend|timed out after/.test((e as Error).message)) {
+        errors += 1;
+        if (errors >= maxConsecutiveErrors) throw e;
+      } else {
+        throw e;
+      }
     }
     await sleep(intervalMs, signal);
   }

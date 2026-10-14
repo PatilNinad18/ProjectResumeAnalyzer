@@ -5,9 +5,20 @@ POST /jds/{id}/analyze returns immediately (202). The LLM work runs in a
 background task and the client polls GET /jds/{id}/analysis until the status is
 READY / NEEDS_REVIEW / FAILED.
 
+The two other slow LLM operations work the same way:
+  POST /jds/{id}/enrich                  -> 202, then poll GET /jds/{id}/tasks/enrich
+  POST /jds/{id}/clarifications/resolve  -> 202, then poll GET /jds/{id}/tasks/resolve
+When a task is "done" the client fetches the result with GET /markdown, /json and
+/clarifications (the new specification version is simply the latest one).
+
+A local Ollama model serves one request at a time, so every heavy LLM job
+(analysis, enrichment, clarification resolve) runs under one lock (_ollama_lock).
+A second click while a job is running does NOT start a second job; it returns
+status="already_running".
+
 NOTE: in-flight tracking is in-process memory, which is correct for a single
 uvicorn worker (local Ollama). For multi-worker production, replace
-_inflight/_errors with a Redis key or a status column and use SQS/Celery
+_inflight/_errors/_tasks with a Redis key or a status column and use SQS/Celery
 instead of BackgroundTasks.
 """
 from __future__ import annotations
@@ -48,8 +59,21 @@ TERMINAL_STATUSES = {"READY", "NEEDS_REVIEW", "FAILED"}
 # Background processing state
 # ---------------------------------------------------------------------------
 _state_lock = threading.Lock()
-_inflight: Dict[str, float] = {}   # jd_id -> start time
-_errors: Dict[str, str] = {}       # jd_id -> last failure message
+_inflight: Dict[str, float] = {}   # jd_id -> start time (analysis)
+_errors: Dict[str, str] = {}       # jd_id -> last failure message (analysis)
+
+# Long-running LLM tasks other than the analysis ("enrich", "resolve").
+# key = f"{kind}:{jd_id}" -> {"status": running|done|failed, "error": str|None, "started_at": float, "finished_at": float|None}
+_tasks: Dict[str, Dict[str, Any]] = {}
+TASK_KINDS = ("enrich", "resolve")
+
+# One heavy Ollama job at a time (the local model cannot serve them in parallel anyway).
+_ollama_lock = threading.Lock()
+
+
+def _any_llm_job_running() -> bool:
+    with _state_lock:
+        return bool(_inflight) or any(t["status"] == "running" for t in _tasks.values())
 
 
 def _run_processing(jd_id: str, jd_version_id: str) -> None:
@@ -59,7 +83,8 @@ def _run_processing(jd_id: str, jd_version_id: str) -> None:
 
     db = SessionLocal()
     try:
-        process_job_description_version(db, jd_version_id)
+        with _ollama_lock:
+            process_job_description_version(db, jd_version_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Background analysis failed for jd_id=%s", jd_id)
         with _state_lock:
@@ -70,6 +95,42 @@ def _run_processing(jd_id: str, jd_version_id: str) -> None:
             started = _inflight.pop(jd_id, None)
         if started:
             logger.info("Analysis finished for jd_id=%s in %.1fs", jd_id, time.time() - started)
+
+
+def _task_runner(key: str, fn, jd_id: str, *args) -> None:
+    """Runs `fn(db, jd_id, *args)` in a worker thread with its own DB session and records the outcome."""
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        with _ollama_lock:
+            fn(db, jd_id, *args)
+        with _state_lock:
+            _tasks[key].update(status="done", error=None, finished_at=time.time())
+        logger.info("Task %s finished in %.1fs", key, time.time() - _tasks[key]["started_at"])
+    except HTTPException as exc:
+        db.rollback()
+        logger.warning("Task %s failed: %s", key, exc.detail)
+        with _state_lock:
+            _tasks[key].update(status="failed", error=str(exc.detail), finished_at=time.time())
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.exception("Task %s crashed", key)
+        with _state_lock:
+            _tasks[key].update(status="failed", error=str(exc) or exc.__class__.__name__, finished_at=time.time())
+    finally:
+        db.close()
+
+
+def _start_task(kind: str, jd_id: str, background_tasks: BackgroundTasks, fn, *args) -> Dict[str, Any]:
+    key = f"{kind}:{jd_id}"
+    with _state_lock:
+        current = _tasks.get(key)
+        if current and current["status"] == "running":
+            return {"jd_id": jd_id, "task": kind, "status": "already_running"}
+        _tasks[key] = {"status": "running", "error": None, "started_at": time.time(), "finished_at": None}
+    background_tasks.add_task(_task_runner, key, fn, jd_id, *args)
+    return {"jd_id": jd_id, "task": kind, "status": "queued"}
 
 
 _llm = None
@@ -269,6 +330,24 @@ def get_analysis(jd_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/jds/{jd_id}/tasks/{kind}")
+def get_task_status(jd_id: str, kind: str):
+    """Status of a long-running background task: kind = enrich | resolve."""
+    if kind not in TASK_KINDS:
+        raise HTTPException(404, f"Unknown task kind {kind!r}. Use one of {list(TASK_KINDS)}.")
+    with _state_lock:
+        t = _tasks.get(f"{kind}:{jd_id}")
+        if not t:
+            return {"kind": kind, "status": "idle", "error": None, "elapsed_seconds": None}
+        end = t["finished_at"] if t["finished_at"] else time.time()
+        return {
+            "kind": kind,
+            "status": t["status"],
+            "error": t["error"],
+            "elapsed_seconds": round(end - t["started_at"], 1),
+        }
+
+
 def _latest_spec_version(jd_id: str, db: Session) -> JobSpecificationVersion:
     spec = (
         db.query(JobSpecificationVersion)
@@ -309,8 +388,8 @@ def get_enrichment(jd_id: str, db: Session = Depends(get_db)):
     return spec_version.enrichment_report_json
 
 
-@router.post("/jds/{jd_id}/enrich")
-def enrich_jd(jd_id: str, db: Session = Depends(get_db)):
+def _do_enrich(db: Session, jd_id: str) -> None:
+    """The slow part of enrichment (Ollama). Runs in a background thread; raises HTTPException on failure."""
     spec_version = _latest_spec_version(jd_id, db)
     jd = db.get(JobDescription, jd_id)
     if not jd:
@@ -417,13 +496,14 @@ def enrich_jd(jd_id: str, db: Session = Depends(get_db)):
     spec_version.s3_enriched_markdown_key = enriched_key
     db.commit()
 
-    return {
-        "status": "enriched",
-        "enrichment_report": report.model_dump(mode="json"),
-        "enriched_markdown": enriched_md,
-    }
 
-
+@router.post("/jds/{jd_id}/enrich", status_code=202)
+def enrich_jd(jd_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Returns immediately. Poll GET /jds/{id}/tasks/enrich, then GET /jds/{id}/markdown?enriched=true."""
+    _latest_spec_version(jd_id, db)            # 404 fast if nothing to enrich
+    if not db.get(JobDescription, jd_id):
+        raise HTTPException(404, "JD not found")
+    return _start_task("enrich", jd_id, background_tasks, _do_enrich)
 
 
 class ResolveClarificationsRequest(BaseModel):
@@ -431,8 +511,8 @@ class ResolveClarificationsRequest(BaseModel):
     answered_by: Optional[str] = "TA / Hiring Team"
 
 
-@router.post("/jds/{jd_id}/clarifications/resolve")
-def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db: Session = Depends(get_db)):
+def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: str) -> None:
+    """Apply TA answers, build the next specification version (incl. the slow Ollama refinement)."""
     spec_version = _latest_spec_version(jd_id, db)
     jd = db.get(JobDescription, jd_id)
     if not jd:
@@ -449,7 +529,7 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
     master = JDMasterContext.model_validate(spec_version.master_context_json)
 
     # Apply answers to master context
-    for q_key, ans_text in payload.answers.items():
+    for q_key, ans_text in answers.items():
         if not ans_text:
             continue
         text_str = str(ans_text).strip()
@@ -460,7 +540,7 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
                 master,
                 question_key=q_key,
                 answer_text=text_str,
-                answered_by=payload.answered_by,
+                answered_by=answered_by,
                 status=QuestionStatus.ANSWERED,
             )
         except Exception as exc:
@@ -468,7 +548,7 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
 
     # Attempt finalization
     try:
-        master = attempt_finalization(master, actor=payload.answered_by)
+        master = attempt_finalization(master, actor=answered_by)
     except Exception as exc:
         logger.info("Finalization deferred: %s", exc)
 
@@ -481,7 +561,7 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
     new_spec.metadata.prompt_version = "clarification_resolved_v1"
     new_spec.metadata.model_version = "deterministic_ekg"
 
-    # Step 3: Pass original JD, initial analysis, deterministic extraction results,
+    # Pass original JD, initial analysis, deterministic extraction results,
     # and updated clarification context back to Ollama to generate the final, refined Markdown.
     from app.schemas.enrichment import TAEnrichmentReport
     from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
@@ -492,7 +572,7 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
             "question_key": q.question_key,
             "question_text": q.question_text,
             "answer_text": q.answer_text,
-            "answered_by": q.answered_by or payload.answered_by,
+            "answered_by": q.answered_by or answered_by,
         }
         for q in master.clarification_history
         if q.status == QuestionStatus.ANSWERED and q.answer_text
@@ -552,7 +632,7 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
                 )
                 enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
         except Exception as exc:
-            logger.warning("Step 3 Ollama final refinement failed; falling back to deterministic baseline: %s", exc)
+            logger.warning("Ollama final refinement failed; falling back to deterministic baseline: %s", exc)
             enrichment_report = None
             enriched_md = None
 
@@ -566,7 +646,6 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
             logger.warning("Could not apply carried-forward enrichment report: %s", exc)
 
     base_md = render_markdown(new_spec)
-    final_md = enriched_md if enriched_md is not None else base_md
     json_str = to_json_str(new_spec)
 
     project_id = str(jd.project_id)
@@ -602,13 +681,27 @@ def resolve_clarifications(jd_id: str, payload: ResolveClarificationsRequest, db
     db.add(new_spec_version)
     db.commit()
 
-    return {
-        "status": "finalized" if master.lifecycle_status == JDLifecycleStatus.FINALIZED else "updated",
-        "specification_version": next_version,
-        "markdown": final_md,
-        "json": new_spec_version.canonical_json,
-        "is_enriched": bool(enriched_key),
-    }
+
+@router.post("/jds/{jd_id}/clarifications/resolve", status_code=202)
+def resolve_clarifications(
+    jd_id: str,
+    payload: ResolveClarificationsRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns immediately. Poll GET /jds/{id}/tasks/resolve; when it is "done" fetch
+    GET /jds/{id}/markdown, /json and /clarifications (the new version is the latest).
+    """
+    spec_version = _latest_spec_version(jd_id, db)
+    if not db.get(JobDescription, jd_id):
+        raise HTTPException(404, "JD not found")
+    if not spec_version.master_context_json:
+        raise HTTPException(400, "No master context available to resolve clarifications")
+    return _start_task(
+        "resolve", jd_id, background_tasks, _do_resolve,
+        dict(payload.answers), payload.answered_by or "TA / Hiring Team",
+    )
 
 
 @router.get("/jds/{jd_id}/json")
@@ -684,11 +777,9 @@ class ChatRequest(BaseModel):
 
 def _answer(markdown: str, question: str, history: List[ChatTurn], raw_jd: Optional[str]) -> str:
     llm = _get_llm()
-    # A local model serves one request at a time; chat would queue behind a multi-minute analysis.
-    with _state_lock:
-        busy = bool(_inflight)
-    if llm.provider == "ollama" and busy:
-        raise HTTPException(503, "A job description is being analyzed right now. Chat will be available when it finishes.")
+    # A local model serves one request at a time; chat would queue behind a multi-minute LLM job.
+    if llm.provider == "ollama" and _any_llm_job_running():
+        raise HTTPException(503, "A job description is being processed right now. Chat will be available when it finishes.")
     try:
         return llm.chat_with_jd_context(
             markdown_context=markdown,
@@ -891,7 +982,6 @@ def _get_spec_version_row(jd_id: str, db: Session) -> JobSpecificationVersion:
         raise HTTPException(404, f"No job description found for jd_id={jd_id!r}.")
 
     # Auto-initialize initial spec_version and master context
-    import json
     raw_jd = ""
     try:
         raw_jd = storage.get_text(jd_version.s3_raw_key)
@@ -1104,4 +1194,4 @@ def grounded_chat(
             }
             for a in result.answers
         ],
-    }
+    }

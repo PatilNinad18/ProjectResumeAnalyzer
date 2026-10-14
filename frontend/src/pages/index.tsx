@@ -24,6 +24,7 @@ import {
   CompanyDetails,
   CreatedAgent,
   ChatTurn,
+  waitForTask
 } from "@/lib/api";
 
 const statusConfig: Record<ProcessingStatus, { label: string; icon: string; className: string }> = {
@@ -196,15 +197,21 @@ export default function Home() {
   }
 
   // Handle Grounded TA Evidence Enrichment via Ollama
-  async function handleEnrichJD() {
+    async function handleEnrichJD() {
     if (!jdId) return;
     setIsEnriching(true);
     setEnrichError(null);
+    pollAbortRef.current?.abort();
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
     try {
-      const res = await enrichJD(jdId);
-      setMarkdown(res.enriched_markdown);
-      setIsEnrichedView(true);
+      await enrichJD(jdId);
+      await waitForTask(jdId, "enrich", { signal: controller.signal });
+      const res = await getMarkdown(jdId, true);
+      setMarkdown(res.markdown);
+      setIsEnrichedView(Boolean(res.is_enriched));
     } catch (e) {
+      if (isAbort(e)) return;
       const msg = (e as Error).message || "";
       setEnrichError(
         msg.includes("503") || msg.toLowerCase().includes("unavailable")
@@ -229,23 +236,26 @@ export default function Home() {
   }
 
   // Submit TA answers for detected ambiguities & generate final specification
-  async function handleResolveClarifications() {
+    async function handleResolveClarifications() {
     if (!jdId) return;
     setIsResolvingClarifications(true);
     setResolveSuccessMsg(null);
     setError(null);
+    pollAbortRef.current?.abort();
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
     try {
-      const res = await resolveClarifications(jdId, clarificationAnswers);
-      setMarkdown(res.markdown);
-      setJsonData(res.json);
-      setSpecVersion(res.specification_version);
-      if (typeof res.is_enriched === "boolean") {
-        setIsEnrichedView(res.is_enriched);
-      }
+      await resolveClarifications(jdId, clarificationAnswers);
+      await waitForTask(jdId, "resolve", { signal: controller.signal });
+      const [mdRes, jsonRes] = await Promise.all([getMarkdown(jdId), getJson(jdId)]);
+      setMarkdown(mdRes.markdown);
+      setJsonData(jsonRes.json);
+      setSpecVersion(mdRes.specification_version);
+      setIsEnrichedView(Boolean(mdRes.is_enriched));
       setResolveSuccessMsg("✓ Ambiguities resolved! Final specification generated.");
-      const updatedClar = await getClarifications(jdId);
-      setClarificationsData(updatedClar);
+      setClarificationsData(await getClarifications(jdId));
     } catch (e) {
+      if (isAbort(e)) return;
       setError(`Failed to resolve clarifications: ${(e as Error).message}`);
     } finally {
       setIsResolvingClarifications(false);

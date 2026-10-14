@@ -4,6 +4,15 @@ ta_enrichment_service.py — Grounded TA Evidence Enrichment Service.
 Produces recruiter-friendly technical explanations, candidate resume evidence signals,
 and screening questions strictly anchored to deterministic baseline requirement IDs.
 All generated guidance is flagged as OriginType.LLM_HYPOTHESIS.
+
+Fixes in this version:
+  * think=False is sent to Ollama. Thinking models (qwen3) otherwise spend the whole
+    output budget on hidden thinking and return EMPTY content ("Expecting value: line 1
+    column 1 (char 0)").
+  * Larger output budget (ENRICH_NUM_PREDICT, default 2048) so a batch of 5 items is not truncated.
+  * Logs under the "jd_agent" logger so INFO lines (batch progress, empty responses) are visible.
+  * If every batch returns nothing, an error is raised instead of silently saving an empty report,
+    so callers fall back to the deterministic baseline honestly.
 """
 from __future__ import annotations
 
@@ -19,7 +28,7 @@ from app.config import get_settings
 from app.schemas.enrichment import RequirementEnrichmentItem, TAEnrichmentReport
 from app.schemas.master_context import OriginType
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("jd_agent.enrichment")
 
 SYSTEM_PROMPT = """You are a Technical Talent Acquisition (TA) Specialist and Engineering Hiring Evaluator.
 Your role is to enrich verified job requirements with recruiter-friendly technical explanations,
@@ -60,10 +69,27 @@ CRITICAL RULES:
 }
 """
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
+
 
 class OllamaUnavailableError(RuntimeError):
     """Raised when Ollama is unreachable or the requested model is not installed."""
     pass
+
+
+def _extract_json_text(raw_text: str) -> str:
+    """Strip <think> blocks and markdown fences, then cut out the outermost JSON object."""
+    text = _THINK_RE.sub("", raw_text or "")
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return text
 
 
 class GroundedEnrichmentService:
@@ -111,6 +137,10 @@ class GroundedEnrichmentService:
                         return True
             except Exception as exc:
                 logger.debug("Ollama availability check failed for %s: %s", candidate_url, exc)
+        logger.warning(
+            "Ollama not available at %s (or model '%s' missing): enrichment will be skipped.",
+            self.base_url, self.model,
+        )
         return False
 
     def build_user_prompt(
@@ -163,6 +193,48 @@ class GroundedEnrichmentService:
         sections.append("Respond with JSON matching the required schema. Ensure every requirement ID gets natural, specific, non-repetitive guidance.")
         return "\n\n".join(sections)
 
+    def _stream_once(self, payload: Dict[str, Any], read_timeout: float) -> str:
+        """One streamed /api/chat call. Returns the visible content (may be empty)."""
+        timeout = httpx.Timeout(connect=15.0, read=read_timeout, write=30.0, pool=15.0)
+        collected: List[str] = []
+        thinking_chars = 0
+        done_reason = ""
+        out_tokens = 0
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
+            with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:
+                response.raise_for_status()
+                for raw_line in response.iter_lines():
+                    if not raw_line:
+                        continue
+                    try:
+                        chunk = json.loads(raw_line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if chunk.get("error"):
+                        raise RuntimeError(f"Ollama error: {chunk['error']}")
+                    msg = chunk.get("message") or {}
+                    content = msg.get("content") or ""
+                    if content:
+                        collected.append(content)
+                    thinking_chars += len(msg.get("thinking") or "")
+                    if chunk.get("done"):
+                        done_reason = chunk.get("done_reason") or ""
+                        out_tokens = int(chunk.get("eval_count") or 0)
+                        break
+        text = "".join(collected)
+        logger.info(
+            "Ollama enrichment call: out_tokens=%d content_chars=%d thinking_chars=%d done_reason=%s",
+            out_tokens, len(text), thinking_chars, done_reason or "n/a",
+        )
+        if not text.strip():
+            logger.warning(
+                "Ollama returned EMPTY content (done_reason=%s, thinking_chars=%d). "
+                "If thinking_chars is large the model spent its budget thinking; "
+                "think=False should prevent that.",
+                done_reason or "n/a", thinking_chars,
+            )
+        return text
+
     def _call_ollama(self, system_prompt: str, user_prompt: str) -> str:
         """Execute chat completion against local Ollama instance."""
         if self.llm_caller is not None:
@@ -173,47 +245,49 @@ class GroundedEnrichmentService:
                 f"Local Ollama service at {self.base_url} is unreachable or model '{self.model}' is not present."
             )
 
-        payload = {
+        user_prompt_final = user_prompt
+        lowered = self.model.lower()
+        if "qwen3" in lowered and "instruct" not in lowered:
+            user_prompt_final += "\n\n/no_think"  # soft switch honoured by hybrid Qwen3 builds
+
+        payload: Dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_prompt_final},
             ],
             "stream": True,
+            "think": False,
             "format": "json",
+            "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
             "options": {
-                "num_ctx": 4096,
-                "num_predict": 1024,
+                "num_ctx": int(os.getenv("ENRICH_NUM_CTX", "4096")),
+                "num_predict": int(os.getenv("ENRICH_NUM_PREDICT", "2048")),
                 "temperature": 0.1,
             },
         }
 
         read_timeout = float(os.getenv("OLLAMA_READ_TIMEOUT", "300"))
         try:
-            timeout = httpx.Timeout(connect=15.0, read=read_timeout, write=30.0, pool=15.0)
-            with httpx.Client(timeout=timeout, trust_env=False) as client:
-                with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:
-                    response.raise_for_status()
-                    collected: List[str] = []
-                    for raw_line in response.iter_lines():
-                        if not raw_line:
-                            continue
-                        try:
-                            chunk = json.loads(raw_line)
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-                        if chunk.get("error"):
-                            raise RuntimeError(f"Ollama error: {chunk['error']}")
-                        content = (chunk.get("message") or {}).get("content") or ""
-                        if content:
-                            collected.append(content)
-                        if chunk.get("done"):
-                            break
-                    return "".join(collected)
+            for _ in range(2):
+                try:
+                    return self._stream_once(payload, read_timeout)
+                except httpx.HTTPStatusError as exc:
+                    # Older Ollama builds reject the `think` field: retry once without it.
+                    if exc.response.status_code == 400 and "think" in payload:
+                        logger.warning("Ollama rejected think=False (HTTP 400); retrying without it")
+                        payload.pop("think")
+                        continue
+                    raise
+            raise RuntimeError("Ollama request failed after fallbacks.")
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise OllamaUnavailableError(f"Could not connect to Ollama at {self.base_url}") from exc
         except httpx.ReadTimeout as exc:
             raise RuntimeError(f"Ollama inference timed out after {read_timeout}s") from exc
+        except OllamaUnavailableError:
+            raise
+        except RuntimeError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"Ollama chat error: {exc}") from exc
 
@@ -226,16 +300,15 @@ class GroundedEnrichmentService:
         Parse LLM response and strictly filter against known requirement IDs.
         Silently discards any hallucinated or fabricated requirement IDs.
         """
-        # Clean potential markdown fences
-        cleaned = raw_text.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = _extract_json_text(raw_text)
 
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            logger.warning("Failed to decode JSON from enrichment response: %s", exc)
+            logger.warning(
+                "Failed to decode JSON from enrichment response: %s (response chars=%d, preview=%r)",
+                exc, len(raw_text or ""), (raw_text or "")[:120],
+            )
             return [], []
 
         raw_items = parsed.get("items", []) if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
@@ -289,6 +362,9 @@ class GroundedEnrichmentService:
         """
         Generate a TAEnrichmentReport anchored to the provided baseline version and requirements.
         Optionally incorporates resolved clarifications and role context for final refinement.
+
+        Raises RuntimeError if Ollama produced no usable enrichment at all, so that callers fall
+        back to the deterministic baseline instead of saving an empty "enriched" report.
         """
         if not requirements:
             return TAEnrichmentReport(
@@ -325,7 +401,6 @@ class GroundedEnrichmentService:
             meaningful_reqs.append((rank, r))
 
         meaningful_reqs.sort(key=lambda x: x[0])
-        # Include all substantive requirements up to 35 (no arbitrary 8 cap!)
         selected_reqs = [x[1] for x in meaningful_reqs[:35]]
         if not selected_reqs:
             selected_reqs = requirements[:35]
@@ -335,6 +410,7 @@ class GroundedEnrichmentService:
         all_evaluation_priorities: List[str] = []
         total_batches = (len(selected_reqs) + batch_size - 1) // batch_size
         is_final = bool(clarification_context)
+        last_error: Optional[Exception] = None
 
         for batch_idx, i in enumerate(range(0, len(selected_reqs), batch_size), start=1):
             chunk = selected_reqs[i : i + batch_size]
@@ -353,10 +429,21 @@ class GroundedEnrichmentService:
                     if prio not in all_evaluation_priorities:
                         all_evaluation_priorities.append(prio)
                 logger.info("Batch %d/%d completed: %d items validated", batch_idx, total_batches, len(batch_items))
+            except OllamaUnavailableError:
+                # Ollama is gone: no point trying the remaining batches.
+                raise
             except Exception as exc:
+                last_error = exc
                 logger.warning("Enrichment batch %d/%d failed: %s", batch_idx, total_batches, exc)
                 if not all_validated_items and i == 0:
                     raise
+
+        if selected_reqs and not all_validated_items:
+            raise RuntimeError(
+                "Ollama returned no usable enrichment items for any batch"
+                + (f" (last error: {last_error})" if last_error else "")
+                + ". Check the 'Ollama enrichment call' log lines above."
+            )
 
         if not all_evaluation_priorities and selected_reqs:
             top_skills = [
