@@ -57,3 +57,7 @@ Thumbs.db
 # Internal tools & scratch
 .archify/
 .archify
+.agents/
+.agents
+skills-lock.json
+.run_state

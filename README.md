@@ -11,7 +11,133 @@ The current setup uses **Ollama + Qwen3 4B for local/offline LLM inference**, so
 
 ---
 
+## Windows Quick Start (Recommended)
+
+ProjectResumeAnalyzer includes ready-to-run Windows launcher scripts so you can set up and start the entire stack (FastAPI backend + Next.js frontend) with a single command or double-click.
+
+### Prerequisites for Windows
+Before running the scripts, make sure you have:
+1. **Python 3.10+** (Download from [python.org](https://www.python.org/))  
+   > ⚠️ **Important:** During Python setup, make sure to check the box **"Add Python to PATH"**.
+2. **Node.js 18+ & npm** (Download LTS from [nodejs.org](https://nodejs.org/))
+3. *(Optional)* **Ollama + Qwen3 4B** (Download from [ollama.com](https://ollama.com/))  
+   > 💡 The system runs a **100% deterministic baseline** without Ollama! Ollama is only required for optional local AI evidence enrichment and interactive JD chat.
+
+---
+
+### Step 1: First-Time Setup (`setup.bat`)
+
+Run `setup.bat` once after cloning or pulling repository updates. You can double-click it in Windows Explorer or run it in your terminal:
+
+```cmd
+setup.bat
+```
+
+**What `setup.bat` does automatically:**
+- **Checks prerequisites:** Verifies `python`, `node`, and `npm` in your PATH, and notes if `ollama` is present.
+- **Prepares `.env`:** Copies `backend\.env.example` to `backend\.env` if not present. It **preserves your existing `.env`** without overwriting.
+- **Creates Virtual Environment:** Creates an isolated Python virtual environment at `backend\.venv`.
+- **Installs Backend Dependencies:** Upgrades `pip` and installs all packages from `backend\requirements.txt`.
+- **Initializes Database:** Prepares the SQLite database schema at `backend\jd_agent.db`.
+- **Installs Frontend Dependencies:** Runs `npm install` inside `frontend`.
+
+---
+
+### Step 2: Daily Launch (`run.bat`)
+
+To start both the FastAPI backend and Next.js frontend, double-click `run.bat` or run:
+
+```cmd
+run.bat
+```
+
+**What `run.bat` does automatically:**
+- Verifies that `backend\.venv` and `frontend\node_modules` exist (prompting you to run `setup.bat` first if not).
+- Checks whether the local Ollama service is reachable on port 11434 (informs you if offline, but proceeds safely).
+- Checks for port conflicts on port 8000 (backend) and port 3000 (frontend).
+- Spawns two dedicated, labeled Command Prompt windows:
+  1. `ProjectResumeAnalyzer-Backend` running FastAPI (`http://localhost:8000`)
+  2. `ProjectResumeAnalyzer-Frontend` running Next.js (`http://localhost:3000`)
+- Displays all relevant application and documentation URLs.
+
+#### Application URLs:
+- **Frontend Web UI:** [http://localhost:3000](http://localhost:3000)
+- **Backend API:** [http://localhost:8000](http://localhost:8000)
+- **Interactive Swagger Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+
+---
+
+### Step 3: Safely Stopping Services (`stop.bat`)
+
+To stop the running application without leaving lingering background processes, double-click `stop.bat` or run:
+
+```cmd
+stop.bat
+```
+
+**Safety guarantee:**
+`stop.bat` specifically targets only ProjectResumeAnalyzer services:
+1. Closes the dedicated terminal windows labeled `ProjectResumeAnalyzer-Backend` and `ProjectResumeAnalyzer-Frontend`.
+2. Checks ports 8000 and 3000 and terminates *only* listening processes belonging to `python`/`uvicorn` and `node`.
+3. Leaves all unrelated applications, editor terminals, and system background processes intact.
+4. Cleans up `.run_state`.
+
+---
+
+### Manual Startup Alternatives (Cross-Platform)
+
+If you prefer running manual commands or are running on macOS or Linux:
+
+#### Backend (Terminal 1)
+```bash
+# 1. Navigate to backend
+cd backend
+
+# 2. Create and activate a virtual environment
+python -m venv .venv
+# On Windows:
+.venv\Scripts\activate
+# On macOS / Linux:
+source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Copy environment variables (if .env doesn't exist)
+# On Windows:
+copy .env.example .env
+# On macOS / Linux:
+cp .env.example .env
+
+# 5. Start the FastAPI server
+python -m uvicorn app.main:app --reload --port 8000
+```
+
+#### Frontend (Terminal 2)
+```bash
+# 1. Navigate to frontend
+cd frontend
+
+# 2. Install dependencies
+npm install
+
+# 3. Start the Next.js dev server
+npm run dev
+```
+
+#### Optional: Local Ollama LLM (Terminal 3)
+```bash
+# Start Ollama service (if not already running as a Windows service)
+ollama serve
+
+# In another terminal, pull the recommended offline model (one-time)
+ollama pull qwen3:4b
+```
+
+---
+
 ## How It Works (Plain English)
+
 
 > **Important:** The system has **two completely separate pipelines**. One uses the LLM (Ollama / Qwen3 4B). The other is 100% deterministic and **does not need Ollama at all**. This is why you get output even when Ollama is not running.
 
@@ -627,6 +753,49 @@ Maximum generated output:  8,192 tokens
 
 These values can be tuned after measuring quality and latency.
 
+### Port 8000 or 3000 Already in Use
+If `run.bat` shows `[WARN] Port 8000 is already in use` or `[WARN] Port 3000 is already in use`:
+1. Run `stop.bat` to gracefully terminate any previously opened ProjectResumeAnalyzer instances.
+2. If another application is holding the port, inspect which process ID is using it:
+   ```cmd
+   netstat -ano | findstr /R /C:":8000 .*LISTENING"
+   netstat -ano | findstr /R /C:":3000 .*LISTENING"
+   ```
+3. Terminate the blocking PID (replace `<PID>` with the number from the last column):
+   ```cmd
+   taskkill /PID <PID> /F
+   ```
+
+### Python or Node is Not Recognized on Windows
+If `setup.bat` reports that `python` or `node` is missing:
+- **Python:** Reinstall Python 3.10+ from [python.org](https://www.python.org/) and make sure to check the box **"Add Python to PATH"** on the first installer screen.
+- **Node.js:** Install Node.js LTS from [nodejs.org](https://nodejs.org/).
+- Close and reopen your terminal or command prompt window for PATH changes to take effect.
+
+### Frontend Dependency Errors
+If `npm install` fails during `setup.bat`:
+1. Clear the local npm cache:
+   ```cmd
+   cd frontend
+   npm cache clean --force
+   ```
+2. Re-run `npm install`:
+   ```cmd
+   npm install
+   ```
+
+### Ollama 404 or 503 Chat / Enrichment Warnings
+If you see a warning in backend logs:
+```text
+WARNING [jd_agent.enrichment] Enrichment batch failed: Ollama chat error: Client error '404 Not Found' for url 'http://localhost:11434/api/chat'
+```
+- **Cause:** Ollama service is stopped, or the model `qwen3:4b` has not been downloaded yet.
+- **Resolution:**
+  1. Open a terminal and run `ollama list` to check installed models.
+  2. If `qwen3:4b` is not listed, download it: `ollama pull qwen3:4b`
+  3. Start the Ollama server: `ollama serve`
+- **Fallback behavior:** ProjectResumeAnalyzer is designed to be **resilient**; if Ollama is unavailable, the pipeline automatically falls back to deterministic extraction and returns a complete evaluation specification.
+
 ### JSON validation fails
 
 Inspect the Pydantic validation error first. Do not increase the output limit automatically. The canonical schema should remain the source of truth.
@@ -677,48 +846,24 @@ No external LLM API is required in Ollama mode.
 
 ---
 
-## 20. Quick Start
+## 20. Quick Reference
 
-```bash
-# Install Ollama first, then:
-ollama pull qwen3:4b
-ollama run qwen3:4b
+### Summary of Commands
 
-# Backend
-cd backend
-python -m venv .venv
+| Task | Automated (Windows Recommended) | Manual Alternative (Cross-Platform) |
+|---|---|---|
+| **First-Time Setup** | `setup.bat` | `python -m venv backend/.venv`<br>`backend\.venv\Scripts\activate`<br>`pip install -r backend/requirements.txt`<br>`cd frontend && npm install` |
+| **Start Application** | `run.bat` | Terminal 1: `cd backend && python -m uvicorn app.main:app --reload --port 8000`<br>Terminal 2: `cd frontend && npm run dev` |
+| **Stop Application** | `stop.bat` | Press `Ctrl+C` in both terminal windows |
+| **Optional LLM Setup** | `ollama run qwen3:4b` | `ollama serve` & `ollama pull qwen3:4b` |
 
-# Windows
-.venv\Scripts\activate
+### Key URLs
 
-pip install -r requirements.txt
-```
+- **Web Application:** [http://localhost:3000](http://localhost:3000)
+- **FastAPI Backend:** [http://localhost:8000](http://localhost:8000)
+- **Interactive Swagger Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Alternative ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
 
-Create `.env`:
-
-```ini
-LLM_PROVIDER=ollama
-LLM_MODEL=qwen3:4b
-OLLAMA_BASE_URL=http://localhost:11434
-ENABLE_RAG=true
-DATABASE_URL=sqlite:///./jd_agent.db
-```
-
-Start backend:
-
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-Start frontend in another terminal:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Then upload a JD, run the analysis, review the generated specification, and use the JD chat.
 
 ---
 
