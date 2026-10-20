@@ -1,13 +1,44 @@
-# JD Understanding Agent & Candidate Screening System
+# 🎯 ProjectResumeAnalyzer
+### Intelligent Job Description Understanding & Candidate Screening Agent
 
-A production-oriented **JD Understanding Agent** for an AI-powered Candidate Screening and Evaluation System.
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg?logo=next.js)](https://nextjs.org/)
+[![Inference](https://img.shields.io/badge/Inference-Local%20%2F%20Ollama-purple.svg)](https://ollama.com/)
+[![Architecture](https://img.shields.io/badge/Pipeline-Deterministic%20%2B%20Hybrid%20RAG-orange.svg)]()
+[![Privacy](https://img.shields.io/badge/Privacy-100%25%20Offline%20First-success.svg)]()
 
-The system analyzes Job Descriptions (JDs), enriches requirement interpretation using a local Hybrid RAG pipeline, and produces a canonical **Candidate Evaluation Specification** as:
+---
 
-- `job_specification.md` — concise, human-readable 8-section JD context
-- `job_specification.json` — complete machine-readable canonical specification
+## 📌 Executive Overview
 
-The current setup uses **Ollama + Qwen3 4B for local/offline LLM inference**, so JD analysis does not require an external LLM API key.
+**ProjectResumeAnalyzer** is an intelligent, privacy-first recruiting intelligence agent. It ingests complex, unstructured Job Descriptions (JDs) and transforms them into strict, canonical **Candidate Evaluation Specifications** ready for automated applicant screening and evaluation.
+
+Unlike conventional AI tools that blindly feed raw text to cloud APIs, ProjectResumeAnalyzer employs a **dual-pipeline, evidence-grounded architecture**:
+- **Zero Hallucination Risk:** Critical constraints (salary, location, must-have skills, visa requirements) are extracted deterministically from explicit source text.
+- **Privacy & Offline Independence:** Operates completely on your local machine using local RAG and optional Ollama inference—zero hiring data ever leaves your workstation.
+
+---
+
+## ⚡ How It Works (At a Glance)
+
+```text
+ Raw Job Description          Hybrid Intelligence Engine              Standardized Outputs
+ (PDF, DOCX, TXT)
+┌────────────────────┐       ┌────────────────────────────────┐       ┌────────────────────────┐
+│ • Responsibilities │ ───▶ │ 1. Deterministic Extraction   │ ───▶ │  job_specification.md   │
+│ • Requirements     │       │    (EKG + Heuristics + Rules)  │       │  (Human-Readable Spec) │
+│ • Constraints      │       │ 2. Local Hybrid RAG (BM25+TF)  │       ├────────────────────────┤
+│ • Ambiguities      │       │ 3. Offline LLM Enrichment      │       │  job_specification.json│
+└────────────────────┘       │    (Optional Ollama / Qwen3)   │       │  (Canonical Schema)    │
+                             └────────────────────────────────┘       └────────────────────────┘
+```
+
+| Phase | What Happens | Key Benefit |
+|---|---|---|
+| **1. Parse & Match** | Cleans text, segments sections, and matches domain terms against an Entity Knowledge Graph (EKG). | High-speed, 100% deterministic baseline requiring zero GPU or cloud API. |
+| **2. Contextualize** | Injects domain-specific evaluation standards via built-in BM25 + TF-IDF Reciprocal Rank Fusion (RRF). | Grounded interpretation without semantic drift or invented requirements. |
+| **3. Enrich & Standardize** | *(Optional)* Uses local Qwen3 4B to generate 3-tier evidence rules (Strong / Moderate / Weak). | Produces synchronized JSON schemas and structured Markdown for downstream candidate evaluation. |
 
 ---
 
