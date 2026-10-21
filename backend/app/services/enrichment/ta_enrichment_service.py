@@ -16,11 +16,14 @@ Fixes in this version:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
 import re
-from typing import Any, Callable, Dict, List, Optional
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -29,6 +32,24 @@ from app.schemas.enrichment import RequirementEnrichmentItem, TAEnrichmentReport
 from app.schemas.master_context import OriginType
 
 logger = logging.getLogger("jd_agent.enrichment")
+
+# Thread-safe in-memory cache for Ollama service availability
+# Key: f"{base_url}|{model}" -> (is_available: bool, checked_at: float)
+_AVAILABILITY_CACHE: Dict[str, Tuple[bool, float]] = {}
+_AVAILABILITY_LOCK = threading.Lock()
+_OFFLINE_CACHE_TTL = 5.0   # Fast 5-second recovery window when Ollama is launched
+_ONLINE_CACHE_TTL = 30.0   # 30-second TTL when confirmed online
+
+
+def invalidate_availability_cache(base_url: Optional[str] = None) -> None:
+    """Clear cached Ollama availability state so subsequent checks re-probe immediately."""
+    with _AVAILABILITY_LOCK:
+        if base_url:
+            keys_to_del = [k for k in _AVAILABILITY_CACHE if k.startswith(f"{base_url}|")]
+            for k in keys_to_del:
+                _AVAILABILITY_CACHE.pop(k, None)
+        else:
+            _AVAILABILITY_CACHE.clear()
 
 SYSTEM_PROMPT = """You are a Technical Talent Acquisition (TA) Specialist and Engineering Hiring Evaluator.
 Your role is to enrich verified job requirements with recruiter-friendly technical explanations,
@@ -107,19 +128,37 @@ class GroundedEnrichmentService:
         self.model = model or getattr(settings, "llm_model", None) or os.getenv("LLM_MODEL", "qwen2.5:1.5b")
         self.llm_caller = llm_caller
 
-    def check_ollama_available(self, timeout: float = 3.0) -> bool:
+    def check_ollama_available(self, timeout: float = 3.0, force_refresh: bool = False) -> bool:
         """Check if local Ollama daemon is reachable and the required model is loaded."""
         if self.llm_caller is not None:
             return True
-        candidates = [self.base_url]
-        if not self._explicit_base_url:
-            for alt in ["http://127.0.0.1:11434", "http://localhost:11434"]:
-                if alt not in candidates:
-                    candidates.append(alt)
 
+        cache_key = f"{self.base_url}|{self.model}"
+        now = time.time()
+
+        if not force_refresh:
+            with _AVAILABILITY_LOCK:
+                cached = _AVAILABILITY_CACHE.get(cache_key)
+                if cached is not None:
+                    is_avail, checked_at = cached
+                    ttl = _ONLINE_CACHE_TTL if is_avail else _OFFLINE_CACHE_TTL
+                    if (now - checked_at) < ttl:
+                        return is_avail
+
+        # Candidates to probe. When default localhost is used, probe 127.0.0.1 directly to
+        # avoid redundant duplicate probes and Windows IPv6 [::1] connection timeout delays.
+        if not self._explicit_base_url and "localhost:11434" in self.base_url:
+            candidates = ["http://127.0.0.1:11434"]
+        else:
+            candidates = [self.base_url]
+
+        connect_timeout = min(0.35, timeout)
+        probe_timeout = httpx.Timeout(connect=connect_timeout, read=timeout, write=0.5, pool=0.5)
+
+        is_available = False
         for candidate_url in candidates:
             try:
-                with httpx.Client(timeout=timeout, trust_env=False) as client:
+                with httpx.Client(timeout=probe_timeout, trust_env=False) as client:
                     r = client.get(f"{candidate_url}/api/tags")
                     if r.status_code != 200:
                         continue
@@ -134,14 +173,20 @@ class GroundedEnrichmentService:
                         or any(m.startswith("qwen") for m in models)
                     ):
                         self.base_url = candidate_url
-                        return True
+                        is_available = True
+                        break
             except Exception as exc:
                 logger.debug("Ollama availability check failed for %s: %s", candidate_url, exc)
-        logger.warning(
-            "Ollama not available at %s (or model '%s' missing): enrichment will be skipped.",
-            self.base_url, self.model,
-        )
-        return False
+
+        with _AVAILABILITY_LOCK:
+            _AVAILABILITY_CACHE[cache_key] = (is_available, now)
+
+        if not is_available:
+            logger.warning(
+                "Ollama not available at %s (or model '%s' missing): enrichment will be skipped.",
+                self.base_url, self.model,
+            )
+        return is_available
 
     def build_user_prompt(
         self,
@@ -262,7 +307,7 @@ class GroundedEnrichmentService:
             "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
             "options": {
                 "num_ctx": int(os.getenv("ENRICH_NUM_CTX", "4096")),
-                "num_predict": int(os.getenv("ENRICH_NUM_PREDICT", "2048")),
+                "num_predict": int(os.getenv("ENRICH_NUM_PREDICT", "1024")),
                 "temperature": 0.1,
             },
         }
@@ -281,6 +326,8 @@ class GroundedEnrichmentService:
                     raise
             raise RuntimeError("Ollama request failed after fallbacks.")
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            with _AVAILABILITY_LOCK:
+                _AVAILABILITY_CACHE[f"{self.base_url}|{self.model}"] = (False, time.time())
             raise OllamaUnavailableError(f"Could not connect to Ollama at {self.base_url}") from exc
         except httpx.ReadTimeout as exc:
             raise RuntimeError(f"Ollama inference timed out after {read_timeout}s") from exc
@@ -405,38 +452,76 @@ class GroundedEnrichmentService:
         if not selected_reqs:
             selected_reqs = requirements[:35]
 
-        batch_size = 5
-        all_validated_items: List[RequirementEnrichmentItem] = []
-        all_evaluation_priorities: List[str] = []
-        total_batches = (len(selected_reqs) + batch_size - 1) // batch_size
-        is_final = bool(clarification_context)
-        last_error: Optional[Exception] = None
+        batch_size = int(os.getenv("ENRICHMENT_BATCH_SIZE", "6"))
+        # If requirements are 8 or fewer, process in a single batch to eliminate redundant round-trips
+        if len(selected_reqs) <= 8:
+            batches = [selected_reqs]
+        else:
+            batches = [selected_reqs[i : i + batch_size] for i in range(0, len(selected_reqs), batch_size)]
 
-        for batch_idx, i in enumerate(range(0, len(selected_reqs), batch_size), start=1):
-            chunk = selected_reqs[i : i + batch_size]
+        total_batches = len(batches)
+        is_final = bool(clarification_context)
+        max_workers = min(int(os.getenv("ENRICHMENT_MAX_WORKERS", "2")), total_batches)
+
+        def _process_chunk(b_idx: int, chunk: List[Dict[str, Any]]) -> tuple[int, List[RequirementEnrichmentItem], List[str], Optional[Exception]]:
             prompt = self.build_user_prompt(
                 chunk,
-                clarification_context=clarification_context if batch_idx == 1 else None,
-                role_context=role_context if batch_idx == 1 else None,
+                clarification_context=clarification_context if b_idx == 1 else None,
+                role_context=role_context if b_idx == 1 else None,
                 is_final_refinement=is_final,
             )
-            logger.info("Enriching batch %d/%d (%d requirements) via Ollama...", batch_idx, total_batches, len(chunk))
+            logger.info("Enriching batch %d/%d (%d requirements) via Ollama...", b_idx, total_batches, len(chunk))
             try:
                 raw_output = self._call_ollama(SYSTEM_PROMPT, prompt)
                 batch_items, batch_priorities = self._parse_and_validate_response(raw_output, known_reqs)
-                all_validated_items.extend(batch_items)
-                for prio in batch_priorities:
-                    if prio not in all_evaluation_priorities:
-                        all_evaluation_priorities.append(prio)
-                logger.info("Batch %d/%d completed: %d items validated", batch_idx, total_batches, len(batch_items))
-            except OllamaUnavailableError:
-                # Ollama is gone: no point trying the remaining batches.
-                raise
+                logger.info("Batch %d/%d completed: %d items validated", b_idx, total_batches, len(batch_items))
+                return b_idx, batch_items, batch_priorities, None
+            except OllamaUnavailableError as exc:
+                return b_idx, [], [], exc
             except Exception as exc:
-                last_error = exc
-                logger.warning("Enrichment batch %d/%d failed: %s", batch_idx, total_batches, exc)
-                if not all_validated_items and i == 0:
-                    raise
+                logger.warning("Enrichment batch %d/%d failed: %s", b_idx, total_batches, exc)
+                return b_idx, [], [], exc
+
+        batch_results: List[tuple[int, List[RequirementEnrichmentItem], List[str], Optional[Exception]]] = []
+
+        from app.core.concurrency import acquire_ollama_slot
+        try:
+            with acquire_ollama_slot(f"enrich_spec_{spec_version_id}"):
+                if total_batches <= 1:
+                    res = _process_chunk(1, batches[0])
+                    if isinstance(res[3], OllamaUnavailableError):
+                        raise res[3]
+                    batch_results.append(res)
+                else:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = [
+                            executor.submit(_process_chunk, b_idx, chunk)
+                            for b_idx, chunk in enumerate(batches, start=1)
+                        ]
+                        for fut in concurrent.futures.as_completed(futures):
+                            res = fut.result()
+                            if isinstance(res[3], OllamaUnavailableError):
+                                # Ollama is unreachable: fail fast and abort
+                                raise res[3]
+                            batch_results.append(res)
+        except TimeoutError as exc:
+            logger.warning("Timed out waiting for Ollama concurrency slot: %s", exc)
+            raise OllamaUnavailableError(str(exc))
+
+        # Sort by batch index to preserve natural requirement priority ordering
+        batch_results.sort(key=lambda x: x[0])
+
+        all_validated_items: List[RequirementEnrichmentItem] = []
+        all_evaluation_priorities: List[str] = []
+        last_error: Optional[Exception] = None
+
+        for b_idx, batch_items, batch_priorities, err in batch_results:
+            if err:
+                last_error = err
+            all_validated_items.extend(batch_items)
+            for prio in batch_priorities:
+                if prio not in all_evaluation_priorities:
+                    all_evaluation_priorities.append(prio)
 
         if selected_reqs and not all_validated_items:
             raise RuntimeError(

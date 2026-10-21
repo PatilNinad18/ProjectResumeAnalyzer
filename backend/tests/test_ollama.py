@@ -30,20 +30,22 @@ OLLAMA_MODEL = os.getenv("LLM_MODEL", "qwen3:4b")
 
 
 def _ollama_available() -> bool:
-    """Return True when Ollama is reachable and the target model is present."""
+    """Return True when Ollama is reachable, configured as provider, and the target model is present."""
+    if os.getenv("LLM_PROVIDER") != "ollama":
+        return False
     try:
         r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
         if r.status_code != 200:
             return False
         models = [m["name"] for m in r.json().get("models", [])]
-        return OLLAMA_MODEL in models
+        return any(OLLAMA_MODEL in m for m in models)
     except Exception:
         return False
 
 
 ollama_available = pytest.mark.skipif(
     not _ollama_available(),
-    reason=f"Ollama not reachable or {OLLAMA_MODEL} not installed — skipping live tests",
+    reason=f"LLM_PROVIDER != 'ollama' or Ollama not reachable or {OLLAMA_MODEL} not installed — skipping live tests",
 )
 
 
@@ -101,7 +103,7 @@ def test_t3_structured_jd_spec_generation():
     import sys
 
     sys.path.insert(0, ".")
-    from app.models.jd_spec import JobEvaluationSpecification
+    from app.schemas.canonical import JobEvaluationSpecification
     from app.services.agent import JDUnderstandingAgent
 
     jd_text = (

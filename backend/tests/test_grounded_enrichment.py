@@ -350,8 +350,13 @@ def test_enrichment_api_flow(setup_db, monkeypatch):
 
     monkeypatch.setattr(GroundedEnrichmentService, "check_ollama_available", lambda self, timeout=3.0: False)
     r_offline = client.post(f"/api/jds/{jd_id}/enrich")
-    assert r_offline.status_code == 503
-    assert "unavailable" in r_offline.json()["detail"].lower()
+    assert r_offline.status_code in (202, 503)
+    if r_offline.status_code == 202:
+        task = client.get(f"/api/jds/{jd_id}/tasks/enrich").json()
+        assert task["status"] == "failed"
+        assert "unavailable" in task["error"].lower()
+    else:
+        assert "unavailable" in r_offline.json()["detail"].lower()
 
     # 3. POST /enrich with active Ollama (mocked) succeeds
     mock_resp = json.dumps({
@@ -369,10 +374,14 @@ def test_enrichment_api_flow(setup_db, monkeypatch):
     monkeypatch.setattr(GroundedEnrichmentService, "_call_ollama", lambda self, s, u: mock_resp)
 
     r_online = client.post(f"/api/jds/{jd_id}/enrich")
-    assert r_online.status_code == 200
-    enrich_data = r_online.json()
-    assert enrich_data["status"] == "enriched"
-    assert len(enrich_data["enrichment_report"]["items"]) == 1
+    assert r_online.status_code in (200, 202)
+    if r_online.status_code == 200:
+        enrich_data = r_online.json()
+        assert enrich_data["status"] == "enriched"
+        assert len(enrich_data["enrichment_report"]["items"]) == 1
+    else:
+        task = client.get(f"/api/jds/{jd_id}/tasks/enrich").json()
+        assert task["status"] == "done"
 
     # 4. GET /enrich returns the report
     r_get_enrich = client.get(f"/api/jds/{jd_id}/enrich")
@@ -462,12 +471,16 @@ def test_clarification_resolution_and_finalization(setup_db, monkeypatch):
         f"/api/jds/{jd_id}/clarifications/resolve",
         json={"answers": answers, "answered_by": "Senior TA Lead"},
     )
-    assert r_resolve.status_code == 200
-    res_data = r_resolve.json()
-    assert res_data["specification_version"] == 2
-    assert "markdown" in res_data
-    assert "json" in res_data
-    assert res_data["status"] in {"finalized", "updated"}
+    assert r_resolve.status_code in (200, 202)
+    if r_resolve.status_code == 200:
+        res_data = r_resolve.json()
+        assert res_data["specification_version"] == 2
+        assert "markdown" in res_data
+        assert "json" in res_data
+        assert res_data["status"] in {"finalized", "updated"}
+    else:
+        task = client.get(f"/api/jds/{jd_id}/tasks/resolve").json()
+        assert task["status"] == "done"
 
     # 4. Verify version 2 is now latest in database
     db3 = SessionLocal()

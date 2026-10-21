@@ -74,7 +74,7 @@ def submit_answer(
     """
     _validate_status_arg(status)
 
-    question = next((q for q in master.clarification_history if q.question_key == question_key), None)
+    question = next((q for q in master.clarification_history if q.question_key == question_key or q.field_target == question_key or q.id == question_key), None)
     if question is None:
         if question_key.startswith("amb_") or question_key.startswith("jd_ambiguity_"):
             target_id = question_key.replace("jd_ambiguity_", "")
@@ -280,37 +280,42 @@ def _apply_field_patch(
                 break
         return
 
-    # --- requirements[id=...].priority fields ---
-    if field_target.startswith("requirements[id=") and ".priority" in field_target:
+    # --- requirements[id=...] fields ---
+    if field_target.startswith("requirements[id="):
         req_id = _extract_id_from_target(field_target)
         if req_id:
-            ans_clean = (answer_text or "").lower().strip()
-            if any(k in ans_clean for k in ("must have", "must_have", "mandatory", "required")):
-                new_priority = RequirementPriority.MUST_HAVE
-            elif any(k in ans_clean for k in ("preferred", "nice to have", "optional")):
-                new_priority = RequirementPriority.PREFERRED
-            elif any(k in ans_clean for k in ("informational", "context", "role context")):
-                new_priority = RequirementPriority.INFORMATIONAL
-            else:
-                new_priority = None
-
             for item in master.requirements:
                 if isinstance(item, StructuredRequirement) and item.id == req_id:
-                    if new_priority:
-                        item.priority = new_priority
-                        item.requires_clarification = False
-                        if new_priority == RequirementPriority.MUST_HAVE:
-                            item.is_mandatory = True
+                    if ".priority" in field_target:
+                        ans_clean = (answer_text or "").lower().strip()
+                        if any(k in ans_clean for k in ("must have", "must_have", "mandatory", "required")):
+                            new_priority = RequirementPriority.MUST_HAVE
+                        elif any(k in ans_clean for k in ("preferred", "nice to have", "optional")):
+                            new_priority = RequirementPriority.PREFERRED
+                        elif any(k in ans_clean for k in ("informational", "context", "role context")):
+                            new_priority = RequirementPriority.INFORMATIONAL
                         else:
-                            item.is_mandatory = False
-                        item.provenance = ProvenanceRecord(
-                            origin_type=OriginType.TA_CONFIRMED,
-                            source_span=item.provenance.source_span if item.provenance else None,
-                            author=answered_by,
-                            rule_id=f"clarification:{question_key}",
-                        )
-                    return
+                            new_priority = None
 
+                        if new_priority:
+                            item.priority = new_priority
+                            item.requires_clarification = False
+                            item.is_mandatory = (new_priority == RequirementPriority.MUST_HAVE)
+                    elif ".text" in field_target:
+                        item.text = answer_text
+                        item.requires_clarification = False
+                    elif ".is_mandatory" in field_target:
+                        item.is_mandatory = answer_text.strip().lower() in ("true", "yes", "mandatory", "1")
+                    else:
+                        item.requires_clarification = False
+
+                    item.provenance = ProvenanceRecord(
+                        origin_type=OriginType.TA_CONFIRMED,
+                        source_span=item.provenance.source_span if item.provenance else None,
+                        author=answered_by,
+                        rule_id=f"clarification:{question_key}",
+                    )
+                    return
         return
 
     # --- responsibilities[id=...].interpretation_status ---
