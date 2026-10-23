@@ -23,7 +23,7 @@ from typing import List, Optional
 from pydantic import ValidationError
 
 from app.schemas.canonical import JobEvaluationSpecification, Priority
-from app.services.llm_service import LLMResult, LLMService, cfg_int
+from app.services.llm_service import LLMResult, LLMService, cfg_bool, cfg_int
 from app.services.prompt import PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt
 from app.services.rag import format_snippets_for_prompt, run_rag_pipeline
 
@@ -142,12 +142,39 @@ class JDUnderstandingAgent:
         rag_context_str = self._run_rag(jd_text) if self.enable_rag else ""
         user_prompt = build_user_prompt(jd_text, rag_context=rag_context_str or None)
 
+        # Dynamic predict tuning: expected output scales with JD size
+        raw_word_count = len(jd_text.split())
+        configured_max = cfg_int("JD_MAX_OUTPUT_TOKENS", 0)
+        tuned_max_tokens = configured_max if configured_max > 0 else max(640, min(2560, 450 + int(raw_word_count * 2.2)))
+
+        # Measured Adaptive Context Sizing Strategy:
+        # Prompt length + expected output budget dictates optimal context window
+        est_prompt_tokens = int((len(SYSTEM_PROMPT) + len(user_prompt)) / 4.1)
+        adaptive_enabled = cfg_bool("ENABLE_ADAPTIVE_CTX", True)
+        if adaptive_enabled and (est_prompt_tokens + tuned_max_tokens) <= 1950:
+            chosen_ctx = 2048
+        else:
+            chosen_ctx = cfg_int("OLLAMA_NUM_CTX", 4096)
+
         try:
             result = self.llm_service.complete_structured(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
-                max_tokens=cfg_int("JD_MAX_OUTPUT_TOKENS", 6144),
+                max_tokens=tuned_max_tokens,
+                num_ctx=chosen_ctx,
             )
+            # Anti-truncation safeguard: if output hit the length ceiling under 2048, automatically retry with 4096
+            if (result.finish_reason or "").lower() in ("length", "max_tokens") and chosen_ctx < 4096:
+                logger.warning(
+                    "Output reached length ceiling with num_ctx=%d; retrying with safe num_ctx=4096",
+                    chosen_ctx,
+                )
+                result = self.llm_service.complete_structured(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    max_tokens=max(tuned_max_tokens, 2048),
+                    num_ctx=4096,
+                )
         except RuntimeError as exc:
             raise JDUnderstandingError(str(exc)) from exc
 

@@ -90,7 +90,14 @@ class ProviderAdapter(abc.ABC):
     name: str = "base"
 
     @abc.abstractmethod
-    def complete_structured(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> LLMResult:
+    def complete_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        max_tokens: int,
+        num_ctx: Optional[int] = None,
+    ) -> LLMResult:
         ...
 
     @abc.abstractmethod
@@ -297,7 +304,7 @@ class OllamaAdapter(ProviderAdapter):
 
     def _stream_chat(
         self, *, system_prompt: str, user_prompt: str, model: str, max_tokens: int,
-        temperature: float, response_format: Any = None,
+        temperature: float, response_format: Any = None, num_ctx: Optional[int] = None,
     ) -> Tuple[str, int, int, str, float]:
         import httpx
 
@@ -309,7 +316,7 @@ class OllamaAdapter(ProviderAdapter):
                 {"role": "user", "content": user_prompt},
             ],
             "options": {
-                "num_ctx": cfg_int("OLLAMA_NUM_CTX", 12288),
+                "num_ctx": num_ctx or cfg_int("OLLAMA_NUM_CTX", 4096),
                 "num_predict": max_tokens,
                 "temperature": temperature,
             },
@@ -362,7 +369,14 @@ class OllamaAdapter(ProviderAdapter):
 
         return text, in_tok, out_tok, finish, (time.perf_counter() - start) * 1000
 
-    def complete_structured(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> LLMResult:
+    def complete_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        max_tokens: int,
+        num_ctx: Optional[int] = None,
+    ) -> LLMResult:
         fmt: Any = "json"
         if cfg_bool("OLLAMA_USE_SCHEMA", True):
             from app.schemas.canonical import llm_json_schema
@@ -371,6 +385,7 @@ class OllamaAdapter(ProviderAdapter):
         text, in_tok, out_tok, finish, latency_ms = self._stream_chat(
             system_prompt=system_prompt, user_prompt=user_prompt, model=model,
             max_tokens=max_tokens, temperature=0.0, response_format=fmt,
+            num_ctx=num_ctx,
         )
         usage = LLMUsage(input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency_ms, model=model)
         _log_response(self.name, text, usage, finish)
@@ -448,7 +463,14 @@ class AnthropicAdapter(ProviderAdapter):
         _log_response(self.name, text, usage, finish)
         return text, usage, finish
 
-    def complete_structured(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> LLMResult:
+    def complete_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        max_tokens: int,
+        num_ctx: Optional[int] = None,
+    ) -> LLMResult:
         text, usage, finish = self._call(system_prompt, user_prompt, model, max_tokens)
         parsed = _safe_json_extract(text)
         if parsed is None:
@@ -520,7 +542,14 @@ class GeminiAdapter(ProviderAdapter):
         _log_response(self.name, text, usage, finish)
         return text, usage, finish
 
-    def complete_structured(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> LLMResult:
+    def complete_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        max_tokens: int,
+        num_ctx: Optional[int] = None,
+    ) -> LLMResult:
         text, usage, finish = self._call(system_prompt, user_prompt, model, max_tokens, structured=True)
         parsed = _safe_json_extract(text)
         if parsed is None:
@@ -543,7 +572,14 @@ class MockAdapter(ProviderAdapter):
 
     name = "mock"
 
-    def complete_structured(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> LLMResult:
+    def complete_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        max_tokens: int,
+        num_ctx: Optional[int] = None,
+    ) -> LLMResult:
         from app.services.mock_extractor import mock_extract_canonical
 
         logger.warning("provider=mock: rule-based extraction only, no real LLM call")
@@ -646,13 +682,20 @@ class LLMService:
         s = str(exc)
         return "not running" in s or "not installed" in s or "Missing" in s
 
-    def complete_structured(self, system_prompt: str, user_prompt: str, max_tokens: int = 6144) -> LLMResult:
+    def complete_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 6144,
+        num_ctx: Optional[int] = None,
+    ) -> LLMResult:
         last_exc: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 result = self.adapter.complete_structured(
                     system_prompt=system_prompt, user_prompt=user_prompt,
                     model=self.model, max_tokens=max_tokens,
+                    num_ctx=num_ctx,
                 )
                 result.usage.retries = attempt
                 return result
