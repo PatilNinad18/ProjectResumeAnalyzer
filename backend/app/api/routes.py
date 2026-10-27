@@ -96,6 +96,16 @@ def _run_processing(jd_id: str, jd_version_id: str) -> None:
             logger.info("Analysis finished for jd_id=%s in %.1fs", jd_id, time.time() - started)
 
 
+def _update_task_progress(key: str, stage: str, stage_label: str, progress_percent: int) -> None:
+    with _state_lock:
+        if key in _tasks:
+            _tasks[key].update(
+                stage=stage,
+                stage_label=stage_label,
+                progress_percent=progress_percent,
+            )
+
+
 def _task_runner(key: str, fn, jd_id: str, *args) -> None:
     """Runs `fn(db, jd_id, *args)` in a worker thread with its own DB session and records the outcome."""
     from app.db import SessionLocal
@@ -104,18 +114,39 @@ def _task_runner(key: str, fn, jd_id: str, *args) -> None:
     try:
         fn(db, jd_id, *args)
         with _state_lock:
-            _tasks[key].update(status="done", error=None, finished_at=time.time())
+            _tasks[key].update(
+                status="done",
+                error=None,
+                finished_at=time.time(),
+                stage="DONE",
+                stage_label="Task completed successfully",
+                progress_percent=100,
+            )
         logger.info("Task %s finished in %.1fs", key, time.time() - _tasks[key]["started_at"])
     except HTTPException as exc:
         db.rollback()
         logger.warning("Task %s failed: %s", key, exc.detail)
         with _state_lock:
-            _tasks[key].update(status="failed", error=str(exc.detail), finished_at=time.time())
+            _tasks[key].update(
+                status="failed",
+                error=str(exc.detail),
+                finished_at=time.time(),
+                stage="FAILED",
+                stage_label=f"Task failed: {exc.detail}",
+                progress_percent=0,
+            )
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         logger.exception("Task %s crashed", key)
         with _state_lock:
-            _tasks[key].update(status="failed", error=str(exc) or exc.__class__.__name__, finished_at=time.time())
+            _tasks[key].update(
+                status="failed",
+                error=str(exc) or exc.__class__.__name__,
+                finished_at=time.time(),
+                stage="FAILED",
+                stage_label=f"Task crashed: {exc}",
+                progress_percent=0,
+            )
     finally:
         db.close()
 
@@ -126,7 +157,15 @@ def _start_task(kind: str, jd_id: str, background_tasks: BackgroundTasks, fn, *a
         current = _tasks.get(key)
         if current and current["status"] == "running":
             return {"jd_id": jd_id, "task": kind, "status": "already_running"}
-        _tasks[key] = {"status": "running", "error": None, "started_at": time.time(), "finished_at": None}
+        _tasks[key] = {
+            "status": "running",
+            "error": None,
+            "started_at": time.time(),
+            "finished_at": None,
+            "stage": "QUEUED",
+            "stage_label": f"Queued {kind} task...",
+            "progress_percent": 10,
+        }
     background_tasks.add_task(_task_runner, key, fn, jd_id, *args)
     return {"jd_id": jd_id, "task": kind, "status": "queued"}
 
@@ -287,6 +326,20 @@ def analyze_jd(jd_id: str, background_tasks: BackgroundTasks, db: Session = Depe
     return {"jd_id": jd_id, "jd_version_id": jd_version.id, "status": "queued"}
 
 
+def _get_analysis_progress(status: str) -> tuple[int, str]:
+    stages = {
+        "UPLOADED": (10, "Uploading & queueing analysis"),
+        "PARSING": (25, "Parsing document structure & sections"),
+        "UNDERSTANDING": (50, "Extracting domain requirements & EKG concepts"),
+        "VALIDATING": (75, "Validating extracted constraints & schema"),
+        "GENERATING": (90, "Synthesizing evaluation specification & guidance"),
+        "READY": (100, "Analysis complete"),
+        "NEEDS_REVIEW": (100, "Analysis complete (ready for review)"),
+        "FAILED": (0, "Analysis failed"),
+    }
+    return stages.get(status, (20, f"Processing ({status})"))
+
+
 @router.get("/jds/{jd_id}/analysis")
 def get_analysis(jd_id: str, db: Session = Depends(get_db)):
     latest_job = (
@@ -305,27 +358,69 @@ def get_analysis(jd_id: str, db: Session = Depends(get_db)):
     if started is not None:
         db_status = _status_str(latest_job) if latest_job else None
         status = db_status if db_status and db_status not in TERMINAL_STATUSES else "UNDERSTANDING"
-        return {"status": status, "error_message": None, "started_at": started,
-                "finished_at": None, "elapsed_seconds": round(time.time() - started, 1)}
+        pct, label = _get_analysis_progress(status)
+        return {
+            "status": status,
+            "error_message": None,
+            "started_at": started,
+            "finished_at": None,
+            "elapsed_seconds": round(time.time() - started, 1),
+            "progress_percent": pct,
+            "stage_label": label,
+            "current_stage": status,
+        }
 
     # Crashed before the worker could record FAILED.
     if error:
-        return {"status": "FAILED", "error_message": error, "started_at": None,
-                "finished_at": None, "elapsed_seconds": None}
+        return {
+            "status": "FAILED",
+            "error_message": error,
+            "started_at": None,
+            "finished_at": None,
+            "elapsed_seconds": None,
+            "progress_percent": 0,
+            "stage_label": "Analysis failed",
+            "current_stage": "FAILED",
+        }
 
     if not latest_job:
         if not db.get(JobDescription, jd_id):
             raise HTTPException(404, "JD not found")
-        return {"status": "UPLOADED", "error_message": None, "started_at": None,
-                "finished_at": None, "elapsed_seconds": None}
+        pct, label = _get_analysis_progress("UPLOADED")
+        return {
+            "status": "UPLOADED",
+            "error_message": None,
+            "started_at": None,
+            "finished_at": None,
+            "elapsed_seconds": None,
+            "progress_percent": pct,
+            "stage_label": label,
+            "current_stage": "UPLOADED",
+        }
 
+    st = _status_str(latest_job)
+    pct, label = _get_analysis_progress(st)
     return {
-        "status": _status_str(latest_job),
+        "status": st,
         "error_message": latest_job.error_message,
         "started_at": latest_job.started_at,
         "finished_at": latest_job.finished_at,
         "elapsed_seconds": None,
+        "progress_percent": pct,
+        "stage_label": label,
+        "current_stage": st,
     }
+
+
+@router.post("/jds/{jd_id}/analysis/cancel")
+def cancel_analysis(jd_id: str):
+    """Cancel an in-flight analysis job."""
+    with _state_lock:
+        if jd_id in _inflight:
+            _inflight.pop(jd_id, None)
+            _errors[jd_id] = "Analysis was cancelled by user."
+            return {"jd_id": jd_id, "status": "cancelled", "message": "Analysis cancelled successfully"}
+    return {"jd_id": jd_id, "status": "not_running", "message": "Analysis not currently running"}
 
 
 @router.get("/jds/{jd_id}/tasks/{kind}")
@@ -336,22 +431,54 @@ def get_task_status(jd_id: str, kind: str):
     with _state_lock:
         t = _tasks.get(f"{kind}:{jd_id}")
         if not t:
-            return {"kind": kind, "status": "idle", "error": None, "elapsed_seconds": None}
+            return {
+                "kind": kind,
+                "status": "idle",
+                "error": None,
+                "elapsed_seconds": None,
+                "stage": "IDLE",
+                "stage_label": "Idle",
+                "progress_percent": 0,
+            }
         end = t["finished_at"] if t["finished_at"] else time.time()
         return {
             "kind": kind,
             "status": t["status"],
             "error": t["error"],
             "elapsed_seconds": round(end - t["started_at"], 1),
+            "stage": t.get("stage", "RUNNING" if t["status"] == "running" else t["status"].upper()),
+            "stage_label": t.get("stage_label", "In progress" if t["status"] == "running" else t["status"]),
+            "progress_percent": t.get("progress_percent", 100 if t["status"] == "done" else (0 if t["status"] == "failed" else 50)),
         }
 
 
-def _latest_spec_version(jd_id: str, db: Session) -> JobSpecificationVersion:
-    spec = (
+@router.post("/jds/{jd_id}/tasks/{kind}/cancel")
+def cancel_task(jd_id: str, kind: str):
+    """Cancel an in-flight background task (enrich | resolve)."""
+    if kind not in TASK_KINDS:
+        raise HTTPException(404, f"Unknown task kind {kind!r}")
+    key = f"{kind}:{jd_id}"
+    with _state_lock:
+        t = _tasks.get(key)
+        if t and t["status"] == "running":
+            t.update(
+                status="failed",
+                error="Task was cancelled by user.",
+                finished_at=time.time(),
+                stage="CANCELLED",
+                stage_label="Cancelled by user",
+                progress_percent=0,
+            )
+            return {"kind": kind, "status": "cancelled", "message": f"{kind} task cancelled successfully"}
+    return {"kind": kind, "status": "not_running", "message": f"{kind} task not running"}
+
+
+def _get_spec_version(jd_id: str, db: Session, version: Optional[int] = None) -> JobSpecificationVersion:
+    query = (
         db.query(JobSpecificationVersion)
         .join(JobDescriptionVersion)
         .filter(JobDescriptionVersion.job_description_id == jd_id)
-        .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
+        .order_by(JobSpecificationVersion.created_at.desc())
         .first()
     )
     if not spec:
@@ -359,9 +486,18 @@ def _latest_spec_version(jd_id: str, db: Session) -> JobSpecificationVersion:
     return spec
 
 
+def _latest_spec_version(jd_id: str, db: Session) -> JobSpecificationVersion:
+    return _get_spec_version(jd_id, db, version=None)
+
+
 @router.get("/jds/{jd_id}/markdown")
-def get_markdown(jd_id: str, enriched: Optional[bool] = None, db: Session = Depends(get_db)):
-    spec_version = _latest_spec_version(jd_id, db)
+def get_markdown(
+    jd_id: str,
+    enriched: Optional[bool] = None,
+    version: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    spec_version = _get_spec_version(jd_id, db, version=version)
     has_enriched = bool(spec_version.s3_enriched_markdown_key)
     # Priority is ALWAYS Ollama enriched markdown first.
     # Only if Ollama is unavailable/failed (not has_enriched) or caller explicitly asked for enriched=False do we return baseline.
@@ -388,6 +524,9 @@ def get_enrichment(jd_id: str, db: Session = Depends(get_db)):
 
 def _do_enrich(db: Session, jd_id: str) -> None:
     """The slow part of enrichment (Ollama). Runs in a background thread; raises HTTPException on failure."""
+    task_key = f"enrich:{jd_id}"
+    _update_task_progress(task_key, "CHECKING_SERVICE", "Checking enrichment engine availability", 20)
+
     spec_version = _latest_spec_version(jd_id, db)
     jd = db.get(JobDescription, jd_id)
     if not jd:
@@ -511,6 +650,9 @@ class ResolveClarificationsRequest(BaseModel):
 
 def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: str) -> None:
     """Apply TA answers, build the next specification version (incl. the slow Ollama refinement)."""
+    task_key = f"resolve:{jd_id}"
+    _update_task_progress(task_key, "APPLYING_ANSWERS", "Applying TA answers to requirements", 25)
+
     spec_version = _latest_spec_version(jd_id, db)
     jd = db.get(JobDescription, jd_id)
     if not jd:
@@ -557,7 +699,11 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
     except Exception as exc:
         logger.info("Finalization deferred: %s", exc)
 
+    _update_task_progress(task_key, "UPDATING_CONTEXT", "Updating master domain context and provenance records", 45)
+
     next_version = spec_version.specification_version + 1
+    _update_task_progress(task_key, "PROJECTING_SPEC", f"Projecting canonical specification v{next_version}", 65)
+
     new_spec = project_to_canonical(
         master,
         jd_id=jd_id,
@@ -833,6 +979,7 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
     # If any requirement was affected, NEVER carry forward prior_report, because that would contain outdated enrichment.
     # The new version safely falls back to deterministic baseline specification.
 
+    _update_task_progress(task_key, "PERSISTING", f"Saving resolved specification artifacts v{next_version}", 95)
     base_md = render_markdown(new_spec)
     json_str = to_json_str(new_spec)
 
@@ -894,9 +1041,26 @@ def resolve_clarifications(
 
 
 @router.get("/jds/{jd_id}/json")
-def get_json(jd_id: str, db: Session = Depends(get_db)):
-    spec_version = _latest_spec_version(jd_id, db)
+def get_json(jd_id: str, version: Optional[int] = None, db: Session = Depends(get_db)):
+    spec_version = _get_spec_version(jd_id, db, version=version)
     return {"json": spec_version.canonical_json, "specification_version": spec_version.specification_version}
+
+
+@router.get("/jds/{jd_id}/compare")
+@router.get("/jds/{jd_id}/comparison")
+def compare_jd_contexts(
+    jd_id: str,
+    base: str = "baseline",
+    target: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Compare Baseline, Enriched, and Ambiguity-Resolved JD contexts.
+    Returns added, removed, modified, and unchanged requirements with source evidence
+    and TA-confirmed facts clearly distinguished, plus resolved and unresolved ambiguities.
+    """
+    from app.services.comparison_service import build_comparison_payload
+    return build_comparison_payload(jd_id, db, base_context=base, target_context=target)
 
 
 @router.post("/jds/{jd_id}/markdown-to-json")

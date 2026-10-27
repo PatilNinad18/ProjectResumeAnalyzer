@@ -42,6 +42,9 @@ export interface AnalysisStatusResponse {
   started_at?: string | number | null;
   finished_at?: string | number | null;
   elapsed_seconds?: number | null;
+  progress_percent?: number;
+  stage_label?: string;
+  current_stage?: string;
 }
 
 export interface ChatTurn {
@@ -121,20 +124,32 @@ export async function analyzeJD(jdId: string): Promise<{ status: string }> {
   return request(`/api/jds/${jdId}/analyze`, { method: "POST", timeoutMs: 15_000 });
 }
 
+export async function cancelAnalysis(jdId: string): Promise<{ status: string; message: string }> {
+  return request(`/api/jds/${jdId}/analysis/cancel`, { method: "POST", timeoutMs: 10_000 });
+}
+
 export async function getAnalysisStatus(jdId: string, signal?: AbortSignal): Promise<AnalysisStatusResponse> {
   return request(`/api/jds/${jdId}/analysis`, { signal, timeoutMs: 15_000 });
 }
 
 export async function getMarkdown(
   jdId: string,
-  enriched?: boolean
+  enriched?: boolean,
+  version?: number
 ): Promise<{ markdown: string; specification_version: number; is_enriched?: boolean }> {
-  const query = enriched === undefined ? "" : `?enriched=${enriched}`;
+  const params = new URLSearchParams();
+  if (enriched !== undefined) params.append("enriched", String(enriched));
+  if (version !== undefined) params.append("version", String(version));
+  const query = params.toString() ? `?${params.toString()}` : "";
   return request(`/api/jds/${jdId}/markdown${query}`);
 }
 
-export async function getJson(jdId: string): Promise<{ json: Record<string, unknown>; specification_version: number }> {
-  return request(`/api/jds/${jdId}/json`);
+export async function getJson(
+  jdId: string,
+  version?: number
+): Promise<{ json: Record<string, unknown>; specification_version: number }> {
+  const query = version !== undefined ? `?version=${version}` : "";
+  return request(`/api/jds/${jdId}/json${query}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +164,9 @@ export interface TaskStatusResponse {
   status: "idle" | "running" | "done" | "failed";
   error: string | null;
   elapsed_seconds: number | null;
+  stage?: string;
+  stage_label?: string;
+  progress_percent?: number;
 }
 
 /** Starts Ollama enrichment in the background (HTTP 202). Follow with waitForTask(jdId, "enrich"). */
@@ -158,6 +176,10 @@ export async function enrichJD(jdId: string): Promise<{ status: string }> {
 
 export async function getTaskStatus(jdId: string, kind: TaskKind, signal?: AbortSignal): Promise<TaskStatusResponse> {
   return request(`/api/jds/${jdId}/tasks/${kind}`, { signal, timeoutMs: 15_000 });
+}
+
+export async function cancelTask(jdId: string, kind: TaskKind): Promise<{ status: string; message: string }> {
+  return request(`/api/jds/${jdId}/tasks/${kind}/cancel`, { method: "POST", timeoutMs: 10_000 });
 }
 
 export interface ClarificationQuestionItem {
@@ -200,6 +222,126 @@ export async function resolveClarifications(
 }
 
 // ---------------------------------------------------------------------------
+// JD Context Comparison
+// ---------------------------------------------------------------------------
+export type JDContextType = "baseline" | "enriched" | "resolved";
+
+export interface RequirementDiffItem {
+  id: string;
+  text: string;
+  priority: string;
+  clause_type?: string;
+  is_mandatory?: boolean;
+  origin_type: string;
+  provenance_type: "source_evidence" | "ta_confirmed" | "llm_hypothesis" | "ekg_derived";
+  provenance_badge: string;
+  source_text?: string;
+  source_section?: string;
+  author?: string | null;
+  timestamp?: string | null;
+  diff_status: "added" | "removed" | "modified" | "unchanged";
+  diff_badge: string;
+  diff_reason?: string;
+  base_priority?: string;
+  target_priority?: string;
+  base_provenance?: string;
+  target_provenance?: string;
+  base_text?: string;
+  changes?: string[];
+  enriched_guidance?: {
+    technical_concept_summary?: string;
+    strong_evidence_signals?: string[];
+    weak_or_ambiguous_signals?: string[];
+    screening_question?: string;
+  };
+}
+
+export interface AmbiguityItem {
+  question_key: string;
+  question_text: string;
+  category: string;
+  priority: string;
+  status: string;
+  answer_text?: string;
+  answered_by?: string;
+  answered_at?: string;
+  is_ta_confirmed?: boolean;
+  is_blocking?: boolean;
+  why_ambiguous?: string;
+  suggested_options?: string[];
+}
+
+export interface ContextComparisonResponse {
+  jd_id: string;
+  has_baseline: boolean;
+  has_enriched: boolean;
+  has_resolved: boolean;
+  selected_base_context: string;
+  selected_target_context: string;
+  versions: Array<{
+    specification_version: number;
+    created_at: string | null;
+    has_enrichment: boolean;
+    lifecycle_status: string;
+  }>;
+  contexts: {
+    baseline?: {
+      version: number;
+      markdown: string;
+      requirements_count: number;
+      created_at: string | null;
+    };
+    enriched?: {
+      version: number | null;
+      markdown: string;
+      has_guidance: boolean;
+      evaluation_priorities: string[];
+      created_at: string | null;
+    };
+    resolved?: {
+      version: number | null;
+      markdown: string;
+      requirements_count: number;
+      lifecycle_status: string | null;
+      created_at: string | null;
+    };
+  };
+  diff: {
+    added: RequirementDiffItem[];
+    removed: RequirementDiffItem[];
+    modified: RequirementDiffItem[];
+    unchanged: RequirementDiffItem[];
+    counts: {
+      total_base: number;
+      total_target: number;
+      added: number;
+      removed: number;
+      modified: number;
+      unchanged: number;
+    };
+  };
+  ambiguities: {
+    resolved: AmbiguityItem[];
+    unresolved: AmbiguityItem[];
+    counts: {
+      resolved: number;
+      unresolved: number;
+    };
+  };
+}
+
+export async function getComparison(
+  jdId: string,
+  base: string = "baseline",
+  target?: string
+): Promise<ContextComparisonResponse> {
+  const params = new URLSearchParams();
+  if (base) params.append("base", base);
+  if (target) params.append("target", target);
+  return request(`/api/jds/${jdId}/compare?${params.toString()}`);
+}
+
+// ---------------------------------------------------------------------------
 // Polling
 // ---------------------------------------------------------------------------
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -225,13 +367,14 @@ export async function pollUntilDone(
   jdId: string,
   opts: {
     onStatus?: (status: ProcessingStatus) => void;
+    onProgress?: (progress: { percent: number; stageLabel: string; status: ProcessingStatus }) => void;
     signal?: AbortSignal;
     intervalMs?: number;
     timeoutMs?: number;
     maxConsecutiveErrors?: number;
   } = {}
 ): Promise<AnalysisStatusResponse> {
-  const { onStatus, signal, intervalMs = 2000, timeoutMs = 30 * 60_000, maxConsecutiveErrors = 5 } = opts;
+  const { onStatus, onProgress, signal, intervalMs = 2000, timeoutMs = 30 * 60_000, maxConsecutiveErrors = 5 } = opts;
   const started = Date.now();
   let errors = 0;
 
@@ -243,6 +386,13 @@ export async function pollUntilDone(
       const s = await getAnalysisStatus(jdId, signal);
       errors = 0;
       onStatus?.(s.status);
+      if (onProgress && s.progress_percent !== undefined && s.stage_label) {
+        onProgress({
+          percent: s.progress_percent,
+          stageLabel: s.stage_label,
+          status: s.status,
+        });
+      }
       if (TERMINAL_STATUSES.includes(s.status)) return s;
     } catch (e) {
       if ((e as Error).name === "AbortError") throw e;
@@ -268,7 +418,7 @@ export async function waitForTask(
     maxConsecutiveErrors?: number;
   } = {}
 ): Promise<TaskStatusResponse> {
-  const { signal, onTick, intervalMs = 3000, timeoutMs = 30 * 60_000, maxConsecutiveErrors = 5 } = opts;
+  const { signal, onTick, intervalMs = 2000, timeoutMs = 30 * 60_000, maxConsecutiveErrors = 5 } = opts;
   const started = Date.now();
   let errors = 0;
 

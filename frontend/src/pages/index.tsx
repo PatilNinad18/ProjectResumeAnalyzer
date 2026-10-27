@@ -11,6 +11,7 @@ import ReactMarkdown from "react-markdown";
 import {
   uploadJD,
   analyzeJD,
+  cancelAnalysis,
   getMarkdown,
   enrichJD,
   getJson,
@@ -24,7 +25,13 @@ import {
   CompanyDetails,
   CreatedAgent,
   ChatTurn,
-  waitForTask
+  waitForTask,
+  cancelTask,
+  getComparison,
+  ContextComparisonResponse,
+  RequirementDiffItem,
+  AmbiguityItem,
+  JDContextType,
 } from "@/lib/api";
 
 const statusConfig: Record<ProcessingStatus, { label: string; icon: string; className: string }> = {
@@ -68,10 +75,30 @@ export default function Home() {
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [jsonData, setJsonData] = useState<Record<string, unknown> | null>(null);
   const [specVersion, setSpecVersion] = useState<number>(1);
-  const [contextTab, setContextTab] = useState<"markdown" | "json">("markdown");
+  const [contextTab, setContextTab] = useState<"markdown" | "json" | "compare">("markdown");
   const [isEnriching, setIsEnriching] = useState<boolean>(false);
   const [isEnrichedView, setIsEnrichedView] = useState<boolean>(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
+
+  // Progress Indicators & Notifications State
+  const [analysisProgress, setAnalysisProgress] = useState<{ percent: number; stageLabel: string }>({
+    percent: 0,
+    stageLabel: "",
+  });
+  const [analysisSuccessMsg, setAnalysisSuccessMsg] = useState<string | null>(null);
+  const [resolveProgress, setResolveProgress] = useState<{ percent: number; stageLabel: string }>({
+    percent: 0,
+    stageLabel: "",
+  });
+  const [resolveError, setResolveError] = useState<string | null>(null);
+
+  // JD Context Comparison State
+  const [comparisonData, setComparisonData] = useState<ContextComparisonResponse | null>(null);
+  const [isLoadingComparison, setIsLoadingComparison] = useState<boolean>(false);
+  const [comparisonBaseContext, setComparisonBaseContext] = useState<JDContextType>("baseline");
+  const [comparisonTargetContext, setComparisonTargetContext] = useState<JDContextType>("resolved");
+  const [comparisonFilter, setComparisonFilter] = useState<"all" | "added" | "modified" | "removed" | "unchanged">("all");
+  const [comparisonViewMode, setComparisonViewMode] = useState<"unified" | "side_by_side">("unified");
 
   // Ambiguities & Clarification State
   const [clarificationsData, setClarificationsData] = useState<ClarificationsResponse | null>(null);
@@ -175,6 +202,56 @@ export default function Home() {
     setIsCompanySaved(true);
   }
 
+  // Fetch Context Comparison
+  async function fetchComparison(base: JDContextType = comparisonBaseContext, target: JDContextType = comparisonTargetContext, targetJdId?: string) {
+    const idToUse = targetJdId || jdId;
+    if (!idToUse) return;
+    setIsLoadingComparison(true);
+    try {
+      const res = await getComparison(idToUse, base, target);
+      setComparisonData(res);
+      // Auto-adjust target if resolved is not yet available and target is resolved
+      if (!res.has_resolved && target === "resolved" && res.has_enriched) {
+        setComparisonTargetContext("enriched");
+      }
+    } catch (e) {
+      console.error("Failed to load JD context comparison:", e);
+    } finally {
+      setIsLoadingComparison(false);
+    }
+  }
+
+  // Cancel in-flight JD Analysis
+  async function handleCancelAnalysis() {
+    pollAbortRef.current?.abort();
+    if (jdId) {
+      try {
+        await cancelAnalysis(jdId);
+      } catch {
+        /* ignore */
+      }
+    }
+    setStatus(null);
+    setAnalysisStartedAt(null);
+    setAnalysisProgress({ percent: 0, stageLabel: "" });
+    setError("Analysis was cancelled by user.");
+  }
+
+  // Cancel in-flight Ambiguity Resolution
+  async function handleCancelResolve() {
+    pollAbortRef.current?.abort();
+    if (jdId) {
+      try {
+        await cancelTask(jdId, "resolve");
+      } catch {
+        /* ignore */
+      }
+    }
+    setIsResolvingClarifications(false);
+    setResolveProgress({ percent: 0, stageLabel: "" });
+    setResolveError("Ambiguity resolution was cancelled by user.");
+  }
+
   // Reset workflow form for adding a new JD
   function handleResetForNewJD() {
     pollAbortRef.current?.abort();
@@ -194,10 +271,16 @@ export default function Home() {
     setClarificationsData(null);
     setClarificationAnswers({});
     setResolveSuccessMsg(null);
+    setResolveError(null);
+    setAnalysisSuccessMsg(null);
+    setAnalysisProgress({ percent: 0, stageLabel: "" });
+    setResolveProgress({ percent: 0, stageLabel: "" });
+    setComparisonData(null);
+    setContextTab("markdown");
   }
 
   // Handle Grounded TA Evidence Enrichment via Ollama
-    async function handleEnrichJD() {
+  async function handleEnrichJD() {
     if (!jdId) return;
     setIsEnriching(true);
     setEnrichError(null);
@@ -206,10 +289,20 @@ export default function Home() {
     pollAbortRef.current = controller;
     try {
       await enrichJD(jdId);
-      await waitForTask(jdId, "enrich", { signal: controller.signal });
+      await waitForTask(jdId, "enrich", {
+        signal: controller.signal,
+        onTick: (s) => {
+          if (s.stage_label) {
+            setEnrichError(null);
+          }
+        },
+      });
       const res = await getMarkdown(jdId, true);
       setMarkdown(res.markdown);
       setIsEnrichedView(Boolean(res.is_enriched));
+      if (contextTab === "compare") {
+        fetchComparison(comparisonBaseContext, "enriched", jdId);
+      }
     } catch (e) {
       if (isAbort(e)) return;
       const msg = (e as Error).message || "";
@@ -236,27 +329,45 @@ export default function Home() {
   }
 
   // Submit TA answers for detected ambiguities & generate final specification
-    async function handleResolveClarifications() {
+  async function handleResolveClarifications() {
     if (!jdId) return;
     setIsResolvingClarifications(true);
     setResolveSuccessMsg(null);
-    setError(null);
+    setResolveError(null);
+    setResolveProgress({ percent: 15, stageLabel: "Queueing ambiguity resolution..." });
     pollAbortRef.current?.abort();
     const controller = new AbortController();
     pollAbortRef.current = controller;
     try {
       await resolveClarifications(jdId, clarificationAnswers);
-      await waitForTask(jdId, "resolve", { signal: controller.signal });
-      const [mdRes, jsonRes] = await Promise.all([getMarkdown(jdId), getJson(jdId)]);
+      await waitForTask(jdId, "resolve", {
+        signal: controller.signal,
+        onTick: (s) => {
+          setResolveProgress({
+            percent: s.progress_percent !== undefined ? s.progress_percent : 50,
+            stageLabel: s.stage_label || "Resolving clarifications...",
+          });
+        },
+      });
+      const [mdRes, jsonRes, clarRes] = await Promise.all([
+        getMarkdown(jdId),
+        getJson(jdId),
+        getClarifications(jdId),
+      ]);
       setMarkdown(mdRes.markdown);
       setJsonData(jsonRes.json);
       setSpecVersion(mdRes.specification_version);
       setIsEnrichedView(Boolean(mdRes.is_enriched));
+      setClarificationsData(clarRes);
+      setResolveProgress({ percent: 100, stageLabel: "Ambiguities resolved!" });
       setResolveSuccessMsg("✓ Ambiguities resolved! Final specification generated.");
-      setClarificationsData(await getClarifications(jdId));
+      // Refresh comparison if comparison tab is active or data exists
+      fetchComparison(comparisonBaseContext, "resolved", jdId);
     } catch (e) {
       if (isAbort(e)) return;
-      setError(`Failed to resolve clarifications: ${(e as Error).message}`);
+      const errMsg = (e as Error).message || "Failed to resolve clarifications";
+      setResolveError(errMsg);
+      setResolveProgress({ percent: 0, stageLabel: "Resolution failed" });
     } finally {
       setIsResolvingClarifications(false);
     }
@@ -264,16 +375,20 @@ export default function Home() {
 
   // Step 3 Analyse Handler.
   // The backend now returns immediately from /analyze (HTTP 202) and we poll for progress,
-  // so the UI shows live status + elapsed time instead of freezing for minutes.
+  // showing live status + honest stage-based progress + elapsed time.
   async function handleAnalyseJD() {
     if (!jdText.trim() && !selectedFile) return;
     setError(null);
+    setAnalysisSuccessMsg(null);
     setMarkdown(null);
     setJsonData(null);
     setCreatedAgentSuccess(null);
     setClarificationsData(null);
     setClarificationAnswers({});
     setResolveSuccessMsg(null);
+    setResolveError(null);
+    setComparisonData(null);
+    setAnalysisProgress({ percent: 10, stageLabel: "Uploading Job Description..." });
 
     pollAbortRef.current?.abort();
     const controller = new AbortController();
@@ -293,13 +408,28 @@ export default function Home() {
 
       setStatus("UPLOADED");
       setAnalysisStartedAt(Date.now());
+      setAnalysisProgress({ percent: 15, stageLabel: "Starting background analysis..." });
       await analyzeJD(jd_id);
 
-      const final = await pollUntilDone(jd_id, { onStatus: setStatus, signal: controller.signal });
+      const final = await pollUntilDone(jd_id, {
+        onStatus: setStatus,
+        onProgress: (p) => {
+          setAnalysisProgress({
+            percent: p.percent,
+            stageLabel: p.stageLabel,
+          });
+        },
+        signal: controller.signal,
+      });
+
       if (final.status === "FAILED") {
         setError(final.error_message || "Processing failed.");
+        setAnalysisProgress({ percent: 0, stageLabel: "Analysis failed" });
         return;
       }
+
+      setAnalysisProgress({ percent: 100, stageLabel: "Analysis Complete!" });
+      setAnalysisSuccessMsg("✓ Job Description successfully analyzed! Specification v1 generated.");
 
       const [mdRes, jsonRes, clarRes] = await Promise.all([
         getMarkdown(jd_id),
@@ -311,10 +441,14 @@ export default function Home() {
       setSpecVersion(mdRes.specification_version || 1);
       setIsEnrichedView(Boolean(mdRes.is_enriched));
       if (clarRes) setClarificationsData(clarRes);
+
+      // Pre-fetch comparison baseline
+      fetchComparison("baseline", "resolved", jd_id);
     } catch (e) {
       if (isAbort(e)) return;
       setError((e as Error).message);
       setStatus("FAILED"); // unlock the Analyse button
+      setAnalysisProgress({ percent: 0, stageLabel: "Analysis failed" });
     } finally {
       if (pollAbortRef.current === controller) setAnalysisStartedAt(null);
     }
@@ -1428,6 +1562,217 @@ export default function Home() {
           .chat-input-bar { padding: 12px; }
           .prompt-chips { padding-inline: 12px; }
         }
+
+        /* Progress Card & Stage Indicators */
+        .progress-card {
+          background: #f8fafc;
+          border: 1px solid #e0e7ff;
+          border-radius: 12px;
+          padding: 16px;
+          box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+        }
+
+        .progress-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 10px;
+        }
+
+        .progress-stage-title {
+          font-size: 0.9rem;
+          font-weight: 650;
+          color: #3730a3;
+        }
+
+        .progress-pct {
+          font-size: 0.82rem;
+          font-weight: 700;
+          padding: 2px 8px;
+          border-radius: 12px;
+          background: #e0e7ff;
+          color: #4338ca;
+        }
+
+        .progress-track {
+          width: 100%;
+          height: 8px;
+          background: #e2e8f0;
+          border-radius: 999px;
+          overflow: hidden;
+          margin-bottom: 10px;
+        }
+
+        .progress-fill {
+          height: 100%;
+          border-radius: 999px;
+          background: linear-gradient(90deg, #6366f1, #4f46e5);
+          transition: width 0.35s ease;
+        }
+
+        .progress-footer {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+
+        .progress-elapsed {
+          font-size: 0.8rem;
+          color: #64748b;
+          font-weight: 500;
+        }
+
+        .btn-cancel {
+          background: #fff;
+          border: 1px solid #cbd5e1;
+          color: #64748b;
+          padding: 3px 10px;
+          border-radius: 6px;
+          font-size: 0.76rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+
+        .btn-cancel:hover {
+          background: #fef2f2;
+          color: #b91c1c;
+          border-color: #fca5a5;
+        }
+
+        .btn-retry {
+          background: #fff;
+          border: 1px solid #fecdca;
+          color: #b42318;
+          padding: 3px 10px;
+          border-radius: 6px;
+          font-size: 0.78rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+
+        .btn-retry:hover {
+          background: #fee4e2;
+        }
+
+        .btn-dismiss {
+          background: transparent;
+          border: none;
+          color: inherit;
+          cursor: pointer;
+          font-size: 0.9rem;
+          padding: 0 4px;
+          opacity: 0.7;
+          line-height: 1;
+        }
+
+        .btn-dismiss:hover {
+          opacity: 1;
+        }
+
+        /* KPI Cards in Comparison View */
+        .kpi-card {
+          padding: 12px;
+          border-radius: 10px;
+          border: 1px solid #eaecf0;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .kpi-label {
+          font-size: 0.75rem;
+          font-weight: 600;
+        }
+
+        .kpi-value {
+          font-size: 1.35rem;
+          font-weight: 750;
+          line-height: 1.1;
+        }
+
+        /* Filter Buttons */
+        .filter-btn {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          color: #475569;
+          padding: 5px 12px;
+          border-radius: 8px;
+          font-size: 0.78rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+
+        .filter-btn:hover {
+          background: #f1f5f9;
+          color: #1e293b;
+        }
+
+        .filter-btn.active {
+          background: #4f46e5;
+          color: #ffffff;
+          border-color: #4338ca;
+          box-shadow: 0 1px 3px rgba(79, 70, 229, 0.2);
+        }
+
+        .active-chip {
+          background: #e0e7ff !important;
+          color: #3730a3 !important;
+          border-color: #a5b4fc !important;
+          font-weight: 700 !important;
+        }
+
+        /* Diff Badges */
+        .diff-badge-added {
+          background: #ecfdf3;
+          color: #027a48;
+          border: 1px solid #a6f4c5;
+        }
+
+        .diff-badge-modified {
+          background: #fffaeb;
+          color: #b54708;
+          border: 1px solid #fedf89;
+        }
+
+        .diff-badge-removed {
+          background: #fef3f2;
+          color: #b42318;
+          border: 1px solid #fecdca;
+        }
+
+        .diff-badge-unchanged {
+          background: #f8fafc;
+          color: #475569;
+          border: 1px solid #e2e8f0;
+        }
+
+        /* Provenance Badges */
+        .provenance-badge-source_evidence {
+          background: #eff8ff;
+          color: #175cd3;
+          border: 1px solid #b2ddff;
+        }
+
+        .provenance-badge-ta_confirmed {
+          background: #fdf4ff;
+          color: #86198f;
+          border: 1px solid #f5d0fe;
+        }
+
+        .provenance-badge-llm_hypothesis {
+          background: #f0fdf4;
+          color: #15803d;
+          border: 1px solid #bbf7d0;
+        }
+
+        .provenance-badge-ekg_derived {
+          background: #faf5ff;
+          color: #6b21a8;
+          border: 1px solid #e9d5ff;
+        }
       `}</style>
 
       <div className="app-container">
@@ -1620,7 +1965,78 @@ export default function Home() {
                   )}
                 </div>
 
-                {error && <div className="alert-error">❌ {error}</div>}
+                {/* Initial JD Analysis Progress Bar & Stage Indicator */}
+                {status !== null && !TERMINAL_STATUSES.includes(status) && (
+                  <div className="progress-card" style={{ marginBottom: "16px" }}>
+                    <div className="progress-header">
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span className="spinner" style={{ borderColor: "#6366f1", borderTopColor: "transparent" }}></span>
+                        <span className="progress-stage-title">
+                          {analysisProgress.stageLabel || "Analyzing Job Description..."}
+                        </span>
+                      </div>
+                      <span className="progress-pct">{analysisProgress.percent}%</span>
+                    </div>
+                    <div className="progress-track">
+                      <div
+                        className="progress-fill"
+                        style={{ width: `${Math.min(100, Math.max(8, analysisProgress.percent))}%` }}
+                      />
+                    </div>
+                    <div className="progress-footer">
+                      <span className="progress-elapsed">⏱ Elapsed: {formatElapsed(nowTs - (analysisStartedAt || nowTs))}</span>
+                      <button
+                        type="button"
+                        className="btn-cancel"
+                        onClick={handleCancelAnalysis}
+                        title="Cancel this analysis task"
+                      >
+                        ✕ Cancel Analysis
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Notifications */}
+                {analysisSuccessMsg && (
+                  <div className="alert-success" style={{ marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>{analysisSuccessMsg}</span>
+                    <button
+                      type="button"
+                      className="btn-dismiss"
+                      onClick={() => setAnalysisSuccessMsg(null)}
+                      title="Dismiss notification"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {error && (
+                  <div className="alert-error" style={{ marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <span>❌ {error}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                      <button
+                        type="button"
+                        className="btn-retry"
+                        onClick={handleAnalyseJD}
+                        title="Retry analysis"
+                      >
+                        🔄 Retry Analysis
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-dismiss"
+                        onClick={() => setError(null)}
+                        title="Dismiss error"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
                   <button
@@ -1630,7 +2046,7 @@ export default function Home() {
                   >
                     {status !== null && !TERMINAL_STATUSES.includes(status) ? (
                       <>
-                        <span className="spinner"></span> Analyzing JD...
+                        <span className="spinner"></span> Analyzing JD ({analysisProgress.percent}%)...
                       </>
                     ) : (
                       "🚀 Analyse Job Description"
@@ -1662,6 +2078,15 @@ export default function Home() {
                           onClick={() => setContextTab("json")}
                         >
                           JSON Source of Truth
+                        </button>
+                        <button
+                          className={`sub-tab-btn ${contextTab === "compare" ? "active" : ""}`}
+                          onClick={() => {
+                            setContextTab("compare");
+                            fetchComparison(comparisonBaseContext, comparisonTargetContext);
+                          }}
+                        >
+                          ⚡ Context Comparison
                         </button>
                       </div>
                       {isEnrichedView ? (
@@ -1728,15 +2153,376 @@ export default function Home() {
                     </div>
                   </div>
 
-                  <div className="code-preview">
-                    {contextTab === "markdown" ? (
-                      <ReactMarkdown>{markdown}</ReactMarkdown>
-                    ) : (
-                      <pre style={{ margin: 0, fontFamily: "monospace", color: "#344054" }}>
-                        {JSON.stringify(jsonData, null, 2)}
-                      </pre>
-                    )}
-                  </div>
+                  {contextTab === "compare" ? (
+                    <div className="comparison-container" style={{ padding: "20px", background: "#fcfcfd" }}>
+                      {/* Comparison Toolbar & Context Selector */}
+                      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "20px", paddingBottom: "16px", borderBottom: "1px solid #eaecf0" }}>
+                        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+                          <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "#344054" }}>Compare:</span>
+                          <button
+                            type="button"
+                            className={`btn-secondary ${comparisonBaseContext === "baseline" && comparisonTargetContext === "resolved" ? "active-chip" : ""}`}
+                            style={{ fontSize: "0.78rem", padding: "4px 10px" }}
+                            onClick={() => {
+                              setComparisonBaseContext("baseline");
+                              setComparisonTargetContext("resolved");
+                              fetchComparison("baseline", "resolved");
+                            }}
+                          >
+                            Baseline vs Ambiguity-Resolved
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn-secondary ${comparisonBaseContext === "baseline" && comparisonTargetContext === "enriched" ? "active-chip" : ""}`}
+                            style={{ fontSize: "0.78rem", padding: "4px 10px" }}
+                            onClick={() => {
+                              setComparisonBaseContext("baseline");
+                              setComparisonTargetContext("enriched");
+                              fetchComparison("baseline", "enriched");
+                            }}
+                          >
+                            Baseline vs Enriched Guidance
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn-secondary ${comparisonBaseContext === "enriched" && comparisonTargetContext === "resolved" ? "active-chip" : ""}`}
+                            style={{ fontSize: "0.78rem", padding: "4px 10px" }}
+                            onClick={() => {
+                              setComparisonBaseContext("enriched");
+                              setComparisonTargetContext("resolved");
+                              fetchComparison("enriched", "resolved");
+                            }}
+                          >
+                            Enriched Guidance vs Ambiguity-Resolved
+                          </button>
+                        </div>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                          <span style={{ fontSize: "0.82rem", color: "#667085" }}>
+                            {comparisonData?.has_resolved
+                              ? "✓ Ambiguity-Resolved v" + (comparisonData?.contexts.resolved?.version || 2) + " active"
+                              : "⚠️ Resolved context pending TA clarification"}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{ fontSize: "0.78rem", padding: "4px 10px" }}
+                            onClick={() => fetchComparison(comparisonBaseContext, comparisonTargetContext)}
+                            disabled={isLoadingComparison}
+                          >
+                            {isLoadingComparison ? "Refreshing..." : "🔄 Refresh"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Summary KPI Counters */}
+                      {comparisonData && (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "12px", marginBottom: "20px" }}>
+                          <div className="kpi-card" style={{ borderColor: "#a6f4c5", background: "#f6fef9" }}>
+                            <span className="kpi-label" style={{ color: "#027a48" }}>+ Added Reqs</span>
+                            <span className="kpi-value" style={{ color: "#027a48" }}>{comparisonData.diff.counts.added}</span>
+                          </div>
+                          <div className="kpi-card" style={{ borderColor: "#fedf89", background: "#fffaeb" }}>
+                            <span className="kpi-label" style={{ color: "#b54708" }}>~ Modified Reqs</span>
+                            <span className="kpi-value" style={{ color: "#b54708" }}>{comparisonData.diff.counts.modified}</span>
+                          </div>
+                          <div className="kpi-card" style={{ borderColor: "#fecdca", background: "#fef3f2" }}>
+                            <span className="kpi-label" style={{ color: "#b42318" }}>- Removed Reqs</span>
+                            <span className="kpi-value" style={{ color: "#b42318" }}>{comparisonData.diff.counts.removed}</span>
+                          </div>
+                          <div className="kpi-card" style={{ borderColor: "#e2e8f0", background: "#f8fafc" }}>
+                            <span className="kpi-label" style={{ color: "#475569" }}>= Unchanged Reqs</span>
+                            <span className="kpi-value" style={{ color: "#475569" }}>{comparisonData.diff.counts.unchanged}</span>
+                          </div>
+                          <div className="kpi-card" style={{ borderColor: "#c7d2fe", background: "#eef2ff" }}>
+                            <span className="kpi-label" style={{ color: "#3730a3" }}>✓ Resolved Ambiguities</span>
+                            <span className="kpi-value" style={{ color: "#3730a3" }}>{comparisonData.ambiguities.counts.resolved}</span>
+                          </div>
+                          <div className="kpi-card" style={{ borderColor: "#fed7aa", background: "#fff7ed" }}>
+                            <span className="kpi-label" style={{ color: "#c2410c" }}>! Open Ambiguities</span>
+                            <span className="kpi-value" style={{ color: "#c2410c" }}>{comparisonData.ambiguities.counts.unresolved}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Filter Bar & View Mode Toggle */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "8px" }}>
+                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                          {(["all", "added", "modified", "removed", "unchanged"] as const).map((filterKey) => (
+                            <button
+                              key={filterKey}
+                              type="button"
+                              className={`filter-btn ${comparisonFilter === filterKey ? "active" : ""}`}
+                              onClick={() => setComparisonFilter(filterKey)}
+                            >
+                              {filterKey === "all" ? "All Requirements" : filterKey.charAt(0).toUpperCase() + filterKey.slice(1)}
+                              {comparisonData && filterKey !== "all" ? ` (${comparisonData.diff.counts[filterKey]})` : ""}
+                            </button>
+                          ))}
+                        </div>
+                        <div style={{ display: "flex", gap: "6px" }}>
+                          <button
+                            type="button"
+                            className={`filter-btn ${comparisonViewMode === "unified" ? "active" : ""}`}
+                            onClick={() => setComparisonViewMode("unified")}
+                          >
+                            Unified Diff
+                          </button>
+                          <button
+                            type="button"
+                            className={`filter-btn ${comparisonViewMode === "side_by_side" ? "active" : ""}`}
+                            onClick={() => setComparisonViewMode("side_by_side")}
+                          >
+                            Side-by-Side
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Diff Requirements List */}
+                      {isLoadingComparison ? (
+                        <div style={{ textAlign: "center", padding: "40px", color: "#667085" }}>
+                          <span className="spinner"></span> Loading context comparison...
+                        </div>
+                      ) : !comparisonData ? (
+                        <div style={{ textAlign: "center", padding: "40px", color: "#667085" }}>
+                          No comparison data available yet.
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "28px" }}>
+                          {/* Filtered Requirements */}
+                          {(() => {
+                            const { added, modified, removed, unchanged } = comparisonData.diff;
+                            let items: RequirementDiffItem[] = [];
+                            if (comparisonFilter === "all") items = [...added, ...modified, ...removed, ...unchanged];
+                            else if (comparisonFilter === "added") items = added;
+                            else if (comparisonFilter === "modified") items = modified;
+                            else if (comparisonFilter === "removed") items = removed;
+                            else if (comparisonFilter === "unchanged") items = unchanged;
+
+                            if (items.length === 0) {
+                              return (
+                                <div style={{ textAlign: "center", padding: "30px", background: "#f8fafc", borderRadius: "10px", color: "#667085" }}>
+                                  No requirements matching filter "{comparisonFilter}".
+                                </div>
+                              );
+                            }
+
+                            return items.map((req, rIdx) => {
+                              const isAdded = req.diff_status === "added";
+                              const isModified = req.diff_status === "modified";
+                              const isRemoved = req.diff_status === "removed";
+                              const isTAConfirmed = req.provenance_type === "ta_confirmed";
+
+                              const cardBorderColor = isAdded
+                                ? "#a6f4c5"
+                                : isModified
+                                ? "#fedf89"
+                                : isRemoved
+                                ? "#fecdca"
+                                : "#e2e8f0";
+
+                              const cardBg = isAdded
+                                ? "#f6fef9"
+                                : isModified
+                                ? "#fffdf5"
+                                : isRemoved
+                                ? "#fef3f2"
+                                : "#ffffff";
+
+                              return (
+                                <div
+                                  key={`diff_req_${rIdx}`}
+                                  style={{
+                                    padding: "16px",
+                                    borderRadius: "10px",
+                                    border: `1px solid ${cardBorderColor}`,
+                                    background: cardBg,
+                                  }}
+                                >
+                                  {/* Header Badges */}
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px", gap: "8px", flexWrap: "wrap" }}>
+                                    <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
+                                      {/* Diff Badge */}
+                                      <span
+                                        className={`diff-badge diff-badge-${req.diff_status}`}
+                                        style={{ fontSize: "0.74rem", fontWeight: 700, padding: "2px 8px", borderRadius: "4px" }}
+                                      >
+                                        {req.diff_badge}
+                                      </span>
+
+                                      {/* Priority Badge */}
+                                      <span
+                                        style={{
+                                          fontSize: "0.74rem",
+                                          fontWeight: 600,
+                                          padding: "2px 8px",
+                                          borderRadius: "4px",
+                                          background: req.priority === "MUST_HAVE" ? "#ecfdf3" : req.priority === "PREFERRED" ? "#eff8ff" : "#fffaeb",
+                                          color: req.priority === "MUST_HAVE" ? "#027a48" : req.priority === "PREFERRED" ? "#175cd3" : "#b54708",
+                                          border: `1px solid ${req.priority === "MUST_HAVE" ? "#a6f4c5" : req.priority === "PREFERRED" ? "#b2ddff" : "#fedf89"}`,
+                                        }}
+                                      >
+                                        {req.priority}
+                                      </span>
+
+                                      {/* Provenance Badge */}
+                                      <span
+                                        className={`provenance-badge provenance-badge-${req.provenance_type}`}
+                                        style={{ fontSize: "0.74rem", fontWeight: 600, padding: "2px 8px", borderRadius: "4px" }}
+                                      >
+                                        {req.provenance_badge}
+                                      </span>
+                                    </div>
+
+                                    {/* Author / Timestamp */}
+                                    {req.author && (
+                                      <span style={{ fontSize: "0.75rem", color: "#667085" }}>
+                                        TA: <strong>{req.author}</strong>
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Requirement Text */}
+                                  <div style={{ fontSize: "0.94rem", fontWeight: 550, color: isRemoved ? "#b42318" : "#1e293b", marginBottom: "8px", textDecoration: isRemoved ? "line-through" : "none" }}>
+                                    {req.text}
+                                  </div>
+
+                                  {/* Modified Changes breakdown */}
+                                  {isModified && req.changes && req.changes.length > 0 && (
+                                    <div style={{ marginBottom: "8px", padding: "8px 12px", background: "#fef3c7", borderRadius: "6px", fontSize: "0.82rem", color: "#92400e" }}>
+                                      <strong>Changes:</strong>
+                                      <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                                        {req.changes.map((chg, cIdx) => (
+                                          <li key={cIdx}>{chg}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+
+                                  {/* Source Evidence Quote */}
+                                  {req.source_text && (
+                                    <div style={{ fontSize: "0.8rem", color: "#475569", background: "rgba(0,0,0,0.02)", padding: "6px 10px", borderRadius: "6px", marginBottom: "6px" }}>
+                                      <strong style={{ color: "#334155" }}>Source Evidence ({req.source_section || "JD"}):</strong>{" "}
+                                      <em>"{req.source_text}"</em>
+                                    </div>
+                                  )}
+
+                                  {/* TA Confirmed note */}
+                                  {isTAConfirmed && (
+                                    <div style={{ fontSize: "0.8rem", color: "#86198f", background: "#fdf4ff", padding: "6px 10px", borderRadius: "6px", border: "1px solid #f5d0fe" }}>
+                                      <strong>TA-Confirmed Fact:</strong> Confirmed by {req.author || "TA Lead"}
+                                      {req.timestamp ? ` at ${new Date(req.timestamp).toLocaleString()}` : ""}
+                                    </div>
+                                  )}
+
+                                  {/* Enriched Guidance Signals if present */}
+                                  {req.enriched_guidance && (
+                                    <div style={{ marginTop: "10px", padding: "10px", background: "#f0fdf4", borderRadius: "6px", border: "1px solid #bbf7d0", fontSize: "0.82rem" }}>
+                                      <div style={{ fontWeight: 600, color: "#166534", marginBottom: "4px" }}>
+                                        ✨ Grounded TA Guidance (Ollama):
+                                      </div>
+                                      {req.enriched_guidance.technical_concept_summary && (
+                                        <div style={{ color: "#1e293b", marginBottom: "4px" }}>
+                                          <strong>Concept:</strong> {req.enriched_guidance.technical_concept_summary}
+                                        </div>
+                                      )}
+                                      {req.enriched_guidance.screening_question && (
+                                        <div style={{ color: "#1e293b", marginBottom: "4px" }}>
+                                          <strong>Screening Question:</strong> {req.enriched_guidance.screening_question}
+                                        </div>
+                                      )}
+                                      {req.enriched_guidance.strong_evidence_signals && req.enriched_guidance.strong_evidence_signals.length > 0 && (
+                                        <div style={{ color: "#166534" }}>
+                                          <strong>Strong Signals:</strong> {req.enriched_guidance.strong_evidence_signals.join(" • ")}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      )}
+
+                      {/* Ambiguities & Clarifications Resolution Status */}
+                      {comparisonData && (
+                        <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid #eaecf0" }}>
+                          <h4 style={{ margin: "0 0 14px 0", fontSize: "1.05rem", color: "#101828", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <span>Ambiguities Status (Resolved vs Unresolved)</span>
+                          </h4>
+
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px" }}>
+                            {/* Resolved Ambiguities */}
+                            <div style={{ background: "#ffffff", border: "1px solid #a6f4c5", borderRadius: "10px", padding: "16px" }}>
+                              <h5 style={{ margin: "0 0 10px 0", color: "#027a48", display: "flex", alignItems: "center", gap: "6px" }}>
+                                <span>✓ Resolved Ambiguities ({comparisonData.ambiguities.counts.resolved})</span>
+                              </h5>
+                              {comparisonData.ambiguities.resolved.length === 0 ? (
+                                <p style={{ fontSize: "0.82rem", color: "#667085", margin: 0 }}>No resolved ambiguities yet.</p>
+                              ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                                  {comparisonData.ambiguities.resolved.map((amb, aIdx) => (
+                                    <div key={aIdx} style={{ padding: "10px", background: "#f6fef9", borderRadius: "6px", border: "1px solid #d1fadf", fontSize: "0.83rem" }}>
+                                      <div style={{ fontWeight: 600, color: "#1e293b", marginBottom: "4px" }}>
+                                        {amb.question_text}
+                                      </div>
+                                      <div style={{ color: "#027a48", marginBottom: "2px" }}>
+                                        <strong>TA Answer:</strong> {amb.answer_text}
+                                      </div>
+                                      <div style={{ fontSize: "0.75rem", color: "#667085" }}>
+                                        Confirmed by: <strong>{amb.answered_by || "TA"}</strong>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Unresolved Ambiguities */}
+                            <div style={{ background: "#ffffff", border: "1px solid #fedf89", borderRadius: "10px", padding: "16px" }}>
+                              <h5 style={{ margin: "0 0 10px 0", color: "#b54708", display: "flex", alignItems: "center", gap: "6px" }}>
+                                <span>⚠️ Unresolved Ambiguities ({comparisonData.ambiguities.counts.unresolved})</span>
+                              </h5>
+                              {comparisonData.ambiguities.unresolved.length === 0 ? (
+                                <p style={{ fontSize: "0.82rem", color: "#027a48", margin: 0 }}>✓ All detected ambiguities have been confirmed and resolved.</p>
+                              ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                                  {comparisonData.ambiguities.unresolved.map((amb, aIdx) => (
+                                    <div key={aIdx} style={{ padding: "10px", background: "#fffdf5", borderRadius: "6px", border: "1px solid #fef08a", fontSize: "0.83rem" }}>
+                                      <div style={{ fontWeight: 600, color: "#1e293b", marginBottom: "4px" }}>
+                                        {amb.question_text}
+                                      </div>
+                                      {amb.why_ambiguous && (
+                                        <div style={{ color: "#64748b", marginBottom: "4px" }}>
+                                          <strong>Context:</strong> {amb.why_ambiguous}
+                                        </div>
+                                      )}
+                                      <div style={{ display: "flex", gap: "6px", marginTop: "4px" }}>
+                                        <span style={{ fontSize: "0.72rem", padding: "2px 6px", borderRadius: "4px", background: amb.is_blocking ? "#fee2e2" : "#fef3c7", color: amb.is_blocking ? "#991b1b" : "#92400e", fontWeight: 600 }}>
+                                          {amb.priority || "RECOMMENDED"}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="code-preview">
+                      {contextTab === "markdown" ? (
+                        <ReactMarkdown>{markdown}</ReactMarkdown>
+                      ) : (
+                        <pre style={{ margin: 0, fontFamily: "monospace", color: "#344054" }}>
+                          {JSON.stringify(jsonData, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1763,9 +2549,93 @@ export default function Home() {
                     </div>
                   </div>
 
+                  {/* Progress Indicator during Ambiguity Resolution */}
+                  {isResolvingClarifications && (
+                    <div className="progress-card" style={{ marginBottom: "16px", borderColor: "#f59e0b" }}>
+                      <div className="progress-header">
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span className="spinner" style={{ borderColor: "#f59e0b", borderTopColor: "transparent" }}></span>
+                          <span className="progress-stage-title" style={{ color: "#b45309" }}>
+                            {resolveProgress.stageLabel || "Resolving clarifications..."}
+                          </span>
+                        </div>
+                        <span className="progress-pct" style={{ background: "#fef3c7", color: "#92400e" }}>
+                          {resolveProgress.percent}%
+                        </span>
+                      </div>
+                      <div className="progress-track">
+                        <div
+                          className="progress-fill"
+                          style={{
+                            width: `${Math.min(100, Math.max(10, resolveProgress.percent))}%`,
+                            background: "linear-gradient(90deg, #f59e0b, #d97706)",
+                          }}
+                        />
+                      </div>
+                      <div className="progress-footer">
+                        <span style={{ fontSize: "0.8rem", color: "#667085" }}>Updating master domain context and generating final specification v2+</span>
+                        <button
+                          type="button"
+                          className="btn-cancel"
+                          onClick={handleCancelResolve}
+                          title="Cancel ambiguity resolution"
+                        >
+                          ✕ Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Success Banner */}
                   {resolveSuccessMsg && (
-                    <div className="alert-success" style={{ marginBottom: "14px" }}>
-                      {resolveSuccessMsg}
+                    <div className="alert-success" style={{ marginBottom: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>{resolveSuccessMsg}</span>
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ fontSize: "0.78rem", padding: "3px 8px" }}
+                          onClick={() => {
+                            setContextTab("compare");
+                            fetchComparison("baseline", "resolved");
+                          }}
+                        >
+                          ⚡ View Comparison Diff
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-dismiss"
+                          onClick={() => setResolveSuccessMsg(null)}
+                          title="Dismiss notification"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Error Banner with Retry */}
+                  {resolveError && (
+                    <div className="alert-error" style={{ marginBottom: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>❌ {resolveError}</span>
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                        <button
+                          type="button"
+                          className="btn-retry"
+                          onClick={handleResolveClarifications}
+                          title="Retry resolving clarifications"
+                        >
+                          🔄 Retry Resolution
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-dismiss"
+                          onClick={() => setResolveError(null)}
+                          title="Dismiss error"
+                        >
+                          ✕
+                        </button>
+                      </div>
                     </div>
                   )}
 
