@@ -344,6 +344,9 @@ export default function Home() {
     setSelectedAgentId(newAgent.id);
     setCreatedAgentSuccess(`Agent "${name}" successfully created!`);
     setAgentNameInput("");
+
+    // Open the Chat tab after the agent has been created.
+    setActiveTab("chat");
   }
 
   // File Upload Handler (.txt, .pdf, .docx)
@@ -1935,7 +1938,7 @@ export default function Home() {
                       onChange={(e) => setAgentNameInput(e.target.value)}
                     />
                     <button className="btn-primary" onClick={handleCreateAgent}>
-                      ✨ Create Agent & Enable Chat
+                      ✨ Launch the agent
                     </button>
                   </div>
                 </div>
