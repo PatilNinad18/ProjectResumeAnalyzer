@@ -9,13 +9,23 @@ latency, cost estimate and retries.
 Configuration is read from app.config.get_settings() first, then from real OS
 environment variables. Optional knobs (all have safe defaults):
 
-    OLLAMA_NUM_CTX=12288          context window (keep it fixed: changing it reloads the model)
+    OLLAMA_NUM_CTX=8192           context window (keep it fixed AND equal to ENRICH_NUM_CTX:
+                                  changing it makes Ollama reload the model)
     OLLAMA_KEEP_ALIVE=30m         keep the model in memory between calls
     OLLAMA_USE_SCHEMA=true        constrain output to the canonical JSON schema
     OLLAMA_READ_TIMEOUT=180       seconds without a streamed chunk before giving up
+    OLLAMA_TEMPERATURE=0.1        structured-extraction temperature (Qwen3 must not run greedy)
     LLM_MAX_RETRIES=              default 0 for ollama (a retry costs minutes), 2 for cloud
     LLM_CHAT_MAX_TOKENS=1200
     ALLOW_MOCK_FALLBACK=false     NEVER enable in production: returns fake rule-based output
+
+Changes in this version (tuned for qwen3:4b):
+  * Default Ollama model is qwen3:4b, default context 8192.
+  * Qwen3 sampling options (top_p 0.8, top_k 20, small non-zero temperature) so the model does not
+    fall into repetition loops ("token repeat limit reached").
+  * _repair_truncated_json rewritten: the old regex could delete valid content. The new version
+    cuts the text back to the last point where the JSON was still well-formed and closes it.
+  * A truncated structured response (finish_reason=length) is logged loudly.
 """
 from __future__ import annotations
 
@@ -43,6 +53,8 @@ if not _root_logger.handlers:
     _root_logger.setLevel(logging.INFO)
     _root_logger.propagate = False
 
+DEFAULT_OLLAMA_MODEL = "qwen3:4b"
+
 
 def cfg(name: str, default: Any = None) -> Any:
     value = getattr(get_settings(), name.lower(), None)
@@ -58,6 +70,13 @@ def cfg_bool(name: str, default: bool) -> bool:
 def cfg_int(name: str, default: int) -> int:
     try:
         return int(cfg(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def cfg_float(name: str, default: float) -> float:
+    try:
+        return float(cfg(name, default))
     except (TypeError, ValueError):
         return default
 
@@ -169,51 +188,58 @@ def _extract_jd_text(user_prompt: str) -> str:
 
 
 def _repair_truncated_json(text: str) -> Optional[Dict[str, Any]]:
-    """Best-effort repair of JSON cut off mid-way by max_tokens."""
+    """
+    Best-effort repair of JSON cut off mid-way by max_tokens.
+
+    Scans the text once, remembering every point where the document was still well-formed
+    (just before a comma, or right after a closing bracket) together with the brackets that
+    were open at that moment. It then tries to close the document at the end of the text first,
+    and otherwise at progressively earlier safe points, so only the dangling tail is lost.
+    """
     start = text.find("{")
     if start == -1:
         return None
-    sub = text[start:].strip()
-    sub = re.sub(r',\s*"[^"]*"?\s*:?\s*"?[^"]*$', "", sub)
-    sub = re.sub(r",\s*$", "", sub)
+    s = text[start:]
 
-    stack: List[str] = []
+    stack: List[str] = []          # closing brackets expected, in the order they were opened
     in_string = False
     escaped = False
-    out: List[str] = []
-    for ch in sub:
-        if escaped:
-            escaped = False
-            out.append(ch)
-            continue
-        if ch == "\\" and in_string:
-            escaped = True
-            out.append(ch)
+    cuts: List[Tuple[int, str]] = []   # (cut index, closers needed at that point)
+
+    for i, ch in enumerate(s):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
             continue
         if ch == '"':
-            in_string = not in_string
-            out.append(ch)
-            continue
-        if in_string:
-            out.append(ch)
-            continue
-        if ch in "{[":
+            in_string = True
+        elif ch in "{[":
             stack.append("}" if ch == "{" else "]")
-        elif ch in "}]" and stack and stack[-1] == ch:
-            stack.pop()
-        out.append(ch)
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+            cuts.append((i + 1, "".join(reversed(stack))))
+        elif ch == ",":
+            cuts.append((i, "".join(reversed(stack))))
 
-    if in_string:
-        out.append('"')
-    while stack:
-        out.append(stack.pop())
-    try:
-        res = json.loads("".join(out), strict=False)
+    candidates: List[Tuple[str, str]] = []
+    tail = ('"' if in_string else "")
+    candidates.append((s + tail, "".join(reversed(stack))))
+    for idx, closers in reversed(cuts[-200:]):
+        candidates.append((s[:idx], closers))
+
+    for body, closers in candidates:
+        try:
+            res = json.loads(body + closers, strict=False)
+        except Exception:  # noqa: BLE001
+            continue
         if isinstance(res, dict):
             logger.warning("Repaired a truncated JSON response (some trailing content was lost).")
             return res
-    except Exception:  # noqa: BLE001
-        pass
     return None
 
 
@@ -251,6 +277,18 @@ _ANSWER_SCHEMA: Dict[str, Any] = {
     "properties": {"answer": {"type": "string", "minLength": 1}},
     "required": ["answer"],
 }
+
+
+def _sampling_options(model: str, temperature: float) -> Dict[str, Any]:
+    """
+    Sampling parameters. Qwen3 degrades into repetition loops under greedy decoding, so a
+    small non-zero temperature plus top_p/top_k is used for it.
+    """
+    opts: Dict[str, Any] = {"temperature": temperature}
+    if "qwen" in model.lower():
+        opts["top_p"] = 0.8
+        opts["top_k"] = 20
+    return opts
 
 
 class _OllamaHTTPError(RuntimeError):
@@ -309,17 +347,18 @@ class OllamaAdapter(ProviderAdapter):
         import httpx
 
         url = f"{self.base_url}/api/chat"
+        options: Dict[str, Any] = {
+            "num_ctx": num_ctx or cfg_int("OLLAMA_NUM_CTX", 8192),
+            "num_predict": max_tokens,
+        }
+        options.update(_sampling_options(model, temperature))
         payload: Dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "options": {
-                "num_ctx": num_ctx or cfg_int("OLLAMA_NUM_CTX", 4096),
-                "num_predict": max_tokens,
-                "temperature": temperature,
-            },
+            "options": options,
             "stream": True,
             "think": False,
             "keep_alive": str(cfg("OLLAMA_KEEP_ALIVE", "30m")),
@@ -328,8 +367,8 @@ class OllamaAdapter(ProviderAdapter):
             payload["format"] = response_format
 
         _log_request(self.name, model, system_prompt, user_prompt)
-        logger.info("Ollama POST %s num_ctx=%s num_predict=%s format=%s", url,
-                    payload["options"]["num_ctx"], max_tokens,
+        logger.info("Ollama POST %s num_ctx=%s num_predict=%s temperature=%s format=%s", url,
+                    options["num_ctx"], max_tokens, temperature,
                     "schema" if isinstance(response_format, dict) else response_format)
 
         timeout = httpx.Timeout(connect=10.0, read=float(cfg_int("OLLAMA_READ_TIMEOUT", 180)), write=30.0, pool=10.0)
@@ -384,11 +423,17 @@ class OllamaAdapter(ProviderAdapter):
 
         text, in_tok, out_tok, finish, latency_ms = self._stream_chat(
             system_prompt=system_prompt, user_prompt=user_prompt, model=model,
-            max_tokens=max_tokens, temperature=0.0, response_format=fmt,
-            num_ctx=num_ctx,
+            max_tokens=max_tokens, temperature=cfg_float("OLLAMA_TEMPERATURE", 0.1),
+            response_format=fmt, num_ctx=num_ctx,
         )
         usage = LLMUsage(input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency_ms, model=model)
         _log_response(self.name, text, usage, finish)
+
+        if finish == "length":
+            logger.error(
+                "Structured output hit max_tokens=%d (out_tokens=%d). Raise max_tokens for this call; "
+                "the result below may be missing trailing fields.", max_tokens, out_tok,
+            )
 
         parsed = _safe_json_extract(text)
         if parsed is None:
@@ -399,7 +444,7 @@ class OllamaAdapter(ProviderAdapter):
     def complete_text(self, system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> str:
         text, in_tok, out_tok, finish, latency_ms = self._stream_chat(
             system_prompt=system_prompt, user_prompt=user_prompt, model=model,
-            max_tokens=max_tokens, temperature=0.1, response_format=None,
+            max_tokens=max_tokens, temperature=0.2, response_format=None,
         )
         _log_response(self.name, text, LLMUsage(in_tok, out_tok, latency_ms, model=model), finish)
         return text
@@ -417,7 +462,7 @@ class OllamaAdapter(ProviderAdapter):
             user_prompt += "\n\n/no_think"  # soft switch honoured by hybrid Qwen3 builds
         text, in_tok, out_tok, finish, latency_ms = self._stream_chat(
             system_prompt=system_prompt, user_prompt=user_prompt, model=model,
-            max_tokens=max_tokens, temperature=0.1, response_format=_ANSWER_SCHEMA,
+            max_tokens=max_tokens, temperature=0.2, response_format=_ANSWER_SCHEMA,
         )
         _log_response(self.name, text, LLMUsage(in_tok, out_tok, latency_ms, model=model), finish)
         parsed = _safe_json_extract(text)  # also repairs a truncated JSON string
@@ -662,15 +707,15 @@ class LLMService:
     def __init__(self, adapter: Optional[ProviderAdapter] = None, model: Optional[str] = None):
         settings = get_settings()
         provider_name = settings.llm_provider
-        default_models = { 
-            "ollama": "qwen2.5:1.5b",
+        default_models = {
+            "ollama": DEFAULT_OLLAMA_MODEL,
             "anthropic": "claude-sonnet-4-6",
             "gemini": "gemini-2.5-flash",
             "mock": "mock-extractor-v1",
         }
         adapters = {"ollama": OllamaAdapter, "anthropic": AnthropicAdapter, "gemini": GeminiAdapter, "mock": MockAdapter}
         self.adapter = adapter or adapters.get(provider_name, OllamaAdapter)()
-        self.model = model or settings.llm_model or default_models.get(provider_name, "qwen2.5:1.5b")
+        self.model = model or settings.llm_model or default_models.get(provider_name, DEFAULT_OLLAMA_MODEL)
         self.provider = provider_name
         # A failed local generation can cost minutes; only retry cheap cloud calls by default.
         self.max_retries = cfg_int("LLM_MAX_RETRIES", 0 if provider_name == "ollama" else 2)
