@@ -67,8 +67,8 @@ _errors: Dict[str, str] = {}       # jd_id -> last failure message (analysis)
 _tasks: Dict[str, Dict[str, Any]] = {}
 TASK_KINDS = ("enrich", "resolve")
 
-# Concurrency slot management for Ollama-backed inference.
-from app.core.concurrency import acquire_ollama_slot
+# One heavy Ollama job at a time (the local model cannot serve them in parallel anyway).
+_ollama_lock = threading.Lock()
 
 
 def _any_llm_job_running() -> bool:
@@ -83,7 +83,8 @@ def _run_processing(jd_id: str, jd_version_id: str) -> None:
 
     db = SessionLocal()
     try:
-        process_job_description_version(db, jd_version_id)
+        with _ollama_lock:
+            process_job_description_version(db, jd_version_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Background analysis failed for jd_id=%s", jd_id)
         with _state_lock:
@@ -112,7 +113,8 @@ def _task_runner(key: str, fn, jd_id: str, *args) -> None:
 
     db = SessionLocal()
     try:
-        fn(db, jd_id, *args)
+        with _ollama_lock:
+            fn(db, jd_id, *args)
         with _state_lock:
             _tasks[key].update(
                 status="done",
@@ -202,7 +204,7 @@ def list_jds(project_id: Optional[str] = None, db: Session = Depends(get_db)):
             db.query(JobSpecificationVersion)
             .join(JobDescriptionVersion)
             .filter(JobDescriptionVersion.job_description_id == jd.id)
-            .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
+            .order_by(JobSpecificationVersion.created_at.desc())
             .first()
         )
         latest_job = (
@@ -478,9 +480,13 @@ def _get_spec_version(jd_id: str, db: Session, version: Optional[int] = None) ->
         db.query(JobSpecificationVersion)
         .join(JobDescriptionVersion)
         .filter(JobDescriptionVersion.job_description_id == jd_id)
-        .order_by(JobSpecificationVersion.created_at.desc())
-        .first()
     )
+    if version is not None:
+        spec = query.filter(JobSpecificationVersion.specification_version == version).first()
+        if not spec:
+            raise HTTPException(404, f"Specification version {version} not found")
+        return spec
+    spec = query.order_by(JobSpecificationVersion.specification_version.desc()).first()
     if not spec:
         raise HTTPException(404, "No specification generated yet")
     return spec
@@ -684,14 +690,7 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
                 status=QuestionStatus.ANSWERED,
             )
         except Exception as exc:
-            if "requirements[id=" in q_key or "job_context." in q_key or "ambiguities[" in q_key:
-                try:
-                    from app.services.clarification.updater import _apply_field_patch
-                    _apply_field_patch(master, q_key, text_str, answered_by, q_key, QuestionStatus.ANSWERED)
-                except Exception as patch_exc:
-                    logger.warning("Could not apply direct patch %s: %s", q_key, patch_exc)
-            else:
-                logger.warning("Could not submit answer for question %s: %s", q_key, exc)
+            logger.warning("Could not submit answer for question %s: %s", q_key, exc)
 
     # Attempt finalization
     try:
@@ -768,216 +767,33 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
     enriched_md = None
     enriched_key = None
 
-    import re
-
-    prior_report: Optional[TAEnrichmentReport] = None
-    if spec_version.enrichment_report_json:
-        try:
-            prior_report = TAEnrichmentReport.model_validate(spec_version.enrichment_report_json)
-        except Exception as exc:
-            logger.warning("Could not parse prior enrichment report: %s", exc)
-
-    # P3: Identify affected requirements to support incremental re-enrichment
-    affected_req_ids: set[str] = set()
-    answered_keys = set(answers.keys())
-
-    # 1. Map answered keys and questions to requirements via field_target or question_key
-    for q_key in answered_keys:
-        match = re.search(r"requirements\[id=([^\]]+)\]", q_key)
-        if match:
-            affected_req_ids.add(match.group(1))
-        for r in reqs:
-            rid = r["requirement_id"]
-            if rid == q_key or rid[:8] in q_key:
-                affected_req_ids.add(rid)
-
-    for q in master.clarification_history:
-        if q.question_key in answered_keys or (q.id and q.id in answered_keys):
-            if q.field_target:
-                match = re.search(r"requirements\[id=([^\]]+)\]", q.field_target)
-                if match:
-                    affected_req_ids.add(match.group(1))
-            for r in reqs:
-                rid = r["requirement_id"]
-                if rid[:8] in q.question_key:
-                    affected_req_ids.add(rid)
-
-    # 2. Map ambiguity resolutions to requirements by matching text and significant tokens
-    for amb in getattr(master, "raw_ambiguities", []) or []:
-        amb_id = getattr(amb, "ambiguity_id", "") or str(getattr(amb, "id", ""))
-        is_amb_answered = any(k == amb_id or amb_id in k or k in amb_id for k in answered_keys)
-        if not is_amb_answered and hasattr(master, "raw_ambiguities"):
-            try:
-                for k in answered_keys:
-                    if k.startswith("amb_") and k[4:].isdigit():
-                        idx = int(k[4:])
-                        if idx < len(master.raw_ambiguities) and master.raw_ambiguities[idx] == amb:
-                            is_amb_answered = True
-                            break
-            except Exception:
-                pass
-
-        if is_amb_answered:
-            for attr in ("requirement_id", "related_requirement_id", "target_id"):
-                val = getattr(amb, attr, None)
-                if val:
-                    affected_req_ids.add(val)
-
-            amb_text = getattr(amb, "text", "") or ""
-            amb_reason = getattr(amb, "reason", "") or ""
-            combined_amb = f"{amb_text} {amb_reason}".lower()
-
-            # Substring matching
-            if amb_text.strip():
-                for r in reqs:
-                    r_text_lower = r["text"].lower()
-                    if amb_text.lower() in r_text_lower or r_text_lower in amb_text.lower():
-                        affected_req_ids.add(r["requirement_id"])
-
-            # Token / keyword overlap (tokens of length >= 4)
-            amb_tokens = set(re.findall(r"\b[a-zA-Z]{4,}\b", combined_amb))
-            if amb_tokens:
-                for r in reqs:
-                    r_tokens = set(re.findall(r"\b[a-zA-Z]{4,}\b", r["text"].lower()))
-                    if amb_tokens & r_tokens:
-                        affected_req_ids.add(r["requirement_id"])
-
-    # 3. Detect any requirements whose priority, text, or flags changed compared to prior spec
-    if spec_version.master_context_json:
-        try:
-            prior_master = JDMasterContext.model_validate(spec_version.master_context_json)
-            prior_by_id = {r.id: r for r in prior_master.requirements if hasattr(r, "id")}
-            curr_by_id = {r.id: r for r in master.requirements if hasattr(r, "id")}
-            for rid, r_curr in curr_by_id.items():
-                if rid not in prior_by_id:
-                    affected_req_ids.add(rid)
-                else:
-                    r_prev = prior_by_id[rid]
-                    if (
-                        getattr(r_curr, "priority", None) != getattr(r_prev, "priority", None)
-                        or getattr(r_curr, "text", None) != getattr(r_prev, "text", None)
-                        or getattr(r_curr, "is_mandatory", None) != getattr(r_prev, "is_mandatory", None)
-                        or getattr(r_curr, "category", None) != getattr(r_prev, "category", None)
-                        or getattr(r_curr, "min_years", None) != getattr(r_prev, "min_years", None)
-                        or getattr(r_curr, "max_years", None) != getattr(r_prev, "max_years", None)
-                    ):
-                        affected_req_ids.add(rid)
-            for rid in prior_by_id:
-                if rid not in curr_by_id:
-                    affected_req_ids.add(rid)
-
-            # 4. Indirect role-level changes (e.g. seniority changes affect experience requirements)
-            if getattr(prior_master.role_overview, "seniority", None) != getattr(master.role_overview, "seniority", None):
-                for r in reqs:
-                    if any(term in r["text"].lower() for term in ("year", "experience", "senior", "lead", "junior")):
-                        affected_req_ids.add(r["requirement_id"])
-        except Exception as exc:
-            logger.warning("Error comparing master contexts for changes: %s", exc)
-
-    # 5. Check if answer text explicitly references any requirement ID
-    for ans_val in answers.values():
-        if isinstance(ans_val, str):
-            for r in reqs:
-                rid = r["requirement_id"]
-                if rid in ans_val or rid[:8] in ans_val:
-                    affected_req_ids.add(rid)
-
-    # Select requirements to enrich
-    if prior_report and prior_report.items:
-        prior_item_ids = {item.requirement_id for item in prior_report.items}
-        reqs_to_enrich = [
-            r for r in reqs
-            if r["requirement_id"] in affected_req_ids or r["requirement_id"] not in prior_item_ids
-        ]
-        is_incremental = True
-    else:
-        reqs_to_enrich = reqs
-        is_incremental = False
-
     enricher = GroundedEnrichmentService()
-
-    enrichment_report = None
-    enriched_md = None
-
-    # Fast path: If incremental and zero requirements were affected (e.g. salary/team size answered)
-    if is_incremental and prior_report and not reqs_to_enrich:
-        enrichment_report = prior_report.model_copy(deep=True)
-        enrichment_report.source_specification_version = next_version
-        enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
-        logger.info("Incremental re-enrichment: 0 technical requirements affected. Reused prior enrichment report in 0ms.")
-    elif reqs_to_enrich and enricher.check_ollama_available():
+    if enricher.check_ollama_available():
         try:
-            incremental_report = enricher.generate_enrichment_report(
-                spec_version_id=str(spec_version.id),
-                specification_version=next_version,
-                source_checksum=spec_version.jd_version.raw_text_checksum if spec_version.jd_version else "unknown",
-                requirements=reqs_to_enrich,
-                clarification_context=clarification_context,
-                role_context=role_context,
-                raw_jd_text=raw_jd,
-            )
-            if is_incremental and prior_report:
-                # Validate completeness: Ensure ALL reqs_to_enrich were actually returned by Ollama
-                newly_enriched_map = {item.requirement_id: item for item in incremental_report.items}
-                missing_req_ids = [
-                    r["requirement_id"] for r in reqs_to_enrich
-                    if r["requirement_id"] not in newly_enriched_map
-                ]
-
-                if missing_req_ids:
-                    # Edge Case 3: Partial results cannot silently replace valid prior results or mark as fully enriched
-                    logger.warning(
-                        "Incremental enrichment incomplete: missing %d affected requirement(s): %s. "
-                        "Rejecting partial report to prevent corruption and not marking new version as enriched.",
-                        len(missing_req_ids),
-                        missing_req_ids,
-                    )
-                    enrichment_report = None
-                    enriched_md = None
-                else:
-                    # Edge Case 1: Untouched items ONLY come from requirements NOT in affected_req_ids
-                    untouched_items_map = {
-                        item.requirement_id: item
-                        for item in prior_report.items
-                        if item.requirement_id not in affected_req_ids
-                    }
-                    untouched_items_map.update(newly_enriched_map)
-
-                    final_items = [
-                        untouched_items_map[r["requirement_id"]]
-                        for r in reqs
-                        if r["requirement_id"] in untouched_items_map
-                    ]
-                    eval_priorities = list(prior_report.evaluation_priorities)
-                    for p in incremental_report.evaluation_priorities:
-                        if p not in eval_priorities:
-                            eval_priorities.append(p)
-
-                    enrichment_report = TAEnrichmentReport(
-                        source_specification_version_id=str(spec_version.id),
-                        source_specification_version=next_version,
-                        source_checksum=spec_version.jd_version.raw_text_checksum if spec_version.jd_version else "unknown",
-                        evaluation_priorities=eval_priorities,
-                        items=final_items,
-                        model_version=getattr(incremental_report, "model_version", "ollama"),
-                    )
-                    enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
-                    logger.info(
-                        "Incremental re-enrichment: Re-enriched %d/%d requirements and merged with prior report.",
-                        len(reqs_to_enrich),
-                        len(reqs),
-                    )
-            else:
-                enrichment_report = incremental_report
+            if reqs:
+                enrichment_report = enricher.generate_enrichment_report(
+                    spec_version_id=str(spec_version.id),
+                    specification_version=next_version,
+                    source_checksum=spec_version.jd_version.raw_text_checksum if spec_version.jd_version else "unknown",
+                    requirements=reqs,
+                    clarification_context=clarification_context,
+                    role_context=role_context,
+                    raw_jd_text=raw_jd,
+                )
                 enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
         except Exception as exc:
-            logger.warning("Ollama refinement failed; falling back: %s", exc)
+            logger.warning("Ollama final refinement failed; falling back to deterministic baseline: %s", exc)
             enrichment_report = None
             enriched_md = None
 
-    # If enriched_md is None:
-    # If any requirement was affected, NEVER carry forward prior_report, because that would contain outdated enrichment.
-    # The new version safely falls back to deterministic baseline specification.
+    # Fallback to existing enrichment report if available and Ollama was unavailable
+    if enriched_md is None and spec_version.enrichment_report_json:
+        try:
+            enrichment_report = TAEnrichmentReport.model_validate(spec_version.enrichment_report_json)
+            enrichment_report.source_specification_version = next_version
+            enriched_md = render_markdown(new_spec, enrichment_report=enrichment_report)
+        except Exception as exc:
+            logger.warning("Could not apply carried-forward enrichment report: %s", exc)
 
     _update_task_progress(task_key, "PERSISTING", f"Saving resolved specification artifacts v{next_version}", 95)
     base_md = render_markdown(new_spec)
@@ -989,7 +805,6 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
     storage.put_text(json_key, json_str, "application/json")
     storage.put_text(md_key, base_md, "text/markdown")
 
-    enriched_key = None
     if enriched_md:
         enriched_key = build_key(project_id, jd_id, next_version, "enriched_markdown")
         storage.put_text(enriched_key, enriched_md, "text/markdown")
@@ -1134,15 +949,12 @@ def _answer(markdown: str, question: str, history: List[ChatTurn], raw_jd: Optio
     if llm.provider == "ollama" and _any_llm_job_running():
         raise HTTPException(503, "A job description is being processed right now. Chat will be available when it finishes.")
     try:
-        with acquire_ollama_slot("chat", timeout=10.0):
-            return llm.chat_with_jd_context(
-                markdown_context=markdown,
-                question=question.strip(),
-                history=[t.model_dump() for t in history],
-                raw_jd=raw_jd,
-            )
-    except TimeoutError:
-        raise HTTPException(503, "Inference slot busy. Please try chatting again shortly.")
+        return llm.chat_with_jd_context(
+            markdown_context=markdown,
+            question=question.strip(),
+            history=[t.model_dump() for t in history],
+            raw_jd=raw_jd,
+        )
     except RuntimeError as exc:
         logger.error("Chat failed: %s", exc)
         raise HTTPException(503, f"The language model is unavailable: {exc}")
@@ -1320,7 +1132,7 @@ def _get_spec_version_row(jd_id: str, db: Session) -> JobSpecificationVersion:
         .join(JobDescriptionVersion, JobSpecificationVersion.job_description_version_id == JobDescriptionVersion.id)
         .join(JobDescription, JobDescriptionVersion.job_description_id == JobDescription.id)
         .filter(JobDescription.id == jd_id)
-        .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
+        .order_by(JobSpecificationVersion.created_at.desc())
         .first()
     )
     if spec_version:
