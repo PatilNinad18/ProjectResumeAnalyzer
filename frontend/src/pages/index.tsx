@@ -32,6 +32,9 @@ import {
   RequirementDiffItem,
   AmbiguityItem,
   JDContextType,
+  getAgents,
+  createAgentApi,
+  deleteAgentApi,
 } from "@/lib/api";
 
 const statusConfig: Record<ProcessingStatus, { label: string; icon: string; className: string }> = {
@@ -176,6 +179,12 @@ export default function Home() {
   // Current active chat messages scoped to selectedAgentId
   const currentChatMessages = chatHistories[selectedAgentId] || [defaultWelcomeMessage];
 
+  // Agent Deletion & Lifecycle State
+  const [agentToDelete, setAgentToDelete] = useState<CreatedAgent | null>(null);
+  const [isDeletingAgent, setIsDeletingAgent] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteSuccessMsg, setDeleteSuccessMsg] = useState<string | null>(null);
+
   // Settings & Regeneration State
   const [selectedSettingAgentId, setSelectedSettingAgentId] = useState<string | null>(null);
   const [editCompany, setEditCompany] = useState<CompanyDetails>({ companyName: "", department: "", projectName: "" });
@@ -201,6 +210,27 @@ export default function Home() {
     };
   }, []);
 
+  // Fetch existing agents from backend on initial mount
+  useEffect(() => {
+    let mounted = true;
+    getAgents()
+      .then((res) => {
+        if (mounted && Array.isArray(res) && res.length > 0) {
+          setAgents((prev) => {
+            const existingIds = new Set(prev.map((a) => a.id));
+            const newOnes = res.filter((a) => !existingIds.has(a.id));
+            return [...prev, ...newOnes];
+          });
+        }
+      })
+      .catch((err) => {
+        console.warn("Could not load agents from backend:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   // Auto-fill edit form when selecting an agent for settings
   useEffect(() => {
     if (selectedSettingAgentId) {
@@ -221,6 +251,23 @@ export default function Home() {
       setSelectedAgentId(agents[0].id);
     }
   }, [selectedAgentId, markdown, agents]);
+
+  // Automatically sync incoming answered questions into clarificationAnswers state
+  useEffect(() => {
+    if (clarificationsData?.questions && clarificationsData.questions.length > 0) {
+      setClarificationAnswers((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const q of clarificationsData.questions) {
+          if (q.answer_text && next[q.question_key] === undefined) {
+            next[q.question_key] = q.answer_text;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+  }, [clarificationsData]);
 
   // Derived Workflow Progress Step (1 to 5)
   const isStep1Done = isCompanySaved || Boolean(companyDetails.companyName.trim());
@@ -313,6 +360,12 @@ export default function Home() {
     setResolveProgress({ percent: 0, stageLabel: "" });
     setComparisonData(null);
     setContextTab("markdown");
+
+    // Clear diff highlights from previous JD so new JD is clean and un-highlighted
+    setMarkdownDiff(null);
+    setShowDiffHighlights(false);
+    setPrevMarkdown(null);
+    setDiffChangedCount(0);
   }
 
   // Handle Grounded TA Evidence Enrichment via Ollama
@@ -449,6 +502,12 @@ export default function Home() {
     setComparisonData(null);
     setAnalysisProgress({ percent: 10, stageLabel: "Uploading Job Description..." });
 
+    // Clear previous JD diff highlights so initial analysis starts pristine
+    setMarkdownDiff(null);
+    setShowDiffHighlights(false);
+    setPrevMarkdown(null);
+    setDiffChangedCount(0);
+
     pollAbortRef.current?.abort();
     const controller = new AbortController();
     pollAbortRef.current = controller;
@@ -514,7 +573,7 @@ export default function Home() {
   }
 
   // Step 5 Create Agent Handler
-  function handleCreateAgent() {
+  async function handleCreateAgent() {
     if (!markdown || !jdId) return;
     const name = agentNameInput.trim() || `${jobTitle || "JD"} Agent`;
     const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -533,13 +592,61 @@ export default function Home() {
       updatedAt: stamp,
     };
 
-    setAgents((prev) => [newAgent, ...prev]);
-    setSelectedAgentId(newAgent.id);
-    setCreatedAgentSuccess(`Agent "${name}" successfully created!`);
+    try {
+      const persisted = await createAgentApi(newAgent);
+      setAgents((prev) => [persisted, ...prev.filter((a) => a.id !== persisted.id)]);
+      setSelectedAgentId(persisted.id);
+      setCreatedAgentSuccess(`Agent "${persisted.agentName}" successfully created!`);
+    } catch (err) {
+      console.warn("Could not persist agent to server, using local agent:", err);
+      setAgents((prev) => [newAgent, ...prev]);
+      setSelectedAgentId(newAgent.id);
+      setCreatedAgentSuccess(`Agent "${name}" successfully created!`);
+    }
+
     setAgentNameInput("");
 
     // Open the Chat tab after the agent has been created.
     setActiveTab("chat");
+  }
+
+  // Delete Agent Handler with state invalidation & cleanup
+  async function handleDeleteAgent(agentId: string, cancelActive: boolean = true) {
+    setIsDeletingAgent(true);
+    setDeleteError(null);
+    try {
+      await deleteAgentApi(agentId, cancelActive);
+
+      // Clean up agent from state
+      setAgents((prev) => {
+        const next = prev.filter((a) => a.id !== agentId);
+        // If deleted agent was selected for settings, re-point or clear
+        if (selectedSettingAgentId === agentId) {
+          setSelectedSettingAgentId(next.length > 0 ? next[0].id : null);
+        }
+        // If deleted agent was active in chat, re-point or fall back to "current"
+        if (selectedAgentId === agentId) {
+          setSelectedAgentId(next.length > 0 ? next[0].id : "current");
+        }
+        return next;
+      });
+
+      // Clean up chat history for deleted agent
+      setChatHistories((prev) => {
+        const next = { ...prev };
+        delete next[agentId];
+        return next;
+      });
+
+      setDeleteSuccessMsg("Agent successfully deleted. Job Description and specifications were preserved.");
+      setTimeout(() => setDeleteSuccessMsg(null), 6000);
+      setAgentToDelete(null);
+    } catch (err: any) {
+      console.error("Failed to delete agent:", err);
+      setDeleteError(err.message || "Failed to delete agent. Please try again.");
+    } finally {
+      setIsDeletingAgent(false);
+    }
   }
 
   // File Upload Handler (.txt, .pdf, .docx)
@@ -2829,133 +2936,214 @@ export default function Home() {
                   <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "16px" }}>
                     {/* 1. First-class Clarification Questions (includes JD technical ambiguities, contextual phrasing, & metadata) */}
                     {clarificationsData.questions && clarificationsData.questions.length > 0 && (
-                      clarificationsData.questions.map((q) => (
-                        <div
-                          key={q.question_key}
-                          style={{
-                            padding: "14px",
-                            background: "#f8fafc",
-                            borderRadius: "8px",
-                            border: "1px solid #e2e8f0",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "6px", gap: "8px" }}>
-                            <span style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", flex: 1 }}>
-                              {q.question_text}
-                            </span>
-                            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-                              <span
-                                style={{
-                                  fontSize: "0.72rem",
-                                  fontWeight: 600,
-                                  padding: "2px 8px",
-                                  borderRadius: "4px",
-                                  background: "#f1f5f9",
-                                  color: "#475569",
-                                  textTransform: "capitalize",
-                                }}
-                              >
-                                {q.category.replace(/_/g, " ")}
-                              </span>
-                              <span
-                                style={{
-                                  fontSize: "0.72rem",
-                                  fontWeight: 600,
-                                  padding: "2px 8px",
-                                  borderRadius: "4px",
-                                  background: q.priority === "BLOCKING" ? "#fee2e2" : "#fef3c7",
-                                  color: q.priority === "BLOCKING" ? "#991b1b" : "#92400e",
-                                }}
-                              >
-                                {q.priority}
-                              </span>
-                            </div>
-                          </div>
+                      clarificationsData.questions.map((q) => {
+                        const currentVal = clarificationAnswers[q.question_key] !== undefined
+                          ? clarificationAnswers[q.question_key]
+                          : (q.answer_text || q.answer || "");
+                        const isResolved = q.status === "ANSWERED" || Boolean(q.answer_text);
+                        const optionsToRender = (q.suggested_options && q.suggested_options.length > 0)
+                          ? q.suggested_options
+                          : (q.category === "TECHNICAL_SCOPE" || q.question_key.includes("amb") || q.question_key.includes("contextual") || q.question_key.includes("priority"))
+                            ? ["MUST HAVE — mandatory", "PREFERRED — nice to have", "INFORMATIONAL — role context only"]
+                            : [];
 
-                          {q.rationale && (
-                            <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
-                              <strong>Context:</strong> {q.rationale}
-                            </div>
-                          )}
-
-                          {/* Quick-select chips if suggested_options are provided */}
-                          {q.suggested_options && q.suggested_options.length > 0 && (
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
-                              {q.suggested_options.map((opt, oIdx) => (
-                                <button
-                                  key={oIdx}
-                                  type="button"
-                                  onClick={() =>
-                                    setClarificationAnswers((prev) => ({
-                                      ...prev,
-                                      [q.question_key]: opt,
-                                    }))
-                                  }
+                        return (
+                          <div
+                            key={q.question_key}
+                            style={{
+                              padding: "14px",
+                              background: isResolved ? "#f8fdf9" : "#f8fafc",
+                              borderRadius: "8px",
+                              border: isResolved ? "1px solid #bbf7d0" : "1px solid #e2e8f0",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "6px", gap: "8px" }}>
+                              <span style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", flex: 1 }}>
+                                {q.question_text}
+                              </span>
+                              <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                                {isResolved && (
+                                  <span
+                                    style={{
+                                      fontSize: "0.72rem",
+                                      fontWeight: 700,
+                                      padding: "2px 8px",
+                                      borderRadius: "4px",
+                                      background: "#dcfce7",
+                                      color: "#166534",
+                                      border: "1px solid #86efac",
+                                    }}
+                                  >
+                                    ✓ RESOLVED
+                                  </span>
+                                )}
+                                <span
                                   style={{
-                                    fontSize: "0.75rem",
-                                    padding: "3px 8px",
-                                    borderRadius: "12px",
-                                    border: clarificationAnswers[q.question_key] === opt ? "1px solid #4f46e5" : "1px solid #cbd5e1",
-                                    background: clarificationAnswers[q.question_key] === opt ? "#e0e7ff" : "#fff",
-                                    color: clarificationAnswers[q.question_key] === opt ? "#4338ca" : "#334155",
-                                    cursor: "pointer",
+                                    fontSize: "0.72rem",
+                                    fontWeight: 600,
+                                    padding: "2px 8px",
+                                    borderRadius: "4px",
+                                    background: "#f1f5f9",
+                                    color: "#475569",
+                                    textTransform: "capitalize",
                                   }}
                                 >
-                                  {opt}
-                                </button>
-                              ))}
+                                  {q.category.replace(/_/g, " ")}
+                                </span>
+                                <span
+                                  style={{
+                                    fontSize: "0.72rem",
+                                    fontWeight: 600,
+                                    padding: "2px 8px",
+                                    borderRadius: "4px",
+                                    background: q.priority === "BLOCKING" ? "#fee2e2" : "#fef3c7",
+                                    color: q.priority === "BLOCKING" ? "#991b1b" : "#92400e",
+                                  }}
+                                >
+                                  {q.priority}
+                                </span>
+                              </div>
                             </div>
-                          )}
 
-                          <input
-                            type="text"
-                            className="input-text"
-                            style={{ width: "100%" }}
-                            placeholder={q.answer || "Enter TA clarification or select an option above..."}
-                            value={clarificationAnswers[q.question_key] || ""}
-                            onChange={(e) =>
-                              setClarificationAnswers((prev) => ({
-                                ...prev,
-                                [q.question_key]: e.target.value,
-                              }))
-                            }
-                          />
-                        </div>
-                      ))
+                            {q.rationale && (
+                              <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
+                                <strong>Context:</strong> {q.rationale}
+                              </div>
+                            )}
+
+                            {/* Quick-select chips if suggested_options are provided */}
+                            {optionsToRender && optionsToRender.length > 0 && (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
+                                {optionsToRender.map((opt, oIdx) => {
+                                  const isSelected = currentVal && (
+                                    currentVal.trim().toLowerCase() === opt.trim().toLowerCase() ||
+                                    (opt.toLowerCase().includes("must have") && currentVal.toLowerCase().includes("must have")) ||
+                                    (opt.toLowerCase().includes("preferred") && currentVal.toLowerCase().includes("preferred")) ||
+                                    (opt.toLowerCase().includes("informational") && currentVal.toLowerCase().includes("informational"))
+                                  );
+
+                                  return (
+                                    <button
+                                      key={oIdx}
+                                      type="button"
+                                      onClick={() =>
+                                        setClarificationAnswers((prev) => ({
+                                          ...prev,
+                                          [q.question_key]: opt,
+                                        }))
+                                      }
+                                      style={{
+                                        fontSize: "0.75rem",
+                                        padding: "3px 8px",
+                                        borderRadius: "12px",
+                                        border: isSelected ? "1px solid #4f46e5" : "1px solid #cbd5e1",
+                                        background: isSelected ? "#e0e7ff" : "#fff",
+                                        color: isSelected ? "#4338ca" : "#334155",
+                                        fontWeight: isSelected ? 700 : 500,
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      {opt}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+
+                            <input
+                              type="text"
+                              className="input-text"
+                              style={{
+                                width: "100%",
+                                background: isResolved ? "#f0fdf4" : "#fff",
+                                borderColor: isResolved ? "#86efac" : "#cbd5e1",
+                              }}
+                              placeholder={isResolved ? `Current answer: ${currentVal}` : (q.answer_text || q.answer || "Enter TA clarification or select an option above...")}
+                              value={currentVal}
+                              onChange={(e) =>
+                                setClarificationAnswers((prev) => ({
+                                  ...prev,
+                                  [q.question_key]: e.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                        );
+                      })
                     )}
 
                     {/* 2. Any additional standalone ambiguities from JD not already covered */}
                     {clarificationsData.ambiguities && clarificationsData.ambiguities.length > 0 && (
                       clarificationsData.ambiguities
                         .filter((a: any) => {
+                          if (a.ta_confirmation_required === false) return false;
+                          if (a.suggested_interpretation && a.suggested_interpretation.includes("TA Resolution:")) return false;
                           const statement = (a.statement || "").trim().toLowerCase();
                           return !(clarificationsData.questions || []).some((q) =>
                             q.question_text.toLowerCase().includes(statement.slice(0, 30))
                           );
                         })
-                        .map((a: any, idx: number) => (
-                          <div key={`amb_${idx}`} style={{ padding: "14px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                            <div style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", marginBottom: "4px" }}>
-                              "{a.statement}"
+                        .map((a: any, idx: number) => {
+                          const ambKey = a.statement ? `statement:${a.statement}` : (a.ambiguity_id || a.id || `amb_${idx}`);
+                          const currentVal = clarificationAnswers[ambKey] || clarificationAnswers[`amb_${idx}`] || "";
+                          const defaultOptions = a.suggested_options && a.suggested_options.length > 0
+                            ? a.suggested_options
+                            : ["MUST HAVE — mandatory", "PREFERRED — nice to have", "INFORMATIONAL — role context only"];
+
+                          return (
+                            <div key={`amb_${idx}`} style={{ padding: "14px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+                              <div style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", marginBottom: "4px" }}>
+                                "{a.statement}"
+                              </div>
+                              <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
+                                <strong>Why ambiguous:</strong> {a.why_ambiguous}
+                              </div>
+
+                              {/* Quick selection chips for options */}
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
+                                {defaultOptions.map((opt: string, oIdx: number) => (
+                                  <button
+                                    key={oIdx}
+                                    type="button"
+                                    onClick={() =>
+                                      setClarificationAnswers((prev) => ({
+                                        ...prev,
+                                        [ambKey]: opt,
+                                        [`amb_${idx}`]: opt,
+                                      }))
+                                    }
+                                    style={{
+                                      fontSize: "0.75rem",
+                                      padding: "3px 8px",
+                                      borderRadius: "12px",
+                                      border: currentVal === opt ? "1px solid #4f46e5" : "1px solid #cbd5e1",
+                                      background: currentVal === opt ? "#e0e7ff" : "#fff",
+                                      color: currentVal === opt ? "#4338ca" : "#334155",
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    {opt}
+                                  </button>
+                                ))}
+                              </div>
+
+                              <input
+                                type="text"
+                                className="input-text"
+                                style={{ width: "100%" }}
+                                placeholder="Provide clarification (e.g. Mandatory, Preferred, or specific range)..."
+                                value={currentVal}
+                                onChange={(e) =>
+                                  setClarificationAnswers((prev) => ({
+                                    ...prev,
+                                    [ambKey]: e.target.value,
+                                    [`amb_${idx}`]: e.target.value,
+                                  }))
+                                }
+                              />
                             </div>
-                            <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
-                              <strong>Why ambiguous:</strong> {a.why_ambiguous}
-                            </div>
-                            <input
-                              type="text"
-                              className="input-text"
-                              style={{ width: "100%" }}
-                              placeholder="Provide clarification (e.g. Mandatory, Preferred, or specific range)..."
-                              value={clarificationAnswers[`amb_${idx}`] || ""}
-                              onChange={(e) =>
-                                setClarificationAnswers((prev) => ({
-                                  ...prev,
-                                  [`amb_${idx}`]: e.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                        ))
+                          );
+                        })
                     )}
                   </div>
 
@@ -3112,6 +3300,12 @@ export default function Home() {
             <div>
               <h2 style={{ marginTop: 0, marginBottom: "20px" }}>Agent Management & Context Regeneration</h2>
 
+              {deleteSuccessMsg && (
+                <div className="alert-success" style={{ marginBottom: "20px" }}>
+                  ✓ {deleteSuccessMsg}
+                </div>
+              )}
+
               {agents.length === 0 ? (
                 <div className="card" style={{ textAlign: "center", padding: "40px" }}>
                   <p style={{ color: "#667085", fontSize: "1rem", margin: "0 0 16px 0" }}>
@@ -3144,7 +3338,7 @@ export default function Home() {
                               {a.companyDetails.companyName} • Updated {a.updatedAt}
                             </p>
                           </div>
-                          <div style={{ marginTop: "12px", display: "flex", gap: "8px" }}>
+                          <div style={{ marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
                             <button
                               className="btn-secondary"
                               style={{ padding: "4px 10px", fontSize: "0.78rem" }}
@@ -3156,8 +3350,32 @@ export default function Home() {
                             >
                               💬 Chat
                             </button>
-                            <button className="btn-secondary" style={{ padding: "4px 10px", fontSize: "0.78rem" }}>
+                            <button
+                              className="btn-secondary"
+                              style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedSettingAgentId(a.id);
+                              }}
+                            >
                               ⚙️ Edit Settings
+                            </button>
+                            <button
+                              className="btn-secondary"
+                              style={{
+                                padding: "4px 10px",
+                                fontSize: "0.78rem",
+                                color: "#b42318",
+                                borderColor: "#fecdca",
+                                backgroundColor: "#fef3f2",
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteError(null);
+                                setAgentToDelete(a);
+                              }}
+                            >
+                              🗑️ Delete
                             </button>
                           </div>
                         </div>
@@ -3231,10 +3449,174 @@ export default function Home() {
                           )}
                         </button>
                       </div>
+
+                      {/* Danger Zone: Delete Agent */}
+                      <div
+                        style={{
+                          marginTop: "32px",
+                          paddingTop: "20px",
+                          borderTop: "1px solid #fee4e2",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          flexWrap: "wrap",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <h4 style={{ margin: "0 0 4px 0", color: "#b42318", fontSize: "0.95rem" }}>Danger Zone: Delete Agent</h4>
+                          <p style={{ margin: 0, fontSize: "0.8rem", color: "#667085" }}>
+                            Remove this agent configuration and active chat sessions. Underlying Job Description specifications are permanently retained.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          style={{
+                            backgroundColor: "#d92d20",
+                            color: "#ffffff",
+                            border: "none",
+                            borderRadius: "6px",
+                            padding: "8px 14px",
+                            fontSize: "0.84rem",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            whiteSpace: "nowrap",
+                          }}
+                          onClick={() => {
+                            const target = agents.find((a) => a.id === selectedSettingAgentId);
+                            if (target) {
+                              setDeleteError(null);
+                              setAgentToDelete(target);
+                            }
+                          }}
+                        >
+                          🗑️ Delete Agent
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
               )}
+            </div>
+          )}
+          {/* Delete Confirmation Modal */}
+          {agentToDelete && (
+            <div
+              style={{
+                position: "fixed",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: "rgba(16, 24, 40, 0.6)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 9999,
+                padding: "20px",
+              }}
+              onClick={() => !isDeletingAgent && setAgentToDelete(null)}
+            >
+              <div
+                className="card"
+                style={{
+                  maxWidth: "500px",
+                  width: "100%",
+                  backgroundColor: "#ffffff",
+                  borderRadius: "12px",
+                  padding: "24px",
+                  boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)",
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px" }}>
+                  <div
+                    style={{
+                      width: "40px",
+                      height: "40px",
+                      borderRadius: "50%",
+                      backgroundColor: "#fee4e2",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: "1.2rem",
+                    }}
+                  >
+                    ⚠️
+                  </div>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: "1.1rem", color: "#101828" }}>Delete Agent Confirmation</h3>
+                    <p style={{ margin: "2px 0 0 0", fontSize: "0.82rem", color: "#667085" }}>
+                      Explicit confirmation required
+                    </p>
+                  </div>
+                </div>
+
+                <p style={{ fontSize: "0.9rem", color: "#344054", lineHeight: 1.5, margin: "0 0 12px 0" }}>
+                  Are you sure you want to delete <strong>{agentToDelete.agentName}</strong> ({agentToDelete.title || "JD Agent"})?
+                </p>
+
+                <div
+                  style={{
+                    backgroundColor: "#f9fafb",
+                    border: "1px solid #eaecf0",
+                    borderRadius: "8px",
+                    padding: "12px",
+                    marginBottom: "16px",
+                    fontSize: "0.82rem",
+                    color: "#475467",
+                  }}
+                >
+                  <div><strong>Agent ID:</strong> {agentToDelete.id}</div>
+                  <div><strong>Job Description ID:</strong> {agentToDelete.jdId}</div>
+                  <div style={{ marginTop: "6px", color: "#027a48", fontWeight: 500 }}>
+                    🛡️ <strong>Data Retention Guarantee:</strong> The underlying job description, specifications, and clarification records will be preserved in the compliance audit trail.
+                  </div>
+                </div>
+
+                {deleteError && (
+                  <div className="alert-error" style={{ marginBottom: "16px", fontSize: "0.85rem" }}>
+                    ⚠️ {deleteError}
+                  </div>
+                )}
+
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={isDeletingAgent}
+                    onClick={() => setAgentToDelete(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    style={{
+                      backgroundColor: "#d92d20",
+                      color: "#ffffff",
+                      border: "none",
+                      borderRadius: "6px",
+                      padding: "8px 16px",
+                      fontSize: "0.9rem",
+                      fontWeight: 600,
+                      cursor: isDeletingAgent ? "not-allowed" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                    disabled={isDeletingAgent}
+                    onClick={() => handleDeleteAgent(agentToDelete.id, true)}
+                  >
+                    {isDeletingAgent ? (
+                      <>
+                        <span className="spinner"></span> Deleting...
+                      </>
+                    ) : (
+                      "Yes, Delete Agent"
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </main>

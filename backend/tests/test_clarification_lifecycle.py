@@ -546,3 +546,46 @@ def test_clarification_answers_reflected_in_markdown():
 
     # 3. Missing Information must be empty since both metadata fields were answered
     assert "**Missing Information**" not in md
+
+
+def test_answering_contextual_ambiguity_moves_to_resolved_in_markdown():
+    """Verify that answering a contextual ambiguity requirement moves it out of unresolved and into Resolved Clarifications (TA Confirmed)."""
+    from app.schemas.master_context import JDMasterContext, StructuredRequirement, RequirementPriority, ProvenanceRecord, OriginType
+    from app.services.projection.canonical_projector import project_to_canonical
+    from app.services.markdown_renderer import render_markdown
+    from app.services.clarification.updater import submit_answer
+
+    master = JDMasterContext(jd_id="test_contextual_amb", raw_jd_text="Sample JD")
+    stmt_text = "interfaces using oscilloscopes and logic analyzers, collaborating with mechanical and"
+    req = StructuredRequirement(
+        id="req_scope_1",
+        text=stmt_text,
+        priority=RequirementPriority.CONTEXTUAL,
+        is_mandatory=False,
+        provenance=ProvenanceRecord(origin_type=OriginType.EXPLICIT_JD),
+    )
+    master.requirements.append(req)
+
+    # 1. Project before answering — must be in unresolved ambiguities
+    spec_before = project_to_canonical(master, jd_id="test_contextual_amb", specification_version=1)
+    md_before = render_markdown(spec_before)
+    assert "**Ambiguities Requiring TA Clarification**" in md_before
+    assert stmt_text in md_before
+    assert "**Resolved Clarifications (TA Confirmed)**" not in md_before
+
+    # 2. Answer via submit_answer with target_statement
+    master = submit_answer(
+        master,
+        question_key="amb_0",
+        answer_text="MUST HAVE — mandatory",
+        answered_by="TA Lead",
+        target_statement=stmt_text,
+    )
+
+    # 3. Project after answering — must be in Resolved Clarifications, and NOT in Ambiguities Requiring TA Clarification
+    spec_after = project_to_canonical(master, jd_id="test_contextual_amb", specification_version=2)
+    md_after = render_markdown(spec_after)
+
+    assert "**Resolved Clarifications (TA Confirmed)**" in md_after
+    assert f'- **"{stmt_text}"** — TA Resolution: MUST HAVE — mandatory' in md_after
+    assert "**Ambiguities Requiring TA Clarification**" not in md_after

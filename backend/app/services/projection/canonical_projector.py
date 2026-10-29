@@ -98,8 +98,21 @@ def project_to_canonical(
         if getattr(r, "raw_statement", None)
     }
 
+    # Build answered questions map from master clarification history up-front
+    answered_q_map = {}
+    answered_by_text = {}
+    for q in master.clarification_history:
+        if q.status == QuestionStatus.ANSWERED and q.answer_text:
+            answered_q_map[q.question_key] = q
+            if q.field_target:
+                answered_q_map[q.field_target] = q
+            q_clean = (q.question_text or "").strip().lower()
+            if q_clean:
+                answered_by_text[q_clean] = q
+
     # --- Flatten requirements ---
     all_reqs = _flatten_requirements(master.requirements)
+    existing_statements = {a["statement"].strip().lower() for a in ambiguities_out if "statement" in a}
     for req in all_reqs:
         # Responsibilities belong exclusively to Section 3 Responsibilities,
         # never duplicated into Section 2 Requirements (Must-Have/Preferred) or Section 4 Evidence.
@@ -113,6 +126,18 @@ def project_to_canonical(
         if is_resp:
             continue
 
+        # Look up matching answered clarification question for this requirement
+        matching_q = (
+            answered_q_map.get(f"requirements[id={req.id}].priority")
+            or answered_q_map.get(f"requirements[id={req.id}]")
+        )
+        if not matching_q:
+            req_l = req.text.lower()
+            for q_text, q_obj in answered_by_text.items():
+                if req_l[:30] in q_text or q_text[:30] in req_l:
+                    matching_q = q_obj
+                    break
+
         # Traceable Origin Invariant — enforced at runtime
         if req.is_mandatory:
             assert req.provenance.origin_type in {OriginType.EXPLICIT_JD, OriginType.TA_CONFIRMED}, (
@@ -122,6 +147,18 @@ def project_to_canonical(
                 f"Only EXPLICIT_JD or TA_CONFIRMED may be mandatory."
             )
             must_haves.append(req.text)
+
+            # If this requirement was confirmed / answered from a clarification, record in ambiguities_out as resolved
+            if matching_q and matching_q.answer_text and req.text.strip().lower() not in existing_statements:
+                ambiguities_out.append({
+                    "id": f"req_amb_{req.id[:8]}",
+                    "ambiguity_id": f"req_amb_{req.id[:8]}",
+                    "statement": req.text,
+                    "why_ambiguous": "Confirmed by TA as mandatory must-have.",
+                    "suggested_interpretation": f"TA Resolution: {matching_q.answer_text}",
+                    "ta_confirmation_required": False,
+                })
+                existing_statements.add(req.text.strip().lower())
 
             # Build evidence spec for every MUST_HAVE
             evidence_specs.append({
@@ -135,6 +172,16 @@ def project_to_canonical(
 
         elif req.priority == RequirementPriority.PREFERRED:
             preferred.append(req.text)
+            if matching_q and matching_q.answer_text and req.text.strip().lower() not in existing_statements:
+                ambiguities_out.append({
+                    "id": f"req_amb_{req.id[:8]}",
+                    "ambiguity_id": f"req_amb_{req.id[:8]}",
+                    "statement": req.text,
+                    "why_ambiguous": "Confirmed by TA as preferred.",
+                    "suggested_interpretation": f"TA Resolution: {matching_q.answer_text}",
+                    "ta_confirmation_required": False,
+                })
+                existing_statements.add(req.text.strip().lower())
             evidence_specs.append({
                 "requirement_id": req.id,
                 "requirement": req.text,
@@ -145,17 +192,26 @@ def project_to_canonical(
 
         elif req.priority in {RequirementPriority.UNRESOLVED, RequirementPriority.INFORMATIONAL, RequirementPriority.CONTEXTUAL}:
             snip = req.text.strip()
-            is_confirmed = getattr(req.provenance, "origin_type", None) == OriginType.TA_CONFIRMED
-            if len(snip) >= 25 and not snip.lower().startswith(("in ", "or ", "and ")) and len(ambiguities_out) < 4:
+            is_confirmed = getattr(req.provenance, "origin_type", None) == OriginType.TA_CONFIRMED or bool(matching_q)
+            res_text = None
+            if matching_q and matching_q.answer_text:
+                res_text = f"TA Resolution: {matching_q.answer_text}"
+            elif is_confirmed:
+                res_text = "TA Resolution: Confirmed as role context / informational."
+
+            if len(snip) >= 25 and not snip.lower().startswith(("in ", "or ", "and ")) and snip.lower() not in existing_statements:
                 ambiguities_out.append({
+                    "id": f"req_amb_{req.id[:8]}",
+                    "ambiguity_id": f"req_amb_{req.id[:8]}",
                     "statement": req.text,
                     "why_ambiguous": (
                         "Priority was UNRESOLVED at time of finalization." if req.priority == RequirementPriority.UNRESOLVED
                         else "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation."
                     ),
-                    "suggested_interpretation": "TA Resolution: Confirmed as role context / informational." if is_confirmed else None,
+                    "suggested_interpretation": res_text,
                     "ta_confirmation_required": not is_confirmed,
                 })
+                existing_statements.add(snip.lower())
             evidence_specs.append({
                 "requirement_id": req.id,
                 "requirement": req.text,
@@ -184,20 +240,9 @@ def project_to_canonical(
                 "explicit_or_derived": "explicit",
             })
 
-    # Build answered questions map from master clarification history
-    answered_q_map = {}
-    for q in master.clarification_history:
-        if q.status == QuestionStatus.ANSWERED and q.answer_text:
-            answered_q_map[q.question_key] = q
-            if q.field_target:
-                answered_q_map[q.field_target] = q
-
     # Include detected ambiguities from raw text if not already present
     raw_ambs = getattr(master, "raw_ambiguities", []) or []
-    existing_statements = {a["statement"].strip().lower() for a in ambiguities_out if "statement" in a}
     for amb in raw_ambs:
-        if len(ambiguities_out) >= 4:
-            break
         amb_text = getattr(amb, "text", "").strip()
         amb_id = getattr(amb, "ambiguity_id", "") or str(getattr(amb, "id", ""))
         if amb_text and amb_text.lower() not in existing_statements and len(amb_text) >= 25:
@@ -206,6 +251,13 @@ def project_to_canonical(
                 or answered_q_map.get(f"jd_ambiguity_{amb_id}")
                 or answered_q_map.get(f"amb_{amb_id}")
             )
+            if not matching_q:
+                amb_l = amb_text.lower()
+                for q_text, q_obj in answered_by_text.items():
+                    if amb_l[:30] in q_text or q_text[:30] in amb_l:
+                        matching_q = q_obj
+                        break
+
             is_resolved = (
                 getattr(amb, "requires_ta_confirmation", True) is False
                 or bool(matching_q)
@@ -223,12 +275,39 @@ def project_to_canonical(
                     sugg_interp = amb.suggested_interpretations[0]
 
             ambiguities_out.append({
+                "id": amb_id or f"raw_amb_{len(ambiguities_out)}",
+                "ambiguity_id": amb_id or f"raw_amb_{len(ambiguities_out)}",
                 "statement": amb_text,
                 "why_ambiguous": getattr(amb, "reason", "Statement requiring TA confirmation."),
                 "suggested_interpretation": sugg_interp,
                 "ta_confirmation_required": not is_resolved,
             })
             existing_statements.add(amb_text.lower())
+
+    # Include any answered clarification questions from clarification_history
+    for q in master.clarification_history:
+        if q.status == QuestionStatus.ANSWERED and q.answer_text:
+            stmt = None
+            q_text = q.question_text or ""
+            if '"' in q_text:
+                parts = q_text.split('"')
+                if len(parts) >= 3 and len(parts[1].strip()) >= 15:
+                    stmt = parts[1].strip()
+            elif "'" in q_text:
+                parts = q_text.split("'")
+                if len(parts) >= 3 and len(parts[1].strip()) >= 15:
+                    stmt = parts[1].strip()
+
+            if stmt and stmt.lower() not in existing_statements:
+                ambiguities_out.append({
+                    "id": q.question_key,
+                    "ambiguity_id": q.question_key,
+                    "statement": stmt,
+                    "why_ambiguous": q.rationale or "Clarification resolved by TA.",
+                    "suggested_interpretation": f"TA Resolution: {q.answer_text}",
+                    "ta_confirmation_required": False,
+                })
+                existing_statements.add(stmt.lower())
 
     # --- Responsibilities ---
     subhead_clean_re = re.compile(
@@ -306,12 +385,16 @@ def project_to_canonical(
     }
 
     # --- Job context ---
+    sal_range = ctx.salary_range
+    if not sal_range and getattr(ctx, "salary_explicitly_unspecified", False):
+        sal_range = "Competitive / market rate"
+
     job_context_out = {
         "company_context": ctx.company_context,
         "business_context": ctx.business_context,
         "environment": ctx.environment,
         "team_size": ctx.team_size,
-        "salary_range": ctx.salary_range,
+        "salary_range": sal_range,
     }
 
     # --- Conventional requirements ---

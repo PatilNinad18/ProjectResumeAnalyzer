@@ -35,10 +35,13 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.db_models import (
+    Agent,
+    AuditEvent,
     JobDescription,
     JobDescriptionVersion,
     JobSpecificationVersion,
     ProcessingJob,
+    gen_uuid,
 )
 from app.services.document_parser import DocumentParseError, parse_document
 from app.services.json_serializer import to_json_dict, to_json_str
@@ -425,6 +428,33 @@ def cancel_analysis(jd_id: str):
     return {"jd_id": jd_id, "status": "not_running", "message": "Analysis not currently running"}
 
 
+class _CancelOpPayload(BaseModel):
+    operation: Optional[str] = "analysis"
+
+
+@router.get("/jds/{jd_id}/progress")
+def get_jd_progress(jd_id: str, operation: str = "analysis"):
+    """Get unified real-time progress for JD operations from ProgressRegistry."""
+    from app.core.progress import progress_registry
+    p = progress_registry.get_progress(jd_id, operation)
+    if not p:
+        return {"stage": "IDLE", "percent": 0, "operation": operation, "jd_id": jd_id, "cancelled": False}
+    return p if isinstance(p, dict) else p.to_dict()
+
+
+@router.post("/jds/{jd_id}/cancel")
+def cancel_jd_operation(jd_id: str, payload: Optional[_CancelOpPayload] = None):
+    """Cancel in-flight JD operation in ProgressRegistry and in-flight tracking."""
+    from app.core.progress import progress_registry
+    op = (payload.operation if payload else None) or "analysis"
+    progress_registry.cancel_progress(jd_id, op)
+    with _state_lock:
+        if jd_id in _inflight:
+            _inflight.pop(jd_id, None)
+            _errors[jd_id] = "Cancelled by user."
+    return {"cancelled": True, "operation": op, "jd_id": jd_id}
+
+
 @router.get("/jds/{jd_id}/tasks/{kind}")
 def get_task_status(jd_id: str, kind: str):
     """Status of a long-running background task: kind = enrich | resolve."""
@@ -674,6 +704,8 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
 
     master = JDMasterContext.model_validate(spec_version.master_context_json)
 
+    canonical_ambs = (spec_version.canonical_json or {}).get("ambiguities", [])
+
     # Apply answers to master context
     for q_key, ans_text in answers.items():
         if not ans_text:
@@ -681,6 +713,18 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
         text_str = str(ans_text).strip()
         if not text_str:
             continue
+
+        matched_statement = None
+        if q_key.startswith("amb_"):
+            try:
+                idx = int(q_key.replace("amb_", ""))
+                if idx < len(canonical_ambs):
+                    matched_statement = canonical_ambs[idx].get("statement")
+            except Exception:
+                pass
+        elif q_key.startswith("statement:"):
+            matched_statement = q_key.replace("statement:", "").strip()
+
         try:
             master = submit_answer(
                 master,
@@ -688,6 +732,7 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
                 answer_text=text_str,
                 answered_by=answered_by,
                 status=QuestionStatus.ANSWERED,
+                target_statement=matched_statement,
             )
         except Exception as exc:
             logger.warning("Could not submit answer for question %s: %s", q_key, exc)
@@ -1362,4 +1407,310 @@ def grounded_chat(
             }
             for a in result.answers
         ],
+    }
+
+# ===========================================================================
+# Agent Management & Lifecycle (CRUD)
+# ===========================================================================
+
+
+class AgentCreateRequest(BaseModel):
+    id: Optional[str] = None
+    name: Optional[str] = None
+    agentName: Optional[str] = None
+    title: Optional[str] = ""
+    company_name: Optional[str] = None
+    department: Optional[str] = None
+    project_name: Optional[str] = None
+    companyDetails: Optional[Dict[str, Any]] = None
+    job_description_id: Optional[str] = None
+    jdId: Optional[str] = None
+    status: Optional[str] = "ACTIVE"
+
+
+class AgentUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    agentName: Optional[str] = None
+    title: Optional[str] = None
+    company_name: Optional[str] = None
+    department: Optional[str] = None
+    project_name: Optional[str] = None
+    companyDetails: Optional[Dict[str, Any]] = None
+    status: Optional[str] = None
+
+
+def _serialize_agent(agent: Agent, db: Session) -> Dict[str, Any]:
+    jd_id = str(agent.job_description_id)
+    md_content = ""
+    json_content: Dict[str, Any] = {}
+    spec_ver = 1
+    jd_text = ""
+
+    try:
+        spec = _latest_spec_version(jd_id, db)
+        if spec:
+            spec_ver = spec.specification_version
+            key = spec.s3_enriched_markdown_key if spec.s3_enriched_markdown_key else spec.s3_markdown_key
+            if key:
+                try:
+                    md_content = storage.get_text(key) or ""
+                except Exception:
+                    md_content = ""
+            if spec.canonical_json:
+                json_content = spec.canonical_json
+    except Exception:
+        pass
+
+    try:
+        latest_jd_v = (
+            db.query(JobDescriptionVersion)
+            .filter(JobDescriptionVersion.job_description_id == jd_id)
+            .order_by(JobDescriptionVersion.version.desc())
+            .first()
+        )
+        if latest_jd_v and latest_jd_v.s3_raw_key:
+            try:
+                jd_text = storage.get_text(latest_jd_v.s3_raw_key) or ""
+            except Exception:
+                jd_text = ""
+    except Exception:
+        pass
+
+    created_str = agent.created_at.isoformat() if agent.created_at else ""
+    updated_str = agent.updated_at.isoformat() if agent.updated_at else created_str
+
+    comp_details = {
+        "companyName": agent.company_name or "",
+        "department": agent.department or "",
+        "projectName": agent.project_name or "",
+    }
+
+    return {
+        "id": agent.id,
+        "name": agent.name,
+        "agentName": agent.name,
+        "title": agent.title or "",
+        "company_name": agent.company_name or "",
+        "department": agent.department or "",
+        "project_name": agent.project_name or "",
+        "companyDetails": comp_details,
+        "job_description_id": jd_id,
+        "jdId": jd_id,
+        "jdText": jd_text,
+        "markdown": md_content,
+        "jsonData": json_content,
+        "specificationVersion": spec_ver,
+        "status": agent.status,
+        "createdAt": created_str,
+        "updatedAt": updated_str,
+        "created_at": created_str,
+        "updated_at": updated_str,
+    }
+
+
+@router.get("/agents", summary="List all created Agents")
+def list_agents(db: Session = Depends(get_db)):
+    """List all created agents with their latest specification version and configuration."""
+    agents = db.query(Agent).order_by(Agent.created_at.desc()).all()
+    return [_serialize_agent(a, db) for a in agents]
+
+
+@router.get("/agents/{agent_id}", summary="Get an Agent by ID")
+def get_agent(agent_id: str, db: Session = Depends(get_db)):
+    """Get single agent details by ID."""
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(404, f"Agent '{agent_id}' not found.")
+    return _serialize_agent(agent, db)
+
+
+@router.post("/agents", summary="Create or register an Agent for a Job Description")
+def create_agent(request: AgentCreateRequest, db: Session = Depends(get_db)):
+    """
+    Create a new agent or register an existing one for a Job Description.
+    Validates that the JD exists and records an AuditEvent.
+    """
+    jd_id = request.job_description_id or request.jdId
+    if not jd_id:
+        raise HTTPException(400, "job_description_id (or jdId) is required.")
+
+    jd = db.query(JobDescription).filter(JobDescription.id == jd_id).first()
+    if not jd:
+        raise HTTPException(404, f"Job description '{jd_id}' not found.")
+
+    agent_name = (request.name or request.agentName or "").strip()
+    if not agent_name:
+        agent_name = f"{request.title or 'JD'} Agent".strip()
+
+    cd = request.companyDetails or {}
+    company_name = request.company_name or cd.get("companyName") or ""
+    department = request.department or cd.get("department") or ""
+    project_name = request.project_name or cd.get("projectName") or ""
+
+    agent_id = request.id or gen_uuid()
+    existing = db.query(Agent).filter(Agent.id == agent_id).first()
+    if existing:
+        existing.name = agent_name
+        existing.title = request.title or existing.title
+        existing.company_name = company_name or existing.company_name
+        existing.department = department or existing.department
+        existing.project_name = project_name or existing.project_name
+        existing.status = request.status or existing.status
+        agent = existing
+        action = "updated"
+    else:
+        agent = Agent(
+            id=agent_id,
+            name=agent_name,
+            title=request.title or "",
+            company_name=company_name,
+            department=department,
+            project_name=project_name,
+            job_description_id=jd_id,
+            status=request.status or "ACTIVE",
+        )
+        db.add(agent)
+        action = "created"
+
+    audit = AuditEvent(
+        entity_type="agent",
+        entity_id=agent.id,
+        action=action,
+        details={
+            "agent_name": agent.name,
+            "job_description_id": str(agent.job_description_id),
+        },
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(agent)
+    return _serialize_agent(agent, db)
+
+
+@router.patch("/agents/{agent_id}", summary="Update Agent metadata")
+def update_agent(agent_id: str, request: AgentUpdateRequest, db: Session = Depends(get_db)):
+    """Update Agent configuration and metadata without altering underlying JD data."""
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(404, f"Agent '{agent_id}' not found.")
+
+    if request.name is not None:
+        agent.name = request.name
+    elif request.agentName is not None:
+        agent.name = request.agentName
+
+    if request.title is not None:
+        agent.title = request.title
+
+    cd = request.companyDetails or {}
+    if request.company_name is not None:
+        agent.company_name = request.company_name
+    elif "companyName" in cd:
+        agent.company_name = cd["companyName"]
+
+    if request.department is not None:
+        agent.department = request.department
+    elif "department" in cd:
+        agent.department = cd["department"]
+
+    if request.project_name is not None:
+        agent.project_name = request.project_name
+    elif "projectName" in cd:
+        agent.project_name = cd["projectName"]
+
+    if request.status is not None:
+        agent.status = request.status
+
+    audit = AuditEvent(
+        entity_type="agent",
+        entity_id=agent.id,
+        action="updated",
+        details={"agent_name": agent.name, "job_description_id": str(agent.job_description_id)},
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(agent)
+    return _serialize_agent(agent, db)
+
+
+@router.delete("/agents/{agent_id}", summary="Delete an Agent while preserving underlying JD records")
+def delete_agent(
+    agent_id: str,
+    cancel_active: bool = False,
+    db: Session = Depends(get_db),
+):
+    """
+    Delete an agent while preserving all underlying JobDescription, JobDescriptionVersion,
+    JobSpecificationVersion, and ClarificationQuestion records according to data-retention rules.
+
+    If an analysis or enrichment task is active for this agent's JD:
+      - Returns 409 Conflict if cancel_active=False.
+      - Safely cancels active tasks and proceeds if cancel_active=True.
+    """
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(404, f"Agent '{agent_id}' not found.")
+
+    jd_id = str(agent.job_description_id)
+    agent_name = agent.name
+
+    with _state_lock:
+        is_analysis_running = jd_id in _inflight
+        running_tasks = [
+            k for k in TASK_KINDS
+            if _tasks.get(f"{k}:{jd_id}", {}).get("status") == "running"
+        ]
+        is_active = is_analysis_running or bool(running_tasks)
+
+    if is_active and not cancel_active:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot delete agent '{agent_name}' ({agent_id}) while operation is active "
+                f"for JD {jd_id} (analysis={is_analysis_running}, tasks={running_tasks}). "
+                f"Cancel active operations first or pass cancel_active=true."
+            ),
+        )
+
+    if is_active and cancel_active:
+        with _state_lock:
+            if is_analysis_running:
+                _inflight.pop(jd_id, None)
+                _errors[jd_id] = "Analysis cancelled due to agent deletion."
+            for task_kind in running_tasks:
+                t = _tasks.get(f"{task_kind}:{jd_id}")
+                if t and t["status"] == "running":
+                    t.update(
+                        status="failed",
+                        error="Task cancelled due to agent deletion.",
+                        finished_at=time.time(),
+                        stage="CANCELLED",
+                        stage_label="Cancelled due to agent deletion",
+                        progress_percent=0,
+                    )
+
+    # Strictly delete only the agent record; JobDescription & JobSpecificationVersion are preserved
+    db.delete(agent)
+
+    audit = AuditEvent(
+        entity_type="agent",
+        entity_id=agent_id,
+        action="deleted",
+        details={
+            "agent_name": agent_name,
+            "job_description_id": jd_id,
+            "cancelled_active_operations": is_active,
+            "job_description_retained": True,
+        },
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "agent_id": agent_id,
+        "status": "deleted",
+        "message": f"Agent '{agent_name}' successfully deleted.",
+        "job_description_retained": True,
+        "job_description_id": jd_id,
+        "cancelled_active_operations": is_active,
     }

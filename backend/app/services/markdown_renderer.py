@@ -118,6 +118,10 @@ def render_markdown(
         md.append(f"- **Team Size:** {jc.team_size}")
     if getattr(jc, "salary_range", None):
         md.append(f"- **Salary Range:** {jc.salary_range}")
+    elif getattr(jc, "salary_explicitly_unspecified", False):
+        md.append("- **Salary Range:** Competitive / market rate (Not specified in JD)")
+    else:
+        md.append("- **Salary Range:** Not specified in the Job Description")
     md.append("")
 
     # ------------------------------------------------------------------ #

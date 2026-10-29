@@ -259,3 +259,21 @@ class ClarificationQuestion(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     spec_version = relationship("JobSpecificationVersion", back_populates="clarification_questions")
+
+
+class Agent(Base):
+    __tablename__ = "agents"
+
+    id = Column(String(64), primary_key=True, default=gen_uuid)
+    name = Column(String, nullable=False)
+    title = Column(String, nullable=True)
+    company_name = Column(String, nullable=True)
+    department = Column(String, nullable=True)
+    project_name = Column(String, nullable=True)
+    job_description_id = Column(UUID_COL, ForeignKey("job_descriptions.id"), nullable=False)
+    status = Column(String, nullable=False, default="ACTIVE")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Preserves JD upon agent deletion (no cascade delete of JobDescription)
+    job_description = relationship("JobDescription")

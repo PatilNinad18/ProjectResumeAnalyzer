@@ -190,6 +190,7 @@ export interface ClarificationQuestionItem {
   field_target: string;
   status: string;
   answer?: string | null;
+  answer_text?: string | null;
   rationale?: string;
   suggested_options?: string[];
 }
@@ -466,4 +467,60 @@ export async function askJDChatbot(
     timeoutMs: 300_000, // safety margin for CPU inference
   };
   return jdId ? request(`/api/jds/${jdId}/chat`, init) : request("/api/chat", init);
+}
+
+
+// ---------------------------------------------------------------------------
+// Agent Management (CRUD)
+// ---------------------------------------------------------------------------
+
+export async function getAgents(signal?: AbortSignal): Promise<CreatedAgent[]> {
+  return request<CreatedAgent[]>("/api/agents", { signal });
+}
+
+export async function getAgent(agentId: string, signal?: AbortSignal): Promise<CreatedAgent> {
+  return request<CreatedAgent>(`/api/agents/${encodeURIComponent(agentId)}`, { signal });
+}
+
+export async function createAgentApi(payload: Partial<CreatedAgent>, signal?: AbortSignal): Promise<CreatedAgent> {
+  return request<CreatedAgent>("/api/agents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export async function updateAgentApi(
+  agentId: string,
+  payload: Partial<CreatedAgent>,
+  signal?: AbortSignal
+): Promise<CreatedAgent> {
+  return request<CreatedAgent>(`/api/agents/${encodeURIComponent(agentId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export async function deleteAgentApi(
+  agentId: string,
+  cancelActive: boolean = false,
+  signal?: AbortSignal
+): Promise<{
+  agent_id: string;
+  status: string;
+  message: string;
+  job_description_retained: boolean;
+}> {
+  return request<{
+    agent_id: string;
+    status: string;
+    message: string;
+    job_description_retained: boolean;
+  }>(`/api/agents/${encodeURIComponent(agentId)}?cancel_active=${cancelActive ? "true" : "false"}`, {
+    method: "DELETE",
+    signal,
+  });
 }
