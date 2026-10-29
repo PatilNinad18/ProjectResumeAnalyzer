@@ -54,6 +54,35 @@ function formatElapsed(ms: number): string {
 
 const isAbort = (e: unknown) => (e as Error)?.name === "AbortError";
 
+// ---------------------------------------------------------------------------
+// Markdown Sentence Diff Utility
+// Splits both versions into sentences/blocks and tags changed ones.
+// ---------------------------------------------------------------------------
+function computeMarkdownDiff(
+  oldMd: string,
+  newMd: string
+): { segments: Array<{ text: string; changed: boolean }>; changedCount: number } {
+  // Tokenize by line (preserves markdown structure: headings, bullets, blank lines)
+  const oldLines = oldMd.split("\n");
+  const newLines = newMd.split("\n");
+
+  // Build a set of old lines for O(1) lookup
+  const oldSet = new Set(oldLines.map((l) => l.trim()));
+
+  const segments: Array<{ text: string; changed: boolean }> = [];
+  let changedCount = 0;
+
+  for (const line of newLines) {
+    const trimmed = line.trim();
+    // A line is "changed" if it's non-empty and didn't exist verbatim in v1
+    const isChanged = trimmed.length > 0 && !oldSet.has(trimmed);
+    if (isChanged) changedCount++;
+    segments.push({ text: line, changed: isChanged });
+  }
+
+  return { segments, changedCount };
+}
+
 export default function Home() {
   // Navigation
   const [activeTab, setActiveTab] = useState<"workflow" | "chat" | "settings">("workflow");
@@ -105,6 +134,13 @@ export default function Home() {
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   const [isResolvingClarifications, setIsResolvingClarifications] = useState<boolean>(false);
   const [resolveSuccessMsg, setResolveSuccessMsg] = useState<string | null>(null);
+
+  // Markdown Diff Highlighting State
+  const [prevMarkdown, setPrevMarkdown] = useState<string | null>(null);
+  const [markdownDiff, setMarkdownDiff] = useState<Array<{ text: string; changed: boolean }> | null>(null);
+  const [showDiffHighlights, setShowDiffHighlights] = useState<boolean>(false);
+  const [diffChangedCount, setDiffChangedCount] = useState<number>(0);
+  const step4Ref = useRef<HTMLDivElement | null>(null);
 
   // Selected File for multi-format upload (.txt, .pdf, .docx)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -334,10 +370,16 @@ export default function Home() {
     setIsResolvingClarifications(true);
     setResolveSuccessMsg(null);
     setResolveError(null);
+    setMarkdownDiff(null);
+    setShowDiffHighlights(false);
     setResolveProgress({ percent: 15, stageLabel: "Queueing ambiguity resolution..." });
     pollAbortRef.current?.abort();
     const controller = new AbortController();
     pollAbortRef.current = controller;
+
+    // Capture the pre-resolution markdown for diffing
+    const snapshotBeforeResolve = markdown;
+
     try {
       await resolveClarifications(jdId, clarificationAnswers);
       await waitForTask(jdId, "resolve", {
@@ -354,6 +396,16 @@ export default function Home() {
         getJson(jdId),
         getClarifications(jdId),
       ]);
+
+      // Compute sentence-level diff between v1 and v2 markdown
+      if (snapshotBeforeResolve && mdRes.markdown && snapshotBeforeResolve !== mdRes.markdown) {
+        const { segments, changedCount } = computeMarkdownDiff(snapshotBeforeResolve, mdRes.markdown);
+        setMarkdownDiff(segments);
+        setDiffChangedCount(changedCount);
+        setShowDiffHighlights(changedCount > 0);
+        setPrevMarkdown(snapshotBeforeResolve);
+      }
+
       setMarkdown(mdRes.markdown);
       setJsonData(jsonRes.json);
       setSpecVersion(mdRes.specification_version);
@@ -361,7 +413,14 @@ export default function Home() {
       setClarificationsData(clarRes);
       setResolveProgress({ percent: 100, stageLabel: "Ambiguities resolved!" });
       setResolveSuccessMsg("✓ Ambiguities resolved! Final specification generated.");
-      // Refresh comparison if comparison tab is active or data exists
+
+      // Switch to Markdown tab and auto-scroll to Step 4
+      setContextTab("markdown");
+      setTimeout(() => {
+        step4Ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 300);
+
+      // Refresh comparison
       fetchComparison(comparisonBaseContext, "resolved", jdId);
     } catch (e) {
       if (isAbort(e)) return;
@@ -2057,7 +2116,7 @@ export default function Home() {
 
               {/* Step 4: View / Download JD Context */}
               {isStep3Done && markdown && (
-                <div className="card">
+                <div className="card" ref={step4Ref}>
                   <div className="preview-header">
                     <div>
                       <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Step 4: Generated JD Context (Specification v{specVersion})</h3>
@@ -2089,6 +2148,29 @@ export default function Home() {
                           ⚡ Context Comparison
                         </button>
                       </div>
+                      {/* Highlight Changes Toggle — only shown when a diff is available */}
+                      {markdownDiff && diffChangedCount > 0 && contextTab === "markdown" && (
+                        <button
+                          type="button"
+                          onClick={() => setShowDiffHighlights(!showDiffHighlights)}
+                          style={{
+                            fontSize: "0.78rem",
+                            padding: "4px 12px",
+                            borderRadius: "20px",
+                            border: `1px solid ${showDiffHighlights ? "#10b981" : "#d1d5db"}`,
+                            background: showDiffHighlights ? "#ecfdf5" : "#f9fafb",
+                            color: showDiffHighlights ? "#065f46" : "#6b7280",
+                            cursor: "pointer",
+                            fontWeight: 600,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "5px",
+                          }}
+                        >
+                          <span>{showDiffHighlights ? "✦" : "○"}</span>
+                          Highlight Changes ({diffChangedCount})
+                        </button>
+                      )}
                       {isEnrichedView ? (
                         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                           <span
@@ -2515,7 +2597,111 @@ export default function Home() {
                   ) : (
                     <div className="code-preview">
                       {contextTab === "markdown" ? (
-                        <ReactMarkdown>{markdown}</ReactMarkdown>
+                        <>
+                          {/* What Changed Banner (shown after ambiguity resolution with diffs) */}
+                          {showDiffHighlights && markdownDiff && diffChangedCount > 0 && (
+                            <div style={{
+                              background: "linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%)",
+                              border: "1px solid #a7f3d0",
+                              borderRadius: "10px",
+                              padding: "14px 18px",
+                              marginBottom: "16px",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "12px",
+                              flexWrap: "wrap",
+                            }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                                <span style={{ fontSize: "1.25rem" }}>✨</span>
+                                <div>
+                                  <div style={{ fontWeight: 700, fontSize: "0.95rem", color: "#065f46" }}>
+                                    Specification v{specVersion} Generated with Your Clarifications
+                                  </div>
+                                  <div style={{ fontSize: "0.82rem", color: "#047857", marginTop: "2px" }}>
+                                    {diffChangedCount} line{diffChangedCount !== 1 ? "s" : ""} updated — highlighted below in green
+                                  </div>
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowDiffHighlights(!showDiffHighlights)}
+                                  style={{
+                                    fontSize: "0.78rem",
+                                    padding: "4px 12px",
+                                    borderRadius: "20px",
+                                    border: "1px solid #10b981",
+                                    background: showDiffHighlights ? "#10b981" : "#fff",
+                                    color: showDiffHighlights ? "#fff" : "#065f46",
+                                    cursor: "pointer",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {showDiffHighlights ? "✦ Highlights ON" : "○ Highlights OFF"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setMarkdownDiff(null)}
+                                  style={{
+                                    fontSize: "0.78rem",
+                                    padding: "4px 10px",
+                                    borderRadius: "20px",
+                                    border: "1px solid #d1d5db",
+                                    background: "#fff",
+                                    color: "#6b7280",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  ✕ Dismiss
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Diff-highlighted markdown or plain markdown */}
+                          {showDiffHighlights && markdownDiff ? (
+                            <div style={{ lineHeight: 1.7 }}>
+                              {markdownDiff.map((seg, idx) => (
+                                <div
+                                  key={idx}
+                                  style={
+                                    seg.changed
+                                      ? {
+                                          background: "rgba(16, 185, 129, 0.10)",
+                                          borderLeft: "3px solid #10b981",
+                                          paddingLeft: "10px",
+                                          marginLeft: "-13px",
+                                          borderRadius: "0 4px 4px 0",
+                                          position: "relative",
+                                        }
+                                      : {}
+                                  }
+                                >
+                                  {seg.changed && (
+                                    <span style={{
+                                      position: "absolute",
+                                      right: "8px",
+                                      top: "2px",
+                                      fontSize: "0.65rem",
+                                      fontWeight: 700,
+                                      color: "#059669",
+                                      background: "#d1fae5",
+                                      padding: "1px 5px",
+                                      borderRadius: "3px",
+                                      letterSpacing: "0.02em",
+                                    }}>
+                                      ✦ UPDATED
+                                    </span>
+                                  )}
+                                  <ReactMarkdown>{seg.text || " "}</ReactMarkdown>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <ReactMarkdown>{markdown}</ReactMarkdown>
+                          )}
+                        </>
                       ) : (
                         <pre style={{ margin: 0, fontFamily: "monospace", color: "#344054" }}>
                           {JSON.stringify(jsonData, null, 2)}

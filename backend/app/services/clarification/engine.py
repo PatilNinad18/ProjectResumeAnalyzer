@@ -79,6 +79,9 @@ def generate_clarification_questions(
     new_questions.extend(_detect_missing_metadata(master, existing_keys))
 
     if new_questions:
+        # Optionally rewrite question_text into conversational phrasing via LLM.
+        # Falls back silently to deterministic text if Ollama is unavailable.
+        new_questions = enrich_questions_conversational(master, new_questions)
         master.clarification_history.extend(new_questions)
         master.lifecycle_status = JDLifecycleStatus.AWAITING_CLARIFICATION
         master.add_audit_entry(
@@ -449,3 +452,113 @@ def _detect_missing_metadata(
             ))
 
     return questions
+
+
+# ---------------------------------------------------------------------------
+# LLM Conversational Question Formulator (Batched Single-Pass)
+# ---------------------------------------------------------------------------
+# Rewrites deterministic question_text into natural, conversational phrasing
+# in a SINGLE batched LLM call. Automatically bypassed during automated unit
+# tests or when Ollama is unavailable.
+
+_BATCH_CONVERSATIONAL_SYSTEM_PROMPT = (
+    "You are an expert Talent Acquisition Consultant and Senior Recruiter. "
+    "Your job is to rewrite a list of technical clarification questions for a hiring manager "
+    "into warm, natural, conversational phrasing (similar to how Claude or GPT-4 asks thoughtful "
+    "follow-up questions). For each question:\n"
+    "- Make it polite, role-aware, and natural\n"
+    "- Explain why the clarification matters for candidate screening\n"
+    "- Never use robotic jargon like 'MUST_HAVE', 'PREFERRED', 'EKG', 'deterministic'\n\n"
+    "Respond with ONLY a JSON object mapping each question key to its conversational text:\n"
+    "{\n"
+    '  "<question_key>": "<conversational question text>"\n'
+    "}\n"
+    "Do not include preamble, markdown fences, or explanation."
+)
+
+
+def enrich_questions_conversational(
+    master: "JDMasterContext",
+    questions: list,
+) -> list:
+    """
+    Rewrites technical clarification questions into conversational phrasing
+    using a single batched LLM inference call.
+    """
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        # Fast path for automated tests: keep deterministic questions
+        return questions
+
+    try:
+        from app.services.llm_service import LLMService
+        import json as _json
+
+        # Target only technical scope and ambiguous items (metadata is already conversational)
+        eligible = [
+            q for q in questions
+            if q.category in {
+                QuestionCategory.TECHNICAL_SCOPE,
+                QuestionCategory.CONTRADICTION,
+                QuestionCategory.ROLE_ALIGNMENT,
+            }
+        ]
+        if not eligible:
+            return questions
+
+        llm = LLMService()
+        if llm.provider != "ollama":
+            return questions
+
+        role_title = (
+            getattr(getattr(master, "role_overview", None), "job_title", None) or
+            getattr(getattr(master, "role_overview", None), "title", None) or
+            "the open position"
+        )
+
+        items_payload = [
+            {
+                "key": q.question_key,
+                "original_text": q.question_text,
+                "context": q.rationale,
+            }
+            for q in eligible[:5]  # Cap at 5 for bounded latency
+        ]
+
+        user_prompt = (
+            f"Role: {role_title}\n\n"
+            f"Rewrite each of the following {len(items_payload)} clarification questions:\n"
+            f"{_json.dumps(items_payload, indent=2)}"
+        )
+
+        result = llm.complete_structured(
+            system_prompt=_BATCH_CONVERSATIONAL_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            max_tokens=600,
+            num_ctx=2048,
+        )
+        raw_text = result.raw_text.strip() if result.raw_text else ""
+        if not raw_text:
+            return questions
+
+        if raw_text.startswith("```"):
+            lines = raw_text.splitlines()
+            raw_text = "\n".join(
+                line for line in lines
+                if not line.strip().startswith("```")
+            ).strip()
+
+        mapping = _json.loads(raw_text)
+        if isinstance(mapping, dict):
+            for q in eligible:
+                rewritten = mapping.get(q.question_key)
+                if rewritten and isinstance(rewritten, str) and len(rewritten.strip()) > 20:
+                    q.question_text = rewritten.strip()
+
+        return questions
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Conversational enrichment layer skipped (Ollama unavailable or error): %s", exc
+        )
+        return questions

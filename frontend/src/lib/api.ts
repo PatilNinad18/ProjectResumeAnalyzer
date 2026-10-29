@@ -463,7 +463,7 @@ export async function askJDChatbot(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
-    timeoutMs: 180_000, // a local model can take a while
+    timeoutMs: 300_000, // safety margin for CPU inference
   };
   return jdId ? request(`/api/jds/${jdId}/chat`, init) : request("/api/chat", init);
 }
