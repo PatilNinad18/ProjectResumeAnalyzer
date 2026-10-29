@@ -138,7 +138,8 @@ export default function Home() {
   const [isResolvingClarifications, setIsResolvingClarifications] = useState<boolean>(false);
   const [resolveSuccessMsg, setResolveSuccessMsg] = useState<string | null>(null);
 
-  // Markdown Diff Highlighting State
+  // Markdown Diff Highlighting State (strictly scoped to specific jdId and specVersion > 1)
+  const [diffJdId, setDiffJdId] = useState<string | null>(null);
   const [prevMarkdown, setPrevMarkdown] = useState<string | null>(null);
   const [markdownDiff, setMarkdownDiff] = useState<Array<{ text: string; changed: boolean }> | null>(null);
   const [showDiffHighlights, setShowDiffHighlights] = useState<boolean>(false);
@@ -276,6 +277,19 @@ export default function Home() {
   const isStep4Done = isStep3Done;
   const isStep5Done = agents.length > 0;
 
+  // Diff highlights are ONLY valid when:
+  // 1) showDiffHighlights is toggled on
+  // 2) markdownDiff exists with positive changed lines
+  // 3) specVersion > 1 (ambiguities were resolved to produce v2+; NEVER on initial v1 analysis)
+  // 4) diff belongs strictly to the currently loaded jdId
+  const isDiffActive = Boolean(
+    showDiffHighlights &&
+    markdownDiff &&
+    diffChangedCount > 0 &&
+    specVersion > 1 &&
+    diffJdId === jdId
+  );
+
   const currentStep = !isStep1Done ? 1 : !isStep2Done ? 2 : status !== "READY" ? 3 : !isStep5Done ? 4 : 5;
 
   // Step 1 Save Handler
@@ -366,6 +380,7 @@ export default function Home() {
     setShowDiffHighlights(false);
     setPrevMarkdown(null);
     setDiffChangedCount(0);
+    setDiffJdId(null);
   }
 
   // Handle Grounded TA Evidence Enrichment via Ollama
@@ -412,6 +427,8 @@ export default function Home() {
       const res = await getMarkdown(jdId, enable);
       setMarkdown(res.markdown);
       setIsEnrichedView(enable && Boolean(res.is_enriched));
+      // Toggling direct baseline/enriched view turns off diff highlights
+      setShowDiffHighlights(false);
     } catch (e) {
       console.error(e);
     }
@@ -450,13 +467,20 @@ export default function Home() {
         getClarifications(jdId),
       ]);
 
-      // Compute sentence-level diff between v1 and v2 markdown
-      if (snapshotBeforeResolve && mdRes.markdown && snapshotBeforeResolve !== mdRes.markdown) {
+      // Compute sentence-level diff between v1 and v2 markdown (only if version > 1 and markdown changed)
+      const newVer = mdRes.specification_version || 2;
+      if (snapshotBeforeResolve && mdRes.markdown && snapshotBeforeResolve !== mdRes.markdown && newVer > 1) {
         const { segments, changedCount } = computeMarkdownDiff(snapshotBeforeResolve, mdRes.markdown);
         setMarkdownDiff(segments);
         setDiffChangedCount(changedCount);
         setShowDiffHighlights(changedCount > 0);
         setPrevMarkdown(snapshotBeforeResolve);
+        setDiffJdId(jdId);
+      } else {
+        setMarkdownDiff(null);
+        setShowDiffHighlights(false);
+        setDiffChangedCount(0);
+        setDiffJdId(null);
       }
 
       setMarkdown(mdRes.markdown);
@@ -507,6 +531,7 @@ export default function Home() {
     setShowDiffHighlights(false);
     setPrevMarkdown(null);
     setDiffChangedCount(0);
+    setDiffJdId(null);
 
     pollAbortRef.current?.abort();
     const controller = new AbortController();
@@ -559,6 +584,11 @@ export default function Home() {
       setSpecVersion(mdRes.specification_version || 1);
       setIsEnrichedView(Boolean(mdRes.is_enriched));
       if (clarRes) setClarificationsData(clarRes);
+      // Guarantee diff highlights are reset on fresh baseline v1 specification
+      setMarkdownDiff(null);
+      setShowDiffHighlights(false);
+      setDiffChangedCount(0);
+      setDiffJdId(null);
 
       // Pre-fetch comparison baseline
       fetchComparison("baseline", "resolved", jd_id);
@@ -2255,8 +2285,8 @@ export default function Home() {
                           ⚡ Context Comparison
                         </button>
                       </div>
-                      {/* Highlight Changes Toggle — only shown when a diff is available */}
-                      {markdownDiff && diffChangedCount > 0 && contextTab === "markdown" && (
+                      {/* Highlight Changes Toggle — only shown when a valid diff is active for this spec version */}
+                      {isDiffActive && contextTab === "markdown" && (
                         <button
                           type="button"
                           onClick={() => setShowDiffHighlights(!showDiffHighlights)}
@@ -2706,7 +2736,7 @@ export default function Home() {
                       {contextTab === "markdown" ? (
                         <>
                           {/* What Changed Banner (shown after ambiguity resolution with diffs) */}
-                          {showDiffHighlights && markdownDiff && diffChangedCount > 0 && (
+                          {isDiffActive && (
                             <div style={{
                               background: "linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%)",
                               border: "1px solid #a7f3d0",
@@ -2767,7 +2797,7 @@ export default function Home() {
                           )}
 
                           {/* Diff-highlighted markdown or plain markdown */}
-                          {showDiffHighlights && markdownDiff ? (
+                          {isDiffActive && markdownDiff ? (
                             <div style={{ lineHeight: 1.7 }}>
                               {markdownDiff.map((seg, idx) => (
                                 <div

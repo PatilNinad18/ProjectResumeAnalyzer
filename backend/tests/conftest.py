@@ -7,3 +7,7 @@ os.environ["DISABLE_SQLALCHEMY_CEXT"] = "1"
 # Route all tests to an isolated test database so tests never pollute the dev database (jd_agent.db)
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_isolated.db")
 os.environ.setdefault("LLM_PROVIDER", "mock")
+
+from app.db import Base, engine
+Base.metadata.create_all(bind=engine)
+
