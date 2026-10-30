@@ -9,6 +9,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import {
+  API_BASE,
   uploadJD,
   analyzeJD,
   cancelAnalysis,
@@ -35,6 +36,15 @@ import {
   getAgents,
   createAgentApi,
   deleteAgentApi,
+  createJDBatch,
+  getJDBatch,
+  listJDBatches,
+  getBatchArtifact,
+  retryBatchTask,
+  cancelBatchTask,
+  refreshBatchTaskArtifacts,
+  BatchTask,
+  JDBatch,
 } from "@/lib/api";
 
 const statusConfig: Record<ProcessingStatus, { label: string; icon: string; className: string }> = {
@@ -151,6 +161,34 @@ export default function Home() {
   // Selected File for multi-format upload (.txt, .pdf, .docx)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
+  // Independent multi-JD batch workflow state.
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchId, setBatchId] = useState<string | null>(null);
+  const [batchTasks, setBatchTasks] = useState<BatchTask[]>([]);
+  const [batchSearch, setBatchSearch] = useState("");
+  const [selectedBatchJdId, setSelectedBatchJdId] = useState<string>("");
+  const [batchMarkdown, setBatchMarkdown] = useState<string | null>(null);
+  const [batchJson, setBatchJson] = useState<Record<string, unknown> | null>(null);
+  const [batchClarifications, setBatchClarifications] = useState<ClarificationsResponse | null>(null);
+  const [batchClarificationAnswers, setBatchClarificationAnswers] = useState<
+    Record<string, Record<string, string>>
+  >({});
+  const [isResolvingBatchClarifications, setIsResolvingBatchClarifications] = useState(false);
+  const [batchClarificationError, setBatchClarificationError] = useState<string | null>(null);
+  const [batchViewTab, setBatchViewTab] = useState<"markdown" | "json">("markdown");
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [isUploadingBatch, setIsUploadingBatch] = useState(false);
+  const selectedBatchTask = batchTasks.find((task) => task.jd_id === selectedBatchJdId) || null;
+  const filteredBatchTasks = useMemo(() => {
+    const query = batchSearch.trim().toLowerCase();
+    return query
+      ? batchTasks.filter((task) => `${task.title} ${task.filename}`.toLowerCase().includes(query))
+      : batchTasks;
+  }, [batchTasks, batchSearch]);
+  const batchHasActiveTasks = batchTasks.some(
+    (task) => task.status === "QUEUED" || task.status === "PROCESSING"
+  );
+
   // Elapsed-time display while a (slow, local) analysis is running
   const [analysisStartedAt, setAnalysisStartedAt] = useState<number | null>(null);
   const [nowTs, setNowTs] = useState<number>(() => Date.now());
@@ -205,6 +243,68 @@ export default function Home() {
     return () => clearInterval(t);
   }, [analysisStartedAt]);
 
+  useEffect(() => {
+    if (!batchId) return;
+    let active = true;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const refreshBatch = async () => {
+      try {
+        const latest: JDBatch = await getJDBatch(batchId);
+        if (!active) return;
+        setBatchTasks(latest.tasks);
+      } catch (e) {
+        if (active) setBatchError((e as Error).message || "Could not refresh batch status.");
+      }
+    };
+    void refreshBatch();
+    if (batchHasActiveTasks) timer = setInterval(() => void refreshBatch(), 1500);
+    return () => {
+      active = false;
+      if (timer) clearInterval(timer);
+    };
+  }, [batchId, batchHasActiveTasks]);
+
+  useEffect(() => {
+    setBatchClarificationError(null);
+    if (!batchId || !selectedBatchTask || selectedBatchTask.status !== "COMPLETED") {
+      setBatchMarkdown(null);
+      setBatchJson(null);
+      setBatchClarifications(null);
+      return;
+    }
+    let active = true;
+    setBatchMarkdown(null);
+    setBatchJson(null);
+    setBatchClarifications(null);
+    Promise.all([
+      getBatchArtifact(batchId, selectedBatchTask.jd_id, "md"),
+      getBatchArtifact(batchId, selectedBatchTask.jd_id, "json"),
+      getClarifications(selectedBatchTask.jd_id),
+    ])
+      .then(([markdownText, jsonText, clarifications]) => {
+        if (!active) return;
+        setBatchMarkdown(markdownText);
+        setBatchJson(JSON.parse(jsonText) as Record<string, unknown>);
+        setBatchClarifications(clarifications);
+        setBatchClarificationAnswers((previous) => {
+          const current = { ...(previous[selectedBatchTask.jd_id] || {}) };
+          for (const question of clarifications.questions) {
+            if (current[question.question_key] === undefined && question.answer_text) {
+              current[question.question_key] = question.answer_text;
+            }
+          }
+          return { ...previous, [selectedBatchTask.jd_id]: current };
+        });
+        setBatchError(null);
+      })
+      .catch((e: unknown) => {
+        if (active) setBatchError((e as Error).message || "Could not load this JD's specification.");
+      });
+    return () => {
+      active = false;
+    };
+  }, [batchId, selectedBatchTask?.jd_id, selectedBatchTask?.status]);
+
   // Stop any polling when the page unmounts
   useEffect(() => {
     return () => {
@@ -228,6 +328,24 @@ export default function Home() {
       })
       .catch((err) => {
         console.warn("Could not load agents from backend:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    listJDBatches()
+      .then((batches) => {
+        const latest = batches[0];
+        if (!mounted || !latest || batchId) return;
+        setBatchId(latest.batch_id);
+        setBatchTasks(latest.tasks);
+        setSelectedBatchJdId(latest.tasks[0]?.jd_id || "");
+      })
+      .catch((err) => {
+        console.warn("Could not restore recent JD batches:", err);
       });
     return () => {
       mounted = false;
@@ -600,6 +718,130 @@ export default function Home() {
       setResolveProgress({ percent: 0, stageLabel: "Resolution failed" });
     } finally {
       setIsResolvingClarifications(false);
+    }
+  }
+
+  function handleBatchFileSelection(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    const invalid = files.find((file) => {
+      const lower = file.name.toLowerCase();
+      return (
+        (!lower.endsWith(".txt") && !lower.endsWith(".pdf") && !lower.endsWith(".docx")) ||
+        file.size > 5 * 1024 * 1024
+      );
+    });
+    if (invalid) {
+      const supported = /\.(txt|pdf|docx)$/i.test(invalid.name);
+      setBatchError(
+        supported
+          ? `${invalid.name}: file is too large (max 5 MB).`
+          : `${invalid.name}: unsupported format. Upload .txt, .pdf, or .docx files.`
+      );
+      setBatchFiles([]);
+      e.target.value = "";
+      return;
+    }
+    setBatchError(null);
+    setBatchFiles(files);
+  }
+
+  async function handleCreateBatch() {
+    if (batchFiles.length === 0 || isUploadingBatch) return;
+    setIsUploadingBatch(true);
+    setBatchError(null);
+    try {
+      const result = await createJDBatch(
+        companyDetails.projectName.trim() || "default-project",
+        batchFiles
+      );
+      setBatchId(result.batch_id);
+      setBatchTasks(result.tasks);
+      setSelectedBatchJdId(result.tasks[0]?.jd_id || "");
+      setBatchFiles([]);
+      setBatchSearch("");
+      setBatchMarkdown(null);
+      setBatchJson(null);
+    } catch (e) {
+      setBatchError((e as Error).message || "Batch upload failed.");
+    } finally {
+      setIsUploadingBatch(false);
+    }
+  }
+
+  async function handleRetryBatchTask(task: BatchTask) {
+    if (!batchId) return;
+    setBatchError(null);
+    try {
+      await retryBatchTask(batchId, task.task_id);
+      const latest = await getJDBatch(batchId);
+      setBatchTasks(latest.tasks);
+    } catch (e) {
+      setBatchError((e as Error).message || "Could not retry this JD.");
+    }
+  }
+
+  async function handleCancelBatchTask(task: BatchTask) {
+    if (!batchId) return;
+    setBatchError(null);
+    try {
+      await cancelBatchTask(batchId, task.task_id);
+      const latest = await getJDBatch(batchId);
+      setBatchTasks(latest.tasks);
+    } catch (e) {
+      setBatchError((e as Error).message || "Could not cancel this JD.");
+    }
+  }
+
+  function setBatchClarificationAnswer(jdId: string, questionKey: string, value: string) {
+    setBatchClarificationAnswers((previous) => ({
+      ...previous,
+      [jdId]: {
+        ...(previous[jdId] || {}),
+        [questionKey]: value,
+      },
+    }));
+  }
+
+  async function handleResolveBatchClarifications() {
+    if (!batchId || !selectedBatchTask || isResolvingBatchClarifications) return;
+    const answers = batchClarificationAnswers[selectedBatchTask.jd_id] || {};
+    const submittedAnswers = Object.fromEntries(
+      Object.entries(answers).filter(([, answer]) => answer.trim().length > 0)
+    );
+    if (Object.keys(submittedAnswers).length === 0) {
+      setBatchClarificationError("Enter or select at least one answer before regenerating this JD.");
+      return;
+    }
+
+    setIsResolvingBatchClarifications(true);
+    setBatchClarificationError(null);
+    try {
+      await resolveClarifications(selectedBatchTask.jd_id, submittedAnswers);
+      await waitForTask(selectedBatchTask.jd_id, "resolve");
+      await refreshBatchTaskArtifacts(batchId, selectedBatchTask.task_id);
+      const [markdownText, jsonText, clarifications, latestBatch] = await Promise.all([
+        getBatchArtifact(batchId, selectedBatchTask.jd_id, "md"),
+        getBatchArtifact(batchId, selectedBatchTask.jd_id, "json"),
+        getClarifications(selectedBatchTask.jd_id),
+        getJDBatch(batchId),
+      ]);
+      if (selectedBatchJdId === selectedBatchTask.jd_id) {
+        setBatchMarkdown(markdownText);
+        setBatchJson(JSON.parse(jsonText) as Record<string, unknown>);
+        setBatchClarifications(clarifications);
+      }
+      setBatchTasks(latestBatch.tasks);
+      setBatchClarificationAnswers((previous) => {
+        const current = { ...(previous[selectedBatchTask.jd_id] || {}) };
+        for (const question of clarifications.questions) {
+          if (question.answer_text) current[question.question_key] = question.answer_text;
+        }
+        return { ...previous, [selectedBatchTask.jd_id]: current };
+      });
+    } catch (e) {
+      setBatchClarificationError((e as Error).message || "Could not resolve this JD's clarifications.");
+    } finally {
+      setIsResolvingBatchClarifications(false);
     }
   }
 
@@ -2185,6 +2427,314 @@ export default function Home() {
                     </button>
                   </div>
                 </form>
+              </div>
+
+              {/* Multi-JD batch workflow, independent from the existing single-JD flow */}
+              <div className="card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "8px" }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Batch Upload & Parallel Analysis</h3>
+                    <p style={{ margin: "6px 0 0", color: "#667085", fontSize: "0.85rem" }}>
+                      Upload multiple PDF, DOCX, or TXT job descriptions. Each JD is processed and saved independently.
+                    </p>
+                  </div>
+                  {batchId && (
+                    <a
+                      className="btn-secondary"
+                      href={`${API_BASE}/api/batches/${batchId}/downloads.zip`}
+                      style={{ textDecoration: "none", whiteSpace: "nowrap" }}
+                    >
+                      ⬇ Download All (ZIP)
+                    </a>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap", marginTop: "16px" }}>
+                  <label className="btn-secondary" style={{ cursor: "pointer", fontSize: "0.84rem" }}>
+                    📁 Choose JD files
+                    <input
+                      type="file"
+                      accept=".pdf,.docx,.txt"
+                      multiple
+                      onChange={handleBatchFileSelection}
+                      style={{ display: "none" }}
+                    />
+                  </label>
+                  <span style={{ fontSize: "0.84rem", color: "#667085" }}>
+                    {batchFiles.length
+                      ? `${batchFiles.length} file${batchFiles.length === 1 ? "" : "s"} selected`
+                      : "Each file may be up to 5 MB"}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={handleCreateBatch}
+                    disabled={batchFiles.length === 0 || isUploadingBatch}
+                  >
+                    {isUploadingBatch ? "Uploading..." : `Queue ${batchFiles.length || ""} JD${batchFiles.length === 1 ? "" : "s"}`}
+                  </button>
+                </div>
+
+                {batchFiles.length > 0 && (
+                  <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginTop: "10px" }}>
+                    {batchFiles.map((file) => (
+                      <span key={`${file.name}:${file.lastModified}`} className="status-pill status-uploaded">
+                        {file.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {batchError && (
+                  <div className="alert-error" style={{ marginTop: "12px" }}>
+                    {batchError}
+                  </div>
+                )}
+
+                {batchId && (
+                  <div style={{ marginTop: "20px", borderTop: "1px solid #eaecf0", paddingTop: "16px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" }}>
+                      <div>
+                        <strong>Batch progress</strong>
+                        <span style={{ marginLeft: "8px", color: "#667085", fontSize: "0.82rem" }}>
+                          {batchTasks.filter((task) => task.status === "COMPLETED").length} / {batchTasks.length} completed
+                        </span>
+                      </div>
+                      <span style={{ fontSize: "0.82rem", color: "#667085" }}>
+                        {Math.round(
+                          batchTasks.reduce((sum, task) => sum + task.progress_percent, 0) /
+                            Math.max(1, batchTasks.length)
+                        )}%
+                      </span>
+                    </div>
+                    <div className="progress-track" style={{ marginTop: "8px" }}>
+                      <div
+                        className="progress-fill"
+                        style={{
+                          width: `${Math.min(100, Math.round(
+                            batchTasks.reduce((sum, task) => sum + task.progress_percent, 0) /
+                              Math.max(1, batchTasks.length)
+                          ))}%`,
+                        }}
+                      />
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1fr) minmax(240px, 2fr)", gap: "10px", marginTop: "16px" }}>
+                      <input
+                        type="search"
+                        className="input-text"
+                        value={batchSearch}
+                        onChange={(e) => setBatchSearch(e.target.value)}
+                        placeholder="Search uploaded JDs..."
+                        aria-label="Search uploaded JDs"
+                      />
+                      <select
+                        className="input-text"
+                        value={selectedBatchJdId}
+                        onChange={(e) => setSelectedBatchJdId(e.target.value)}
+                        aria-label="Select a batch job description"
+                      >
+                        {filteredBatchTasks.length === 0 ? (
+                          <option value="">No matching JDs</option>
+                        ) : (
+                          filteredBatchTasks.map((task) => (
+                            <option key={task.jd_id} value={task.jd_id}>
+                              {task.title} — {task.status}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </div>
+
+                    <div style={{ display: "grid", gap: "10px", marginTop: "12px" }}>
+                      {batchTasks.map((task) => {
+                        const active = task.status === "QUEUED" || task.status === "PROCESSING";
+                        const badgeColor =
+                          task.status === "COMPLETED" ? "#027a48" :
+                          task.status === "FAILED" ? "#b42318" :
+                          task.status === "CANCELLED" ? "#667085" :
+                          task.status === "PROCESSING" ? "#6941c6" : "#475467";
+                        const statusLabel =
+                          task.status === "QUEUED" ? "Queued" :
+                          task.status === "PROCESSING" ? "Processing" :
+                          task.status === "COMPLETED" ? "Completed" :
+                          task.status === "CANCELLED" ? "Cancelled" : "Failed";
+                        return (
+                          <div key={task.task_id} style={{ border: "1px solid #eaecf0", borderRadius: "10px", padding: "12px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+                              <div style={{ minWidth: 0 }}>
+                                <strong>{task.title}</strong>
+                                <div style={{ fontSize: "0.78rem", color: "#667085", marginTop: "2px" }}>{task.filename}</div>
+                              </div>
+                              <span style={{ color: badgeColor, fontWeight: 700, fontSize: "0.8rem", whiteSpace: "nowrap" }}>
+                                {statusLabel}
+                              </span>
+                            </div>
+                            <div className="progress-track" style={{ marginTop: "9px" }}>
+                              <div className="progress-fill" style={{ width: `${task.progress_percent}%` }} />
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginTop: "6px" }}>
+                              <span style={{ fontSize: "0.78rem", color: "#667085" }}>
+                                {task.stage_label} · {task.progress_percent}%
+                              </span>
+                              <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                                {active && (
+                                  <button type="button" className="btn-cancel" onClick={() => handleCancelBatchTask(task)}>
+                                    Cancel
+                                  </button>
+                                )}
+                                {(task.status === "FAILED" || task.status === "CANCELLED") && (
+                                  <button type="button" className="btn-retry" onClick={() => handleRetryBatchTask(task)}>
+                                    Retry
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            {task.error_message && (
+                              <div style={{ color: "#b42318", fontSize: "0.8rem", marginTop: "6px" }}>{task.error_message}</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {selectedBatchTask?.status === "COMPLETED" && (
+                      <div style={{ marginTop: "18px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                          <div className="sub-tabs">
+                            <button
+                              className={`sub-tab-btn ${batchViewTab === "markdown" ? "active" : ""}`}
+                              onClick={() => setBatchViewTab("markdown")}
+                            >
+                              Markdown
+                            </button>
+                            <button
+                              className={`sub-tab-btn ${batchViewTab === "json" ? "active" : ""}`}
+                              onClick={() => setBatchViewTab("json")}
+                            >
+                              JSON
+                            </button>
+                          </div>
+                          <div style={{ display: "flex", gap: "8px" }}>
+                            <a
+                              className="btn-secondary"
+                              href={`${API_BASE}/api/batches/${batchId}/jds/${selectedBatchTask.jd_id}/downloads/md`}
+                              download="job_specification.md"
+                              style={{ textDecoration: "none" }}
+                            >
+                              Download MD
+                            </a>
+                            <a
+                              className="btn-secondary"
+                              href={`${API_BASE}/api/batches/${batchId}/jds/${selectedBatchTask.jd_id}/downloads/json`}
+                              download="job_specification.json"
+                              style={{ textDecoration: "none" }}
+                            >
+                              Download JSON
+                            </a>
+                          </div>
+                        </div>
+                        <div style={{ marginTop: "12px", padding: "18px", background: "#fcfcfd", border: "1px solid #eaecf0", borderRadius: "10px", maxHeight: "520px", overflow: "auto" }}>
+                          {batchViewTab === "markdown" ? (
+                            batchMarkdown === null
+                              ? <span style={{ color: "#667085" }}>Loading this JD's Markdown specification...</span>
+                              : <ReactMarkdown>{batchMarkdown}</ReactMarkdown>
+                          ) : (
+                            batchJson === null
+                              ? <span style={{ color: "#667085" }}>Loading this JD's JSON specification...</span>
+                              : <pre style={{ margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: "0.82rem" }}>
+                                  {JSON.stringify(batchJson, null, 2)}
+                                </pre>
+                          )}
+                        </div>
+                        <section
+                          aria-label="Clarification questions for selected JD"
+                          style={{ marginTop: "16px", padding: "16px", border: "1px solid #eaecf0", borderRadius: "10px" }}
+                        >
+                          <h4 style={{ margin: "0 0 10px" }}>TA clarification</h4>
+                          {batchClarifications === null ? (
+                            <span style={{ color: "#667085" }}>Loading clarification questions...</span>
+                          ) : batchClarifications.questions.length === 0 ? (
+                            <div style={{ color: "#027a48" }}>No clarification required. This JD is ready for automatic finalization.</div>
+                          ) : (
+                            <>
+                              <div style={{ display: "grid", gap: "12px" }}>
+                                {batchClarifications.questions.map((question) => {
+                                  const answer =
+                                    batchClarificationAnswers[selectedBatchTask.jd_id]?.[question.question_key] ??
+                                    question.answer_text ??
+                                    "";
+                                  return (
+                                    <div key={question.question_key} style={{ padding: "12px", background: "#fff", border: "1px solid #eaecf0", borderRadius: "8px" }}>
+                                      <div style={{ color: "#667085", fontSize: "0.78rem" }}>
+                                        {question.category} · {question.priority} · {question.status}
+                                      </div>
+                                      <strong style={{ display: "block", marginTop: "5px" }}>{question.question_text}</strong>
+                                      {question.rationale && (
+                                        <details style={{ marginTop: "8px", color: "#475467", fontSize: "0.84rem" }}>
+                                          <summary>Source text and reason</summary>
+                                          <p style={{ whiteSpace: "pre-wrap" }}>{question.rationale}</p>
+                                        </details>
+                                      )}
+                                      {question.structured_options && question.structured_options.length > 0 && (
+                                        <select
+                                          className="input-text"
+                                          style={{ marginTop: "8px" }}
+                                          value={answer}
+                                          onChange={(event) =>
+                                            setBatchClarificationAnswer(
+                                              selectedBatchTask.jd_id,
+                                              question.question_key,
+                                              event.target.value
+                                            )
+                                          }
+                                          aria-label={`Answer: ${question.question_text}`}
+                                        >
+                                          <option value="">Select an answer</option>
+                                          {question.structured_options.map((option) => (
+                                            <option key={option.label} value={option.label}>
+                                              {option.label} — {option.description}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      )}
+                                      <input
+                                        className="input-text"
+                                        style={{ marginTop: "8px" }}
+                                        value={answer}
+                                        onChange={(event) =>
+                                          setBatchClarificationAnswer(
+                                            selectedBatchTask.jd_id,
+                                            question.question_key,
+                                            event.target.value
+                                          )
+                                        }
+                                        placeholder="Enter a custom answer"
+                                        aria-label={`Custom answer: ${question.question_text}`}
+                                      />
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              {batchClarificationError && (
+                                <div className="alert-error" style={{ marginTop: "10px" }}>{batchClarificationError}</div>
+                              )}
+                              <button
+                                type="button"
+                                className="btn-primary"
+                                style={{ marginTop: "12px" }}
+                                onClick={handleResolveBatchClarifications}
+                                disabled={isResolvingBatchClarifications}
+                              >
+                                {isResolvingBatchClarifications ? "Regenerating specification..." : "Save answers and regenerate this JD"}
+                              </button>
+                            </>
+                          )}
+                        </section>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Step 2 & 3: Enter / Upload JD & Analyse */}

@@ -1,47 +1,271 @@
-"""
-clarification/engine.py — Deterministic Clarification Question Generator.
+﻿"""
+clarification/engine.py — Evidence-grounded clarification question generator.
 
-Implements the 3-Tier Question Classification Policy from Problem 2 (B):
-  - Tier 1 (BLOCKING):     Contradictions, unresolvable core scope conflicts.
-  - Tier 2 (RECOMMENDED):  Technical scope gaps (non-blocking; has fallback).
-  - Tier 3 (OPTIONAL):     Metadata (team size, salary) — quick intake chips.
+A question is generated only after the existing LLM service verifies that a
+specific JD statement has materially different, unresolved interpretations
+that affect candidate screening.
 
-Design Invariants:
-  1. Zero LLM calls. All question generation is purely deterministic rule-based.
-  2. Idempotent: questions are keyed by question_key. Calling generate() twice
-     on the same master context produces the same set of question_keys (no duplicates).
-  3. Questions are merged into master.clarification_history (existing answers preserved).
-  4. OPTIONAL questions (team_size, salary) are NEVER is_blocking=True.
+Never questioned: company/culture text, career-profile / recruiting
+instructions, legal disclaimers, scam notices, generic team descriptions,
+responsibilities, optional metadata (team size, salary, hybrid cadence), or
+low EKG confidence on its own.
+
+Every question uses one standard layout:
+    short_topic    -> Topic
+    rationale      -> "Topic / Original JD Statement / Issue Identified /
+                       Reason for Clarification"
+    question_text  -> one concise professional question (no intro)
+    options        -> only options that fit the actual ambiguity
+
+Lifecycle: zero open questions -> READY_FOR_REVIEW ("Analysis completed —
+no clarification required."); the caller should then run spec generation.
+
+Regeneration reconciles persisted history: obsolete / invalid generated
+questions are removed (audit entry written), legitimate TA answers kept.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
-from typing import List, Optional
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import List, Optional, Sequence, Tuple
 
 from app.schemas.master_context import (
     ClarificationOptionSchema,
     ClarificationQuestionSchema,
     ConfidenceBand,
-    InterpretationStatus,
     JDMasterContext,
     JDLifecycleStatus,
-    LogicOperator,
-    OriginType,
     QuestionCategory,
     QuestionPriority,
     QuestionStatus,
     RequirementPriority,
     StructuredRequirement,
-    DisjunctionGroup,
 )
 
 logger = logging.getLogger("jd_agent.clarification.engine")
+
+MAX_QUESTIONS = 5
+Option = Tuple[str, str]  # (label, description)
+
+
+@dataclass(frozen=True)
+class AmbiguityCandidate:
+    key: str
+    category: QuestionCategory
+    kind: str
+    source_statements: Tuple[str, ...]
+    requirement_id: Optional[str]
+    field_target: str
+    reason: str
+    blocking: bool = False
+    related_requirement_ids: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SourceContext:
+    statements: Tuple[str, ...]
+    paragraph: str
+    heading: str
+
+# ---------------------------------------------------------------------------
+# Boilerplate / non-screening text filter
+# ---------------------------------------------------------------------------
+
+_BOILERPLATE_PATTERNS = re.compile(
+    r"""
+    equal\s+opportunit | affirmative\s+action | background\s+check |
+    reasonable\s+accommodation | \bdiversity\b | \binclusi(ve|on)\b |
+    our\s+(culture|mission|values|vision|people|purpose) |
+    about\s+(us|the\s+company|the\s+team) |
+    how\s+we\s+work | when\s+you\s+join | you\s+become\s+one |
+    global\s+team | team\s+of\s+(scientists|clinicians|professionals) |
+    diverse\s+(ideas|perspectives|backgrounds|team) |
+    each\s+individual | believe\s+in |
+    we\s+(are|offer|value|believe|strive|provide|celebrate) |
+    career\s+(growth|site|page|profile) | careers\s+(site|page) |
+    \bscam\b | \bfraud(ulent)?\b | legitimate | recruiter |
+    verify\s+(by|the|that) | employment\s+offer | offer\s+of\s+employment |
+    disclaimer | privacy\s+policy | data\s+protection | terms\s+(of|and) |
+    by\s+(applying|submitting) | talent\s+(community|network) |
+    apply\s+(now|online|here) | send\s+(your\s+)?(resume|cv) |
+    click\s+(to|here) | learn\s+more | \bjoin\s+(us|our\s+team)\b |
+    \bbenefits?\s+(include|package|offered)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_VAGUE_SCOPE = re.compile(
+    r"\b(strong|deep|extensive|proficient|expert(?:ise)?|familiarity|relevant|"
+    r"related|appropriate|industry[- ]standard|etc\.?|and/or)\b",
+    re.IGNORECASE,
+)
+_TECHNICAL_SCOPE = re.compile(
+    r"\b(technical|technology|technologies|tool(?:s|chain)?|frameworks?|platforms?|"
+    r"protocols?|simulators?|languages?|systems?|architecture|development|"
+    r"experience|knowledge|skill(?:s)?)\b",
+    re.IGNORECASE,
+)
+_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "have",
+    "in", "is", "it", "of", "on", "or", "that", "the", "their", "this", "to",
+    "with", "work", "years", "year", "experience", "knowledge", "required",
+    "preferred", "mandatory", "must", "should", "candidate", "candidates",
+}
+
+_SEGMENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _is_boilerplate(text: str) -> bool:
+    """True if the statement is company / legal / recruiting boilerplate."""
+    return bool(text) and bool(_BOILERPLATE_PATTERNS.search(text))
+
+
+def _segments(text: str) -> List[str]:
+    return [s.strip() for s in _SEGMENT_SPLIT.split(text or "") if s and s.strip()]
+
+
+def _strip_boilerplate(text: str) -> str:
+    return "\n".join(s for s in _segments(text) if not _is_boilerplate(s))
+
+
+def _find_statement(text: str, phrase: str) -> str:
+    low = phrase.lower()
+    for seg in _segments(text):
+        if low in seg.lower():
+            return seg
+    return phrase
+
+
+def _clip(text: str, n: int = 240) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _is_screening_requirement(req: StructuredRequirement) -> bool:
+    text = (getattr(req, "text", "") or "").strip()
+    return bool(text) and not _is_boilerplate(text) and len(text.split()) <= 60
+
+
+def _req_priority_is_explicit(req: "StructuredRequirement") -> bool:
+    return req.priority in {
+        RequirementPriority.MUST_HAVE,
+        RequirementPriority.MANDATORY,
+        RequirementPriority.PREFERRED,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Standard question builder
+# ---------------------------------------------------------------------------
+
+def _build_question(
+    *,
+    key: str,
+    category: QuestionCategory,
+    topic: str,
+    jd_statement: str,
+    issue: str,
+    reason: str,
+    question: str,
+    options: Sequence[Option],
+    field_target: str,
+    priority: QuestionPriority = QuestionPriority.RECOMMENDED,
+    is_blocking: bool = False,
+) -> ClarificationQuestionSchema:
+    rationale = (
+        f"Topic: {topic}\n"
+        f"Original JD Statement: \"{_clip(jd_statement)}\"\n"
+        f"Issue Identified: {issue}\n"
+        f"Reason for Clarification: {reason}"
+    )
+    return ClarificationQuestionSchema(
+        question_key=key,
+        category=category,
+        priority=priority,
+        is_blocking=is_blocking,
+        field_target=field_target,
+        short_topic=topic,
+        question_text=question,
+        rationale=rationale,
+        structured_options=[
+            ClarificationOptionSchema(label=l, description=d) for l, d in options
+        ],
+        suggested_options=[f"{l} — {d}" for l, d in options],
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def _is_open(q: ClarificationQuestionSchema) -> bool:
+    if q.status in {QuestionStatus.ANSWERED, QuestionStatus.EXPLICITLY_UNSPECIFIED}:
+        return False
+    return getattr(q, "override_record", None) is None
+
+
+def _is_resolved(q: ClarificationQuestionSchema) -> bool:
+    return not _is_open(q)
+
+
+def _looks_legacy_or_invalid(q: ClarificationQuestionSchema) -> bool:
+    """Persisted questions generated by the old contextual/raw-ambiguity paths."""
+    blob = f"{q.question_text or ''}\n{q.rationale or ''}"
+    low = blob.lower()
+    if "contextual / informational" in low or "informational phrasing" in low:
+        return True
+    key = (q.question_key or "").lower()
+    if key.startswith(("contextual", "raw_ambig", "raw_")):
+        return True
+    return _is_boilerplate(q.question_text or "")
+
+
+def _prune_obsolete_questions(
+    master: JDMasterContext,
+    valid_keys: set,
+    actor: Optional[str],
+) -> int:
+    """
+    Remove obsolete / invalid generated questions from active history.
+      - Unanswered question no longer produced by the engine  -> removed.
+      - Answered question that is legacy/boilerplate          -> removed from
+        active history, but its key/status/answer go to the audit log.
+      - Any other answered/overridden question                -> preserved.
+    """
+    kept: List[ClarificationQuestionSchema] = []
+    removed_keys: List[str] = []
+    archived_answers: List[dict] = []
+
+    for q in master.clarification_history:
+        if q.question_key in valid_keys:
+            kept.append(q)
+        elif _is_resolved(q) and not _looks_legacy_or_invalid(q):
+            kept.append(q)  # legitimate TA answer, keep
+        else:
+            removed_keys.append(q.question_key)
+            if _is_resolved(q):
+                archived_answers.append({
+                    "question_key": q.question_key,
+                    "status": str(q.status),
+                    "answer": getattr(q, "answer", None) or getattr(q, "answer_text", None),
+                })
+
+    if removed_keys:
+        master.clarification_history = kept
+        master.add_audit_entry(
+            "clarification_obsolete_removed",
+            f"Removed {len(removed_keys)} obsolete/invalid clarification question(s) on regeneration.",
+            actor=actor,
+            removed_keys=removed_keys,
+            archived_answers=archived_answers,
+        )
+        logger.info("Pruned obsolete clarification questions: %s", removed_keys)
+    return len(removed_keys)
+
 
 def generate_clarification_questions(
     master: JDMasterContext,
@@ -49,49 +273,68 @@ def generate_clarification_questions(
     actor: Optional[str] = None,
 ) -> JDMasterContext:
     """
-    Evaluate the master context and generate clarification questions.
-    Merges new questions into master.clarification_history (idempotent by question_key).
-    Updates lifecycle_status to AWAITING_CLARIFICATION if any questions were generated,
-    or READY_FOR_REVIEW if none.
-
-    Returns the mutated master context.
+    Propose source-grounded candidates, semantically verify each using the
+    configured LLM service, reconcile persisted questions, then set lifecycle.
     """
+    proposals: List[AmbiguityCandidate] = []
+    for detector in (
+        _detect_contradictions,
+        _detect_unresolved_mandatory,
+        _detect_conversational_ambiguities,
+        _detect_low_confidence_requirements,
+        _detect_uninterpreted_responsibilities,
+        _detect_contextual_ambiguities,
+        _detect_raw_ambiguities,
+        _detect_missing_metadata,
+    ):
+        proposals.extend(detector(master, set()))
+
+    seen: set = set()
+    unique: List[AmbiguityCandidate] = []
+    for candidate in proposals:
+        if candidate.key not in seen:
+            seen.add(candidate.key)
+            unique.append(candidate)
+
+    raw_jd = _original_jd_text(master)
+    persisted_by_key = {
+        question.question_key: question
+        for question in master.clarification_history
+    }
+    verified_questions: List[ClarificationQuestionSchema] = []
+    for candidate in unique[:MAX_QUESTIONS]:
+        persisted = persisted_by_key.get(candidate.key)
+        if persisted is not None:
+            verified_questions.append(persisted)
+            continue
+        context = _source_context(raw_jd, candidate.source_statements)
+        if context is None:
+            logger.warning(
+                "Skipping clarification candidate without verifiable original-JD evidence: %s",
+                candidate.key,
+            )
+            continue
+        verification = _verify_ambiguity_candidate(master, candidate, context)
+        if verification is None:
+            continue
+        question = _question_from_verification(candidate, context, verification)
+        if question is not None:
+            verified_questions.append(question)
+
+    valid_keys = {q.question_key for q in verified_questions}
+    valid_keys.update(
+        q.question_key for q in master.clarification_history if _is_resolved(q)
+    )
+    _prune_obsolete_questions(master, valid_keys, actor)
+
     existing_keys = {q.question_key for q in master.clarification_history}
-    new_questions: List[ClarificationQuestionSchema] = []
-
-    # --- Tier 1: BLOCKING — Contradictions ---
-    new_questions.extend(_detect_contradictions(master, existing_keys))
-
-    # --- Tier 1: BLOCKING — UNRESOLVED mandatory requirements ---
-    new_questions.extend(_detect_unresolved_mandatory(master, existing_keys))
-
-    # --- Conversational Ambiguities & Scope (Claude-Style Topics & Options) ---
-
-    new_questions.extend(_detect_conversational_ambiguities(master, existing_keys))
-
-
-
-    # --- Tier 2: RECOMMENDED — Technical scope disambiguation ---
-    new_questions.extend(_detect_low_confidence_requirements(master, existing_keys))
-
-    # --- Tier 2: RECOMMENDED — Uninterpreted responsibilities with EKG matches ---
-    new_questions.extend(_detect_uninterpreted_responsibilities(master, existing_keys))
-
-    # --- Tier 2: RECOMMENDED — Contextual phrasing requiring TA confirmation ---
-    new_questions.extend(_detect_contextual_ambiguities(master, existing_keys))
-
-    # --- Tier 2: RECOMMENDED — Ambiguities detected in JD text ---
-    new_questions.extend(_detect_raw_ambiguities(master, existing_keys))
-
-    # --- Tier 3: OPTIONAL — Missing metadata (team size, salary) ---
-    new_questions.extend(_detect_missing_metadata(master, existing_keys))
+    new_questions = [
+        q for q in verified_questions if q.question_key not in existing_keys
+    ]
+    master.clarification_history.extend(new_questions)
+    recompute_all_blocking_flags(master)
 
     if new_questions:
-        # Optionally rewrite question_text into conversational phrasing via LLM.
-        # Falls back silently to deterministic text if Ollama is unavailable.
-        new_questions = enrich_questions_conversational(master, new_questions)
-        master.clarification_history.extend(new_questions)
-        master.lifecycle_status = JDLifecycleStatus.AWAITING_CLARIFICATION
         master.add_audit_entry(
             "clarification_generated",
             f"Generated {len(new_questions)} new clarification question(s).",
@@ -99,29 +342,20 @@ def generate_clarification_questions(
             question_count=len(new_questions),
             blocking_count=sum(1 for q in new_questions if q.is_blocking),
         )
-        logger.info(
-            "Generated %d clarification questions for jd_id=%s (%d blocking).",
-            len(new_questions),
-            master.jd_id,
-            sum(1 for q in new_questions if q.is_blocking),
-        )
+
+    if any(_is_open(q) for q in master.clarification_history):
+        master.lifecycle_status = JDLifecycleStatus.AWAITING_CLARIFICATION
     else:
         master.lifecycle_status = JDLifecycleStatus.READY_FOR_REVIEW
         master.add_audit_entry(
             "clarification_none_needed",
-            "No clarification questions required. JD is ready for review.",
+            "Analysis completed — no clarification required.",
             actor=actor,
         )
-
     return master
 
 
 def compute_is_blocking(question: ClarificationQuestionSchema) -> bool:
-    """
-    Dynamically recompute whether a question is still blocking.
-    A BLOCKING-priority question is no longer blocking if it has been
-    ANSWERED, EXPLICITLY_UNSPECIFIED, or has an authorized override_record.
-    """
     if question.priority != QuestionPriority.BLOCKING:
         return False
     if question.status in {QuestionStatus.ANSWERED, QuestionStatus.EXPLICITLY_UNSPECIFIED}:
@@ -132,1402 +366,704 @@ def compute_is_blocking(question: ClarificationQuestionSchema) -> bool:
 
 
 def recompute_all_blocking_flags(master: JDMasterContext) -> JDMasterContext:
-    """
-    Recompute is_blocking on every question in the master's clarification history.
-    Call this after any answer is submitted.
-    """
     for question in master.clarification_history:
         question.is_blocking = compute_is_blocking(question)
     return master
 
 
 # ---------------------------------------------------------------------------
-# Tier 1: BLOCKING Question Generators
+# Source-grounded semantic verification
 # ---------------------------------------------------------------------------
 
-def _detect_contradictions(
-    master: JDMasterContext,
-    existing_keys: set,
-) -> List[ClarificationQuestionSchema]:
-    """
-    Detects logical contradictions:
-    - A requirement marked MUST_HAVE but also negated=True.
-    - Two requirements with conflicting priority signals for the same ekg_node_ids.
-    """
-    questions: List[ClarificationQuestionSchema] = []
-
-    for item in master.requirements:
-        if not isinstance(item, StructuredRequirement):
-            continue
-
-        # Contradiction: is_mandatory=True but negated=True
-        if item.is_mandatory and item.negated:
-            key = f"contradiction_mandatory_negated_{item.id[:8]}"
-            if key not in existing_keys:
-                questions.append(ClarificationQuestionSchema(
-                    question_key=key,
-                    category=QuestionCategory.CONTRADICTION,
-                    priority=QuestionPriority.BLOCKING,
-                    is_blocking=True,
-                    field_target=f"requirements[id={item.id}].priority",
-                    question_text=(
-                        f"The requirement '{item.text[:120]}' appears both as mandatory "
-                        f"and negated in the JD. Is this requirement actually required or explicitly excluded?"
-                    ),
-                    rationale=(
-                        "The clause is marked is_mandatory=True but has negated=True. "
-                        "This is a logical contradiction that must be resolved before candidate screening."
-                    ),
-                    suggested_options=["It IS required (remove negation)", "It is NOT required (exclude from must-haves)"],
-                ))
-
-    return questions
+def _original_jd_text(master: JDMasterContext) -> str:
+    return (
+        getattr(master, "raw_jd_text", "")
+        or getattr(getattr(master, "extraction_metadata", None), "source_text", "")
+        or ""
+    )
 
 
-def _detect_unresolved_mandatory(
-    master: JDMasterContext,
-    existing_keys: set,
-) -> List[ClarificationQuestionSchema]:
-    """
-    Flags StructuredRequirements with priority=UNRESOLVED that appear in
-    critical requirement positions (they cannot be left ambiguous for screening).
-    """
-    questions: List[ClarificationQuestionSchema] = []
-    unresolved = [
-        item for item in master.requirements
-        if isinstance(item, StructuredRequirement)
-        and item.priority == RequirementPriority.UNRESOLVED
-        and item.confidence.entity_match_confidence in {ConfidenceBand.HIGH, ConfidenceBand.MEDIUM}
+def _normalize_evidence(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _source_value(source: object) -> str:
+    return (
+        getattr(source, "raw_text", "")
+        or getattr(source, "text", "")
+        or ""
+    ).strip()
+
+
+def _resolve_source_statement(master: JDMasterContext, requirement: StructuredRequirement) -> Optional[str]:
+    raw_jd = _original_jd_text(master)
+    if not raw_jd:
+        return None
+    sources = (
+        getattr(requirement, "source", None),
+        getattr(getattr(requirement, "provenance", None), "source_span", None),
+    )
+    for source in sources:
+        candidate = _source_value(source)
+        if candidate and _normalize_evidence(candidate) in _normalize_evidence(raw_jd):
+            return candidate
+
+    requirement_text = (requirement.text or "").strip()
+    normalized_requirement = _normalize_evidence(requirement_text)
+    if normalized_requirement and normalized_requirement in _normalize_evidence(raw_jd):
+        return requirement_text
+    for line in raw_jd.splitlines():
+        normalized_line = _normalize_evidence(line)
+        if normalized_line and normalized_line in normalized_requirement:
+            return line.strip()
+    return None
+
+
+def _source_context(raw_jd: str, statements: Tuple[str, ...]) -> Optional[SourceContext]:
+    if not raw_jd or not statements:
+        return None
+    normalized_jd = _normalize_evidence(raw_jd)
+    if any(not statement or _normalize_evidence(statement) not in normalized_jd for statement in statements):
+        return None
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", raw_jd) if part.strip()]
+    matching = [
+        paragraph for paragraph in paragraphs
+        if all(_normalize_evidence(statement) in _normalize_evidence(paragraph) for statement in statements)
     ]
+    paragraph = matching[0] if matching else "\n".join(statements)
+    heading = ""
+    first_line = paragraph.splitlines()[0].strip()
+    if first_line.startswith("#") or first_line.endswith(":"):
+        heading = first_line.lstrip("# ").rstrip(":").strip()
+    else:
+        before = raw_jd[:raw_jd.find(paragraph)] if paragraph in raw_jd else ""
+        prior_lines = [line.strip() for line in before.splitlines() if line.strip()]
+        for line in reversed(prior_lines[-8:]):
+            if line.startswith("#") or line.endswith(":"):
+                heading = line.lstrip("# ").rstrip(":").strip()
+                break
+    return SourceContext(statements=statements, paragraph=paragraph, heading=heading)
 
-    for i, item in enumerate(unresolved):
-        key = f"unresolved_priority_{item.id[:8]}_{i}"
-        if key not in existing_keys:
-            questions.append(ClarificationQuestionSchema(
-                question_key=key,
-                category=QuestionCategory.TECHNICAL_SCOPE,
-                priority=QuestionPriority.BLOCKING,
-                is_blocking=True,
+
+def _requirement_priority(requirement: StructuredRequirement) -> str:
+    return str(getattr(requirement.priority, "value", requirement.priority))
+
+
+def _priority_is_mandatory(requirement: StructuredRequirement) -> bool:
+    return requirement.priority in {
+        RequirementPriority.MUST_HAVE,
+        RequirementPriority.MANDATORY,
+    }
+
+
+@lru_cache(maxsize=1)
+def _get_clarification_llm_service():
+    from app.services.llm_service import LLMService
+
+    return LLMService()
+
+
+def _verification_prompt(
+    master: JDMasterContext,
+    candidate: AmbiguityCandidate,
+    context: SourceContext,
+) -> Tuple[str, str]:
+    requirements = [
+        item for item in getattr(master, "requirements", [])
+        if isinstance(item, StructuredRequirement)
+        and (
+            candidate.requirement_id is None
+            or item.id in (candidate.requirement_id, *candidate.related_requirement_ids)
+        )
+    ]
+    extracted = [
+        {
+            "text": item.text,
+            "priority": _requirement_priority(item),
+            "is_mandatory": item.is_mandatory,
+            "confidence": item.confidence.model_dump(mode="json"),
+        }
+        for item in requirements
+    ]
+    system_prompt = (
+        "You verify proposed job-description ambiguities for recruiter screening. "
+        "Use only the original JD. Do not invent requirements or treat absent "
+        "information as mandatory. Return one JSON object with exactly these "
+        "fields: is_genuine_ambiguity (boolean), ambiguity_type (string), "
+        "interpretation_a (string), interpretation_b (string), material_impact "
+        "(string), source_evidence (string), clarification_question (string), "
+        "answer_options (array of objects with label and description), and "
+        "reasoning (string). Approve only when two plausible interpretations "
+        "are both supported by the JD, materially different for candidate "
+        "eligibility/screening/evaluation, and cannot be resolved from the full "
+        "JD context. Otherwise set is_genuine_ambiguity=false. Quote exact JD "
+        "evidence. Ask exactly one precise question that refers to that evidence. "
+        "Answer options, when appropriate, must be relevant and mutually exclusive."
+    )
+    user_prompt = json.dumps(
+        {
+            "complete_original_jd": _original_jd_text(master),
+            "exact_source_statements": list(context.statements),
+            "surrounding_paragraph": context.paragraph,
+            "section_heading": context.heading,
+            "extracted_requirement_and_priority": extracted,
+            "candidate_ambiguity": {
+                "type": candidate.kind,
+                "reason": candidate.reason,
+            },
+        },
+        ensure_ascii=False,
+    )
+    return system_prompt, user_prompt
+
+
+def _verification_payload(result: object) -> Optional[dict]:
+    payload = getattr(result, "parsed_json", None)
+    if isinstance(payload, dict):
+        return payload
+    raw_text = getattr(result, "raw_text", "")
+    try:
+        parsed = json.loads(raw_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _validate_verification(
+    payload: Optional[dict],
+    raw_jd: str,
+    candidate: AmbiguityCandidate,
+) -> Optional[dict]:
+    if not isinstance(payload, dict) or payload.get("is_genuine_ambiguity") is not True:
+        return None
+    required_strings = (
+        "ambiguity_type", "interpretation_a", "interpretation_b",
+        "material_impact", "source_evidence", "clarification_question", "reasoning",
+    )
+    if any(not isinstance(payload.get(key), str) or not payload[key].strip() for key in required_strings):
+        return None
+
+    evidence = payload["source_evidence"].strip()
+    normalized_evidence = _normalize_evidence(evidence)
+    if normalized_evidence not in _normalize_evidence(raw_jd):
+        logger.warning("Rejecting clarification verification with non-source evidence: %s", candidate.key)
+        return None
+    if any(_normalize_evidence(statement) not in normalized_evidence for statement in candidate.source_statements):
+        logger.warning("Rejecting clarification verification that omits candidate evidence: %s", candidate.key)
+        return None
+    if _normalize_evidence(payload["interpretation_a"]) == _normalize_evidence(payload["interpretation_b"]):
+        return None
+
+    question = payload["clarification_question"].strip()
+    if question.count("?") != 1:
+        return None
+    terms = {
+        word for word in re.findall(r"[a-z0-9]+", normalized_evidence)
+        if len(word) > 3 and word not in _STOP_WORDS
+    }
+    question_terms = set(re.findall(r"[a-z0-9]+", _normalize_evidence(question)))
+    if terms and not terms.intersection(question_terms):
+        return None
+
+    options = payload.get("answer_options")
+    if not isinstance(options, list) or len(options) < 2:
+        return None
+    normalized_labels: set = set()
+    for option in options:
+        if not isinstance(option, dict):
+            return None
+        label = option.get("label")
+        description = option.get("description")
+        if not isinstance(label, str) or not label.strip():
+            return None
+        if not isinstance(description, str) or not description.strip():
+            return None
+        normalized_label = _normalize_evidence(label)
+        if normalized_label in normalized_labels:
+            return None
+        normalized_labels.add(normalized_label)
+    return payload
+
+
+def _verify_ambiguity_candidate(
+    master: JDMasterContext,
+    candidate: AmbiguityCandidate,
+    context: SourceContext,
+) -> Optional[dict]:
+    system_prompt, user_prompt = _verification_prompt(master, candidate, context)
+    try:
+        service = _get_clarification_llm_service()
+        if getattr(service, "provider", "ollama").lower() != "ollama":
+            logger.error(
+                "Clarification verification requires the configured Ollama provider; got %s",
+                getattr(service, "provider", "unknown"),
+            )
+            return None
+        response = service.complete_structured(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=1200,
+        )
+    except Exception:
+        logger.exception("Clarification semantic verification failed for %s", candidate.key)
+        return None
+    payload = _validate_verification(
+        _verification_payload(response),
+        _original_jd_text(master),
+        candidate,
+    )
+    if payload is None:
+        logger.info("Semantic verification rejected candidate %s", candidate.key)
+    return payload
+
+
+def _question_from_verification(
+    candidate: AmbiguityCandidate,
+    context: SourceContext,
+    payload: dict,
+) -> Optional[ClarificationQuestionSchema]:
+    options = payload.get("answer_options", [])
+    topic_by_kind = {
+        "requirement_priority": "Requirement priority",
+        "priority_conflict": "Conflicting requirement priority",
+        "boolean_logic": "Requirement logic",
+        "vague_technical_criterion": "Technical requirement scope",
+        "mandatory_negated": "Contradictory requirement",
+    }
+    topic = topic_by_kind.get(candidate.kind, "Requirement clarification")
+    issue = (
+        f"{payload['ambiguity_type']}: {payload['interpretation_a']} versus "
+        f"{payload['interpretation_b']}."
+    )
+    rationale = (
+        f"Topic: {topic}\n"
+        f"Original JD Statement: \"{_clip(' / '.join(context.statements))}\"\n"
+        f"Issue Identified: {issue}\n"
+        f"Reason for Clarification: {payload['material_impact'].strip()}"
+    )
+    return ClarificationQuestionSchema(
+        question_key=candidate.key,
+        category=candidate.category,
+        priority=QuestionPriority.BLOCKING if candidate.blocking else QuestionPriority.RECOMMENDED,
+        is_blocking=candidate.blocking,
+        field_target=candidate.field_target,
+        short_topic=topic,
+        question_text=payload["clarification_question"].strip(),
+        rationale=rationale,
+        structured_options=[
+            ClarificationOptionSchema(
+                label=option["label"].strip(),
+                description=option["description"].strip(),
+            )
+            for option in options
+        ],
+        suggested_options=[
+            f"{option['label'].strip()} — {option['description'].strip()}"
+            for option in options
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Candidate detectors (propose only; semantic verification decides)
+# ---------------------------------------------------------------------------
+
+def _detect_contradictions(master, existing_keys: set) -> List[AmbiguityCandidate]:
+    """Propose source-backed mandatory/negated or mandatory/preferred conflicts."""
+    requirements = [
+        item for item in getattr(master, "requirements", [])
+        if isinstance(item, StructuredRequirement) and _is_screening_requirement(item)
+    ]
+    candidates: List[AmbiguityCandidate] = []
+    for item in requirements:
+        if not (item.is_mandatory and item.negated):
+            continue
+        statement = _resolve_source_statement(master, item)
+        if statement:
+            candidates.append(AmbiguityCandidate(
+                key=f"contradiction_mandatory_negated_{item.id[:8]}",
+                category=QuestionCategory.CONTRADICTION,
+                kind="mandatory_negated",
+                source_statements=(statement,),
+                requirement_id=item.id,
                 field_target=f"requirements[id={item.id}].priority",
-                question_text=(
-                    f"The phrasing '{item.text[:120]}' was ambiguous — we could not determine "
-                    f"if this is a MUST HAVE or a PREFERRED requirement. "
-                    f"Is this requirement mandatory for all candidates?"
-                ),
-                rationale=(
-                    "The clause uses ambiguous modal phrasing (e.g. 'ideally', 'experience with', "
-                    "'knowledge of') that does not clearly indicate mandatory vs preferred status."
-                ),
-                suggested_options=["MUST HAVE — mandatory for all candidates", "PREFERRED — nice to have but not disqualifying"],
+                reason="The extracted requirement is simultaneously mandatory and negated.",
+                blocking=True,
             ))
 
-    return questions
+    for index, first in enumerate(requirements):
+        if first.priority not in {RequirementPriority.MUST_HAVE, RequirementPriority.MANDATORY, RequirementPriority.PREFERRED}:
+            continue
+        for second in requirements[index + 1:]:
+            if second.priority not in {RequirementPriority.MUST_HAVE, RequirementPriority.MANDATORY, RequirementPriority.PREFERRED}:
+                continue
+            if _priority_is_mandatory(first) == _priority_is_mandatory(second):
+                continue
+            first_terms = {
+                term for term in re.findall(r"[a-z0-9]+", first.text.lower())
+                if len(term) > 2 and term not in _STOP_WORDS
+            }
+            second_terms = {
+                term for term in re.findall(r"[a-z0-9]+", second.text.lower())
+                if len(term) > 2 and term not in _STOP_WORDS
+            }
+            shared = first_terms & second_terms
+            if not shared or len(shared) / max(1, min(len(first_terms), len(second_terms))) < 0.4:
+                continue
+            first_statement = _resolve_source_statement(master, first)
+            second_statement = _resolve_source_statement(master, second)
+            if not first_statement or not second_statement:
+                continue
+            pair = "|".join(sorted((first.id, second.id)))
+            digest = hashlib.sha1(pair.encode()).hexdigest()[:8]
+            candidates.append(AmbiguityCandidate(
+                key=f"conflicting_priority_{digest}",
+                category=QuestionCategory.CONTRADICTION,
+                kind="priority_conflict",
+                source_statements=(first_statement, second_statement),
+                requirement_id=first.id,
+                field_target=f"requirements[id={first.id}].priority",
+                reason=(
+                    f"Overlapping requirements classify the same criterion as "
+                    f"{_requirement_priority(first)} and {_requirement_priority(second)}."
+                ),
+                blocking=True,
+                related_requirement_ids=(second.id,),
+            ))
+    return candidates
 
 
-# ---------------------------------------------------------------------------
-# Tier 2: RECOMMENDED Question Generators
-# ---------------------------------------------------------------------------
+def _detect_unresolved_mandatory(master, existing_keys: set) -> List[AmbiguityCandidate]:
+    """Propose unresolved extracted priorities only when original text is citable."""
+    candidates: List[AmbiguityCandidate] = []
+    for item in getattr(master, "requirements", []):
+        if (
+            not isinstance(item, StructuredRequirement)
+            or item.priority != RequirementPriority.UNRESOLVED
+            or not _is_screening_requirement(item)
+        ):
+            continue
+        statement = _resolve_source_statement(master, item)
+        if not statement:
+            continue
+        candidates.append(AmbiguityCandidate(
+            key=f"unresolved_priority_{item.id[:8]}",
+            category=QuestionCategory.TECHNICAL_SCOPE,
+            kind="requirement_priority",
+            source_statements=(statement,),
+            requirement_id=item.id,
+            field_target=f"requirements[id={item.id}].priority",
+            reason="Extraction did not determine the screening priority of this source-backed requirement.",
+            blocking=True,
+        ))
+    return candidates
 
-def _detect_conversational_ambiguities(
 
-    master: JDMasterContext,
-
-    existing_keys: set,
-
-) -> List[ClarificationQuestionSchema]:
-
+def _legacy_detect_conversational_ambiguities(master, existing_keys: set) -> List[ClarificationQuestionSchema]:
     """
-
-    Analyzes JD requirements, role overview, and responsibilities to generate
-
-    conversational, tailored questions with structured options (label + description)
-
-    and short topic tags for wizard navigation (e.g. 'VDK tooling', 'Experience',
-
-    'Leadership', 'Protocols', 'Chiplet exp', 'Hands-on %', 'Customer', 'Location').
-
+    Genuine scope ambiguities only (niche tooling, wide experience band,
+    lead-role scope, protocol breadth, chiplet title vs preferred-only).
+    Boilerplate is stripped before analysis. Hybrid cadence was removed:
+    it does not affect resume-vs-JD scoring.
     """
-
     questions: List[ClarificationQuestionSchema] = []
 
     ro = getattr(master, "role_overview", None)
-
-    job_title = getattr(ro, "job_title", None) or getattr(ro, "title", None) or getattr(ro, "role_title", None) or ""
-
-    raw_jd = getattr(master, "raw_jd_text", None) or getattr(getattr(master, "extraction_metadata", None), "source_text", None) or ""
-
-
-
-    req_texts = [
-
-        getattr(r, "text", "") for r in getattr(master, "requirements", [])
-
-        if getattr(r, "text", None)
-
+    job_title = (
+        getattr(ro, "job_title", None) or getattr(ro, "title", None)
+        or getattr(ro, "role_title", None) or ""
+    )
+    raw_jd = _strip_boilerplate(
+        getattr(master, "raw_jd_text", None)
+        or getattr(getattr(master, "extraction_metadata", None), "source_text", None)
+        or ""
+    )
+    reqs = [
+        r for r in getattr(master, "requirements", [])
+        if isinstance(r, StructuredRequirement) and getattr(r, "text", None)
+        and not _is_boilerplate(r.text)
     ]
-
-    resp_texts = [
-
-        getattr(r, "raw_statement", "") for r in getattr(master, "responsibilities", [])
-
-        if getattr(r, "raw_statement", None)
-
-    ]
-
-    all_text = f"{job_title}\n{raw_jd}\n" + "\n".join(req_texts) + "\n" + "\n".join(resp_texts)
-
+    all_text = f"{job_title}\n{raw_jd}\n" + "\n".join(r.text for r in reqs)
     text_lower = all_text.lower()
-
     title_lower = job_title.lower()
 
-
-
-    # 1. Tooling / Framework Strictness vs Equivalence
-
+    # 1. Niche tooling with no priority label --------------------------------
+    niche_tools = [
+        ("synopsys virtualizer", "Synopsys Virtualizer / VDK",
+         "Cadence Helium, Arm Fast Models/FVP, Siemens Vista, or QEMU+SystemC co-sim"),
+        ("virtualizer development kit", "Synopsys VDK", "equivalent virtual prototyping toolchains"),
+        ("vdk", "Synopsys VDK", "equivalent virtual prototyping toolchains"),
+        ("systemc/tlm", "SystemC/TLM", "equivalent transaction-level modelling frameworks"),
+        ("questasim", "Questasim", "VCS, Xcelium, or other industry-standard simulators"),
+        ("cadence helium", "Cadence Helium", "Synopsys VDK, Arm Fast Models, or similar tools"),
+    ]
     if "vdk_tooling_strictness" not in existing_keys and "tooling_strictness" not in existing_keys:
-
-        if any(k in text_lower for k in ("virtualizer", "vdk", "virtual prototyping", "systemc/tlm", "systemc")):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="vdk_tooling_strictness",
-
+        for phrase, tool, equiv in niche_tools:
+            if not re.search(rf"\b{re.escape(phrase)}\b", text_lower):
+                continue
+            if any(phrase in r.text.lower() and _req_priority_is_explicit(r) for r in reqs):
+                break
+            snippet = " ".join(
+                m.group() for m in re.finditer(
+                    rf".{{0,80}}{re.escape(phrase)}.{{0,80}}", text_lower, re.DOTALL)
+            )
+            if re.search(r"\b(preferred|nice.to.have|required|mandatory|must.have)\b", snippet):
+                break
+            questions.append(_build_question(
+                key="vdk_tooling_strictness",
                 category=QuestionCategory.TECHNICAL_SCOPE,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="requirements.tooling.synopsys_vdk",
-
-                short_topic="VDK tooling",
-
-                question_text="The JD lists 'Synopsys Virtualizer / VDK experience' under Required Skills. Is Synopsys tooling a strict must-have, or would equivalent virtual prototyping experience qualify?",
-
-                rationale="Synopsys Virtualizer is specialized. Clarifying whether equivalent platforms qualify determines candidate pool size.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Strict must-have",
-
-                        description="Only candidates with hands-on Synopsys Virtualizer/VDK experience qualify.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Equivalents acceptable",
-
-                        description="Cadence Helium, Arm Fast Models/FVP, Siemens Vista, or QEMU+SystemC co-sim count as equivalent; Synopsys ramp-up expected.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Strong preference",
-
-                        description="Synopsys is preferred, but a strong SystemC/TLM architect without it can still be considered.",
-
-                    ),
-
+                topic=f"{tool} tooling",
+                jd_statement=_find_statement(all_text, phrase),
+                issue=f"{tool} is named without stating whether it is mandatory or whether equivalents qualify.",
+                reason="A strict tool match and an equivalent-tool match select very different resumes.",
+                question=f"Is hands-on {tool} experience mandatory, or are equivalent tools acceptable?",
+                options=[
+                    ("Strict must-have", f"Only candidates with hands-on {tool} experience qualify."),
+                    ("Equivalents acceptable", f"{equiv} count as equivalent."),
+                    ("Strong preference", f"{tool} preferred; adjacent tools still considered."),
                 ],
-
-                suggested_options=[
-
-                    "Strict must-have — Only candidates with hands-on Synopsys Virtualizer/VDK experience qualify.",
-
-                    "Equivalents acceptable — Cadence Helium, Arm Fast Models/FVP, Siemens Vista, or QEMU+SystemC co-sim count as equivalent; Synopsys ramp-up expected.",
-
-                    "Strong preference — Synopsys is preferred, but a strong SystemC/TLM architect without it can still be considered.",
-
-                ],
-
+                field_target="requirements.tooling.specialised",
             ))
+            break
 
-        elif any(k in text_lower for k in ("fastapi", "django", "flask", "spring", "react", "kubernetes", "flutter", "golang", "pytorch")):
-
-            detected_tool = "Core Framework"
-
-            detected_equivs = "equivalent modern frameworks"
-
-            if "fastapi" in text_lower:
-
-                detected_tool = "FastAPI"
-
-                detected_equivs = "Django, Flask, Go/Gin, or Spring Boot"
-
-            elif "pytorch" in text_lower:
-
-                detected_tool = "PyTorch"
-
-                detected_equivs = "TensorFlow, JAX, or ONNX"
-
-            elif "react" in text_lower:
-
-                detected_tool = "React"
-
-                detected_equivs = "Vue.js, Angular, or Next.js"
-
-            elif "kubernetes" in text_lower:
-
-                detected_tool = "Kubernetes"
-
-                detected_equivs = "Docker Swarm, Nomad, or ECS"
-
-            elif "golang" in text_lower or "go " in text_lower:
-
-                detected_tool = "Go (Golang)"
-
-                detected_equivs = "C++, Rust, or Java"
-
-
-
-            key = f"tooling_strictness_{detected_tool.lower().replace(' ', '_')}"
-
-            if key not in existing_keys:
-
-                questions.append(ClarificationQuestionSchema(
-
-                    question_key=key,
-
-                    category=QuestionCategory.TECHNICAL_SCOPE,
-
-                    priority=QuestionPriority.RECOMMENDED,
-
-                    is_blocking=False,
-
-                    field_target=f"requirements.tooling.{detected_tool.lower()}",
-
-                    short_topic=f"{detected_tool} tooling",
-
-                    question_text=f"The JD lists '{detected_tool}' under Required Skills. Is {detected_tool} tooling a strict must-have, or would equivalent experience qualify?",
-
-                    rationale=f"Clarifying whether {detected_tool} is mandatory or interchangeable with equivalents ({detected_equivs}) calibrates screening selectivity.",
-
-                    structured_options=[
-
-                        ClarificationOptionSchema(
-
-                            label="Strict must-have",
-
-                            description=f"Only candidates with hands-on {detected_tool} experience qualify.",
-
-                        ),
-
-                        ClarificationOptionSchema(
-
-                            label="Equivalents acceptable",
-
-                            description=f"{detected_equivs} count as equivalent; {detected_tool} ramp-up expected.",
-
-                        ),
-
-                        ClarificationOptionSchema(
-
-                            label="Strong preference",
-
-                            description=f"{detected_tool} is preferred, but a strong architect/engineer with adjacent modern stack can still be considered.",
-
-                        ),
-
-                    ],
-
-                    suggested_options=[
-
-                        f"Strict must-have — Only candidates with hands-on {detected_tool} experience qualify.",
-
-                        f"Equivalents acceptable — {detected_equivs} count as equivalent; {detected_tool} ramp-up expected.",
-
-                        f"Strong preference — {detected_tool} is preferred, but a strong candidate without it can still be considered.",
-
-                    ],
-
-                ))
-
-
-
-    # 2. Experience Specialization Split (Topic: 'Experience')
-
+    # 2. Wide experience band in a deep-specialisation domain ----------------
     if "experience_specialization_split" not in existing_keys:
-
-        exp_match = re.search(r"(\d+[\s–\-]+\d+\+?|\d+\+?)\s*(?:years|yrs)", text_lower)
-
-        exp_str = exp_match.group(0) if exp_match else None
-
-
-
-        if any(k in text_lower for k in ("10–15+", "10-15+", "10-15", "10 to 15")) or (exp_str and "10" in exp_str and "semiconductor" in text_lower):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="experience_specialization_split",
-
-                category=QuestionCategory.TECHNICAL_SCOPE,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="requirements.experience.vp_split",
-
-                short_topic="Experience",
-
-                question_text="'10-15+ years of semiconductor/system engineering experience' - how much of that must be specifically in virtual platforms / SystemC-TLM modelling?",
-
-                rationale="A 10-15 year band is broad. Calibrating how many years must be directly in virtual platforms vs general semiconductor/RTL engineering avoids false negatives.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="10+ total, 5+ in VP",
-
-                        description="At least 10 years overall, with 5+ years directly in virtual prototyping / SystemC-TLM.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="10+ total, any domain",
-
-                        description="10+ years in semiconductor/system engineering is enough; VP depth is assessed via skills, not years.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="8+ if VP-heavy",
-
-                        description="Exceptional candidates with ~8 years, mostly in VP architecture, can be considered.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="15+ preferred",
-
-                        description="Target the upper band; 10-12 years is the floor only for outstanding profiles.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "10+ total, 5+ in VP — At least 10 years overall, with 5+ years directly in virtual prototyping / SystemC-TLM.",
-
-                    "10+ total, any domain — 10+ years in semiconductor/system engineering is enough; VP depth is assessed via skills, not years.",
-
-                    "8+ if VP-heavy — Exceptional candidates with ~8 years, mostly in VP architecture, can be considered.",
-
-                    "15+ preferred — Target the upper band; 10-12 years is the floor only for outstanding profiles.",
-
-                ],
-
-            ))
-
-        elif exp_str:
-
-            num = re.search(r"\d+", exp_str).group(0)
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="experience_specialization_split",
-
-                category=QuestionCategory.TECHNICAL_SCOPE,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="requirements.experience.domain_split",
-
-                short_topic="Experience",
-
-                question_text=f"'{exp_str} of engineering experience' - how much of that must be specifically in core domain systems vs general development?",
-
-                rationale="Calibrating total engineering tenure against specialized hands-on domain focus ensures balanced candidate qualification.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label=f"{num}+ total, dedicated focus",
-
-                        description=f"At least {num} years overall, with primary hands-on specialization in core role domains.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label=f"{num}+ total, any domain",
-
-                        description=f"{num}+ years in general engineering is sufficient; specific domain depth is evaluated via technical assessment.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Fast-track for exceptional",
-
-                        description="Exceptional candidates with slightly fewer years but demonstrated architectural depth qualify.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Upper band preferred",
-
-                        description=f"Target the upper band; {num} years is the minimum floor for consideration.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    f"{num}+ total, dedicated focus — At least {num} years overall, with primary hands-on specialization in core role domains.",
-
-                    f"{num}+ total, any domain — {num}+ years in general engineering is sufficient; domain depth assessed via skills.",
-
-                    "Fast-track for exceptional — Exceptional candidates with slightly fewer years but heavy depth qualify.",
-
-                    f"Upper band preferred — Target the upper band; {num} years is the floor only for outstanding profiles.",
-
-                ],
-
-            ))
-
-
-
-    # 3. Leadership & Reporting Scope (Topic: 'Leadership')
-
-    if "leadership_people_management" not in existing_keys:
-
-        if "jd 2–7" in text_lower or "jd 2-7" in text_lower or ("technical lead" in text_lower and "architect" in text_lower):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="leadership_people_management",
-
-                category=QuestionCategory.ROLE_ALIGNMENT,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="role_overview.people_management",
-
-                short_topic="Leadership",
-
-                question_text="The role is titled 'Technical Lead / Architect' and is the anchor for JD 2-7. Does this role carry people-management responsibility?",
-
-                rationale="Understanding whether this anchor architect will directly manage team hires vs provide purely technical architecture guidance defines the hiring persona.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Technical lead, no reports",
-
-                        description="Sets architecture and guides JD 2-7 engineers technically, but has no formal reporting lines.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Lead with direct reports",
-
-                        description="Directly manages the JD 2-7 hires (hiring, appraisals, task allocation).",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Lead now, manager later",
-
-                        description="Starts as technical lead; formal people management added once the team scales.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "Technical lead, no reports — Sets architecture and guides JD 2-7 engineers technically, but has no formal reporting lines.",
-
-                    "Lead with direct reports — Directly manages the JD 2-7 hires (hiring, appraisals, task allocation).",
-
-                    "Lead now, manager later — Starts as technical lead; formal people management added once the team scales.",
-
-                ],
-
-            ))
-
-        elif any(k in title_lower for k in ("lead", "architect", "principal", "manager", "director", "staff")):
-
-            clean_title = job_title or "Lead / Architect"
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="leadership_people_management",
-
-                category=QuestionCategory.ROLE_ALIGNMENT,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="role_overview.people_management",
-
-                short_topic="Leadership",
-
-                question_text=f"The role is titled '{clean_title}'. Does this role carry direct people-management responsibility?",
-
-                rationale="Clarifying whether this role is an individual contributor technical lead or has direct managerial reports aligns candidate screening.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Technical lead, no reports",
-
-                        description="Sets technical direction and architecture, but has no formal managerial reporting lines.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Lead with direct reports",
-
-                        description="Directly manages team engineers (hiring, 1-on-1s, appraisals, task allocation).",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Lead now, manager later",
-
-                        description="Starts as technical lead; formal people management added once the team scales.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "Technical lead, no reports — Sets technical direction, but has no formal reporting lines.",
-
-                    "Lead with direct reports — Directly manages team engineers (hiring, appraisals, task allocation).",
-
-                    "Lead now, manager later — Starts as technical lead; formal people management added once the team scales.",
-
-                ],
-
-            ))
-
-
-
-    # 4. Protocol / Interconnects Coverage (Topic: 'Protocols')
-
-    if "protocols_coverage_depth" not in existing_keys:
-
-        if any(k in text_lower for k in ("pcie", "cxl", "ucie", "amba")):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="protocols_coverage_depth",
-
-                category=QuestionCategory.TECHNICAL_SCOPE,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="requirements.protocols.coverage",
-
-                short_topic="Protocols",
-
-                question_text="Required skills list 'PCIe / CXL / UCIe / AMBA'. What depth of protocol coverage is expected?",
-
-                rationale="Expecting all four high-speed interconnects significantly narrows the candidate pool. Setting the coverage floor improves sourcing efficiency.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="All four required",
-
-                        description="Candidate must have worked with each of PCIe, CXL, UCIe and AMBA.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="1 high-speed + AMBA",
-
-                        description="At least one of PCIe/CXL/UCIe plus AMBA (AXI/CHI) is sufficient.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="UCIe mandatory",
-
-                        description="Given the chiplet focus, UCIe is must-have; others are a plus.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Any one is fine",
-
-                        description="Familiarity with any of these interconnects is enough; the rest can be learned.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "All four required — Candidate must have worked with each of PCIe, CXL, UCIe and AMBA.",
-
-                    "1 high-speed + AMBA — At least one of PCIe/CXL/UCIe plus AMBA (AXI/CHI) is sufficient.",
-
-                    "UCIe mandatory — Given the chiplet focus, UCIe is must-have; others are a plus.",
-
-                    "Any one is fine — Familiarity with any of these interconnects is enough; the rest can be learned.",
-
-                ],
-
-            ))
-
-
-
-    # 5. Title vs Preferred Skills Tension (Topic: 'Chiplet exp' / 'Specialization')
-
-    if "chiplet_experience_must_have" not in existing_keys:
-
-        if "chiplet" in text_lower and ("hbm" in text_lower or "preferred" in text_lower):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="chiplet_experience_must_have",
-
-                category=QuestionCategory.TECHNICAL_SCOPE,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="requirements.chiplet.priority",
-
-                short_topic="Chiplet exp",
-
-                question_text="The JD is for an 'AI Chiplet' architect, yet 'Chiplet architecture and HBM' is only under Preferred Skills. Is prior chiplet experience a must-have?",
-
-                rationale="The role title emphasizes 'Chiplet', but chiplet architecture is categorized under Preferred Skills. Clarifying this resolves screening inconsistency.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Must-have",
-
-                        description="Candidate must have worked on multi-die/chiplet systems (D2D links, partitioning).",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Preferred only",
-
-                        description="Keep as stated: a strong SoC VP architect without chiplet exposure still qualifies.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Chiplet yes, HBM optional",
-
-                        description="Chiplet experience is required; HBM/memory-subsystem knowledge is a plus.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "Must-have — Candidate must have worked on multi-die/chiplet systems (D2D links, partitioning).",
-
-                    "Preferred only — Keep as stated: a strong SoC VP architect without chiplet exposure still qualifies.",
-
-                    "Chiplet yes, HBM optional — Chiplet experience is required; HBM/memory-subsystem knowledge is a plus.",
-
-                ],
-
-            ))
-
-
-
-    # 6. Hands-on Implementation % (Topic: 'Hands-on %')
-
-    if "hands_on_coding_percentage" not in existing_keys:
-
-        if any(k in text_lower for k in ("systemc/tlm", "systemc", "reusable", "infrastructure", "coding", "develop reusable")):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="hands_on_coding_percentage",
-
-                category=QuestionCategory.ROLE_ALIGNMENT,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="role_overview.hands_on_percentage",
-
-                short_topic="Hands-on %",
-
-                question_text="Responsibilities include both architecture and 'develop reusable SystemC/TLM-based platform infrastructure'. How hands-on is this role expected to be?",
-
-                rationale="Architect roles vary from pure documentation to heavy active coding. Setting hands-on expectations calibrates technical screening.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Heavily hands-on (>50%)",
-
-                        description="Writes significant SystemC/TLM code and model infrastructure personally.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Balanced (25-50%)",
-
-                        description="Codes key framework pieces and templates; rest is architecture, reviews and guidance.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Mostly architecture (<25%)",
-
-                        description="Defines architecture and reviews; JD 2-7 engineers do most implementation.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "Heavily hands-on (>50%) — Writes significant SystemC/TLM code and model infrastructure personally.",
-
-                    "Balanced (25-50%) — Codes key framework pieces and templates; rest is architecture, reviews and guidance.",
-
-                    "Mostly architecture (<25%) — Defines architecture and reviews; other engineers do most implementation.",
-
-                ],
-
-            ))
-
-
-
-    # 7. Customer / Stakeholder Engagement (Topic: 'Customer')
-
-    if "customer_facing_interaction" not in existing_keys:
-
-        if any(k in text_lower for k in ("customer", "xpu/soc", "partner", "stakeholder", "client")):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="customer_facing_interaction",
-
-                category=QuestionCategory.ROLE_ALIGNMENT,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="role_overview.customer_facing",
-
-                short_topic="Customer",
-
-                question_text="The role involves studying customer XPU/SoC architectures. How customer-facing is this position?",
-
-                rationale="Knowing if the architect presents directly to external customer leadership vs consumes specs internally dictates communication evaluation.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Direct customer-facing",
-
-                        description="Regularly engages customer architects, leads technical meetings, may travel.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Occasional interaction",
-
-                        description="Joins customer calls for key milestones; requirements mostly come via internal PM/FAE teams.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Internal only",
-
-                        description="Works from customer specs provided internally; no direct customer engagement.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "Direct customer-facing — Regularly engages customer architects, leads technical meetings, may travel.",
-
-                    "Occasional interaction — Joins customer calls for key milestones; requirements mostly come via internal PM/FAE teams.",
-
-                    "Internal only — Works from customer specs provided internally; no direct customer engagement.",
-
-                ],
-
-            ))
-
-
-
-    # 8. Location & Hybrid Arrangement (Topic: 'Location')
-
-    if "location_hybrid_schedule" not in existing_keys:
-
-        loc_str = getattr(getattr(master, "conventional_requirements", None), "location", None) or ""
-
-        if isinstance(loc_str, dict):
-
-            loc_str = loc_str.get("raw", "") or loc_str.get("city", "")
-
-        if not loc_str and ("bangalore" in text_lower or "hyderabad" in text_lower or "pune" in text_lower or "hybrid" in text_lower):
-
-            if "bangalore" in text_lower and "hyderabad" in text_lower:
-
-                loc_str = "Bangalore / Hyderabad (Hybrid)"
-
-            elif "pune" in text_lower:
-
-                loc_str = "Pune (Work from Office)"
-
-
-
-        if "bangalore" in loc_str.lower() or "hyderabad" in loc_str.lower():
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="location_hybrid_schedule",
-
-                category=QuestionCategory.COMPENSATION_LOGISTICS,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="job_context.location_hybrid",
-
-                short_topic="Location",
-
-                question_text="Location is listed as 'Bangalore / Hyderabad (Hybrid)'. What does the hybrid arrangement look like?",
-
-                rationale="Candidates need clear expectations on in-office attendance requirements across Bangalore and Hyderabad.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Either city, 3 days office",
-
-                        description="Candidate can be based in either city; 3 days/week in office.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Either city, 2 days office",
-
-                        description="Candidate can be based in either city; 2 days/week in office.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Bangalore preferred",
-
-                        description="Bangalore is primary; Hyderabad only for exceptional candidates.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Flexible / mostly remote",
-
-                        description="Office visits as needed; open to strong candidates in other Indian cities.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "Either city, 3 days office — Candidate can be based in either city; 3 days/week in office.",
-
-                    "Either city, 2 days office — Candidate can be based in either city; 2 days/week in office.",
-
-                    "Bangalore preferred — Bangalore is primary; Hyderabad only for exceptional candidates.",
-
-                    "Flexible / mostly remote — Office visits as needed; open to strong candidates in other Indian cities.",
-
-                ],
-
-            ))
-
-        elif loc_str and ("hybrid" in loc_str.lower() or "office" in loc_str.lower()):
-
-            questions.append(ClarificationQuestionSchema(
-
-                question_key="location_hybrid_schedule",
-
-                category=QuestionCategory.COMPENSATION_LOGISTICS,
-
-                priority=QuestionPriority.RECOMMENDED,
-
-                is_blocking=False,
-
-                field_target="job_context.location_hybrid",
-
-                short_topic="Location",
-
-                question_text=f"Location is listed as '{loc_str}'. What does the hybrid/workplace schedule look like?",
-
-                rationale="Clarifying on-site schedule and remote flexibility ensures accurate expectations during candidate outreach.",
-
-                structured_options=[
-
-                    ClarificationOptionSchema(
-
-                        label="Hybrid (3 days office)",
-
-                        description="Candidate expected on-site 3 days/week with 2 days remote flexibility.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Hybrid (2 days office)",
-
-                        description="Candidate expected on-site 2 days/week with 3 days remote flexibility.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Full-time in office",
-
-                        description="Full-time 5 days/week in-office attendance required.",
-
-                    ),
-
-                    ClarificationOptionSchema(
-
-                        label="Flexible / mostly remote",
-
-                        description="Remote-first with on-site visits only as required for key team milestones.",
-
-                    ),
-
-                ],
-
-                suggested_options=[
-
-                    "Hybrid (3 days office) — Candidate expected on-site 3 days/week with 2 days remote flexibility.",
-
-                    "Hybrid (2 days office) — Candidate expected on-site 2 days/week with 3 days remote flexibility.",
-
-                    "Full-time in office — Full-time 5 days/week in-office attendance required.",
-
-                    "Flexible / mostly remote — Remote-first with occasional on-site visits as needed.",
-
-                ],
-
-            ))
-
-
-
-    return questions
-
-
-
-
-
-def _detect_low_confidence_requirements(
-    master: JDMasterContext,
-    existing_keys: set,
-) -> List[ClarificationQuestionSchema]:
-    """
-    Flags requirements where entity_match_confidence=LOW, meaning the EKG
-    could not confidently identify what technology/domain was being referenced.
-    Non-blocking: has a fallback (use raw text for screening if unanswered).
-    """
-    questions: List[ClarificationQuestionSchema] = []
-    low_conf = [
-        item for item in master.requirements
-        if isinstance(item, StructuredRequirement)
-        and item.confidence.entity_match_confidence == ConfidenceBand.LOW
-        and item.priority in {RequirementPriority.MUST_HAVE, RequirementPriority.PREFERRED}
-    ]
-
-    for i, item in enumerate(low_conf):
-        key = f"low_confidence_entity_{item.id[:8]}_{i}"
-        if key not in existing_keys:
-            questions.append(ClarificationQuestionSchema(
-                question_key=key,
-                category=QuestionCategory.TECHNICAL_SCOPE,
-                priority=QuestionPriority.RECOMMENDED,
-                is_blocking=False,
-                field_target=f"requirements[id={item.id}].ekg_node_ids",
-                question_text=(
-                    f"We could not precisely identify the technology or tool referenced in: "
-                    f"'{item.text[:120]}'. "
-                    f"Could you clarify what specific technology, framework, or domain is meant?"
-                ),
-                rationale=(
-                    "Low entity match confidence means the EKG cannot confidently link this "
-                    "requirement to a known technology. Clarification improves candidate scoring accuracy."
-                ),
-                suggested_options=[],
-            ))
-
-    return questions
-
-
-def _detect_uninterpreted_responsibilities(
-    master: JDMasterContext,
-    existing_keys: set,
-) -> List[ClarificationQuestionSchema]:
-    """
-    Flags responsibilities where the EKG matched entities but interpretation
-    confidence is LOW — meaning the downstream activities are uncertain.
-    Non-blocking: the raw responsibility text is still usable for screening.
-    """
-    questions: List[ClarificationQuestionSchema] = []
-    for resp in master.responsibilities:
-        if (
-            resp.matched_entities
-            and resp.interpretation_status == InterpretationStatus.NOT_INTERPRETED
-            and resp.confidence.interpretation_confidence in {ConfidenceBand.LOW, ConfidenceBand.UNKNOWN}
-        ):
-            key = f"uninterpreted_responsibility_{resp.id[:8]}"
-            if key not in existing_keys:
-                entity_names = ", ".join(e.canonical_name for e in resp.matched_entities[:3])
-                questions.append(ClarificationQuestionSchema(
-                    question_key=key,
-                    category=QuestionCategory.ROLE_ALIGNMENT,
-                    priority=QuestionPriority.RECOMMENDED,
-                    is_blocking=False,
-                    field_target=f"responsibilities[id={resp.id}].interpretation_status",
-                    question_text=(
-                        f"The responsibility '{resp.raw_statement[:120]}' involves {entity_names}. "
-                        f"What specific activities or depth of expertise should candidates demonstrate for this responsibility?"
-                    ),
-                    rationale=(
-                        "The EKG matched known entities but could not derive specific activity requirements "
-                        "at sufficient confidence. TA input will improve screening specificity."
-                    ),
-                    suggested_options=[],
+        domains = ("semiconductor", "virtual platform", "systemc", "chiplet",
+                   "soc design", "vlsi", "rtl design", "virtual prototyping")
+        m = re.search(r"(\d+)\s*[–\-]\s*(\d+)\+?\s*(?:years?|yrs)", text_lower)
+        domain_years_stated = re.search(
+            r"\d+\+?\s*(?:years?|yrs)[^.\n]{0,40}\b(?:in|with|of)\b[^.\n]{0,40}"
+            r"(?:systemc|virtual|chiplet|soc|vlsi|rtl|semiconductor)", text_lower)
+        if m and any(d in text_lower for d in domains) and not domain_years_stated:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if hi - lo >= 5:
+                fm = re.search(r"(\d+\s*[–\-]\s*\d+\+?\s*(?:years?|yrs))", all_text, re.IGNORECASE)
+                exp_str = fm.group(1).strip() if fm else f"{lo}–{hi}+ years"
+                questions.append(_build_question(
+                    key="experience_specialization_split",
+                    category=QuestionCategory.TECHNICAL_SCOPE,
+                    topic="Experience",
+                    jd_statement=_find_statement(all_text, exp_str),
+                    issue="A wide experience band is given without saying how much must be in the core domain.",
+                    reason="Resume scoring needs to know whether to weight total years or domain-specific years.",
+                    question="How many of these years must be in the core specialisation?",
+                    options=[
+                        (f"{lo}+ total, deep domain", f"At least {lo} years, majority in the core specialisation."),
+                        (f"{lo}+ total, general", f"{lo}+ years of engineering; domain depth judged from skills."),
+                        (f"{hi}+ preferred", f"Target {hi}+ years; {lo} is the floor for outstanding profiles."),
+                    ],
+                    field_target="requirements.experience.domain_split",
                 ))
 
-    return questions
-
-
-def _detect_contextual_ambiguities(
-    master: JDMasterContext,
-    existing_keys: set,
-) -> List[ClarificationQuestionSchema]:
-    """
-    Generates questions for requirements flagged as CONTEXTUAL or INFORMATIONAL phrasing
-    where TA confirmation is required to confirm mandatory vs preferred vs informational status.
-    Filters out noise fragments, degree clauses, and limits questions to high-signal items.
-    """
-    questions: List[ClarificationQuestionSchema] = []
-    from app.services.projection.canonical_projector import _flatten_requirements
-    flat_reqs = _flatten_requirements(master.requirements)
-    contextual = [
-        item for item in flat_reqs
-        if isinstance(item, StructuredRequirement)
-        and item.priority in {RequirementPriority.CONTEXTUAL, RequirementPriority.INFORMATIONAL}
-        and getattr(item, "text", None)
-    ]
-
-    seen_statements = {q.question_text.lower() for q in master.clarification_history}
-    dangling_prefixes = ("in ", "or ", "and ", "with ", "to ", "for ", "of ")
-    degree_keywords = ("degree", "bachelor", "master", "phd", "computer engineering", "electronics")
-
-    for i, item in enumerate(contextual):
-        if len(questions) >= 3:
-            break
-
-        statement_snip = item.text.strip()
-        lower_snip = statement_snip.lower()
-
-        # Filter out short fragments or dangling conjunction clauses
-        if len(statement_snip) < 30:
-            continue
-        if lower_snip.startswith(dangling_prefixes):
-            continue
-        if any(dk in lower_snip for dk in degree_keywords) and len(statement_snip) < 80:
-            continue
-
-        key = f"contextual_req_{item.id[:8]}_{i}"
-        if key not in existing_keys and lower_snip not in seen_statements:
-            questions.append(ClarificationQuestionSchema(
-                question_key=key,
-                category=QuestionCategory.TECHNICAL_SCOPE,
-                priority=QuestionPriority.RECOMMENDED,
-                is_blocking=False,
-                field_target=f"requirements[id={item.id}].priority",
-                question_text=(
-                    f"\"{statement_snip[:130]}\" is contextual. "
-                    f"Should this be evaluated as mandatory, preferred, or role context?"
-                ),
-                rationale="Soft/contextual requirement in JD requiring TA confirmation to decide screening criteria.",
-                suggested_options=["MUST HAVE — mandatory", "PREFERRED — nice to have", "INFORMATIONAL — role context only"],
+    # 3. Lead/Architect title, people management unstated --------------------
+    if "leadership_people_management" not in existing_keys:
+        lead_terms = ("technical lead", "tech lead", "architect", "principal engineer",
+                      "staff engineer", "engineering manager", "director of engineering")
+        if any(t in title_lower for t in lead_terms) and not re.search(
+            r"\b(direct\s+report|manage\s+(a\s+team|engineer|developer)|people\s+management"
+            r"|no\s+(direct\s+)?report|individual\s+contributor|ic\s+role|report\s+to"
+            r"|team\s+of\s+\d|will\s+manage)\b", text_lower):
+            questions.append(_build_question(
+                key="leadership_people_management",
+                category=QuestionCategory.ROLE_ALIGNMENT,
+                topic="Leadership scope",
+                jd_statement=job_title,
+                issue="The title implies leadership but the JD does not say whether people management is involved.",
+                reason="Management experience is either a screening criterion or irrelevant, depending on the answer.",
+                question="Does this role include direct people management?",
+                options=[
+                    ("Technical lead, no reports", "Sets technical direction; no formal management."),
+                    ("Lead with direct reports", "Manages engineers directly."),
+                    ("Lead now, manager later", "Starts as IC lead; management added as team scales."),
+                ],
+                field_target="role_overview.people_management",
             ))
-            seen_statements.add(lower_snip)
 
-    return questions
-
-
-def _detect_raw_ambiguities(
-    master: JDMasterContext,
-    existing_keys: set,
-) -> List[ClarificationQuestionSchema]:
-    """
-    Generates questions for ambiguities detected in the JD text (e.g. unclear experience, vague qualifiers).
-    Caps total raw ambiguities to 3 to keep TA workflow focused.
-    """
-    questions: List[ClarificationQuestionSchema] = []
-    raw_ambs = getattr(master, "raw_ambiguities", []) or []
-    seen_statements = {q.question_text.lower() for q in master.clarification_history}
-
-    for i, amb in enumerate(raw_ambs):
-        if len(questions) >= 3:
-            break
-
-        amb_id = getattr(amb, "ambiguity_id", f"amb_{i}")
-        key = f"jd_ambiguity_{amb_id}"
-        amb_text = getattr(amb, "text", "").strip()
-        lower_text = amb_text.lower()
-
-        if len(amb_text) < 25 or lower_text.startswith(("in ", "or ", "and ")):
-            continue
-
-        if key not in existing_keys and amb_text and lower_text not in seen_statements:
-            reason = getattr(amb, "reason", "Ambiguous statement in JD")
-            opts = getattr(amb, "suggested_interpretations", []) or []
-            questions.append(ClarificationQuestionSchema(
-                question_key=key,
+    # 4. Protocol breadth (word-boundary match; 'chi' != 'chiplet') ----------
+    if "protocol_coverage_depth" not in existing_keys:
+        hs = ["pcie", "cxl", "ucie", "amba", "axi", "chi", "nvlink", "ccix"]
+        matched = [p for p in hs if re.search(rf"\b{p}\b", text_lower)]
+        if len(matched) >= 4 and not re.search(
+            r"\b(any\s+one|at\s+least\s+one|one\s+or\s+more|either)\b", text_lower
+        ):
+            pstr = " / ".join(p.upper() for p in matched[:4])
+            questions.append(_build_question(
+                key="protocol_coverage_depth",
                 category=QuestionCategory.TECHNICAL_SCOPE,
-                priority=QuestionPriority.RECOMMENDED,
-                is_blocking=False,
-                field_target=f"ambiguities[{amb_id}]",
-                question_text=f"Clarification needed on \"{amb_text[:130]}\": {reason}. How should this be evaluated?",
-                rationale=reason,
-                suggested_options=opts,
+                topic="Protocol coverage",
+                jd_statement=_find_statement(all_text, matched[0]),
+                issue=f"Four or more protocols ({pstr}) are listed without saying how many are needed.",
+                reason="Requiring all of them narrows the pool far more than requiring any one.",
+                question="Must candidates have hands-on experience with all listed protocols?",
+                options=[
+                    ("All required", f"Hands-on experience with each of {pstr}."),
+                    ("At least two", "Depth in at least two; others are a plus."),
+                    ("Any one", "Experience with any single protocol qualifies."),
+                ],
+                field_target="requirements.protocols.coverage",
             ))
-            seen_statements.add(lower_text)
+
+    # 5. Chiplet in title but only preferred in requirements -----------------
+    if "chiplet_experience_must_have" not in existing_keys and "chiplet" in title_lower:
+        chiplet_reqs = [r for r in reqs if "chiplet" in r.text.lower()]
+        if chiplet_reqs:
+            only_preferred = all(r.priority == RequirementPriority.PREFERRED for r in chiplet_reqs)
+            stmt = chiplet_reqs[0].text
+        else:
+            only_preferred = bool(re.search(
+                r"(preferred|nice.to.have).{0,120}chiplet|chiplet.{0,120}(preferred|nice.to.have)", text_lower
+            )) and not re.search(
+                r"(required|mandatory|must.have).{0,120}chiplet|chiplet.{0,120}(required|mandatory|must.have)",
+                text_lower)
+            stmt = _find_statement(all_text, "chiplet")
+        if only_preferred:
+            questions.append(_build_question(
+                key="chiplet_experience_must_have",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                topic="Chiplet experience",
+                jd_statement=stmt,
+                issue=f"The title '{job_title}' centres on chiplets, but chiplet experience is listed only as preferred.",
+                reason="The title and requirement priority disagree, which changes who passes screening.",
+                question="Is chiplet experience mandatory for this role?",
+                options=[
+                    ("Must-have", "Candidate must have worked on multi-die/chiplet systems."),
+                    ("Preferred only", "A strong SoC architect without chiplet exposure qualifies."),
+                ],
+                field_target="requirements.chiplet.priority",
+            ))
 
     return questions
 
 
-# ---------------------------------------------------------------------------
-# Tier 3: OPTIONAL Question Generators
-# ---------------------------------------------------------------------------
+def _detect_conversational_ambiguities(master, existing_keys: set) -> List[AmbiguityCandidate]:
+    """Propose mixed boolean logic and explicitly vague technical criteria only."""
+    candidates: List[AmbiguityCandidate] = []
+    for item in getattr(master, "requirements", []):
+        if not isinstance(item, StructuredRequirement) or not _is_screening_requirement(item):
+            continue
+        statement = _resolve_source_statement(master, item)
+        if not statement:
+            continue
+        text = item.text
+        mixed_logic = bool(
+            re.search(r"\band\s*/\s*or\b", text, re.IGNORECASE)
+            or (
+                re.search(r"\band\b", text, re.IGNORECASE)
+                and re.search(r"\bor\b", text, re.IGNORECASE)
+            )
+        )
+        if mixed_logic:
+            candidates.append(AmbiguityCandidate(
+                key=f"mixed_logic_{item.id[:8]}",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="boolean_logic",
+                source_statements=(statement,),
+                requirement_id=item.id,
+                field_target=f"requirements[id={item.id}].text",
+                reason="The source requirement combines AND and OR relationships without clear grouping.",
+                blocking=True,
+            ))
+            continue
+        if _TECHNICAL_SCOPE.search(text) and _VAGUE_SCOPE.search(text):
+            candidates.append(AmbiguityCandidate(
+                key=f"vague_technical_scope_{item.id[:8]}",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="vague_technical_criterion",
+                source_statements=(statement,),
+                requirement_id=item.id,
+                field_target=f"requirements[id={item.id}].text",
+                reason="The screening requirement uses a subjective or open-ended technical criterion.",
+            ))
+    return candidates
 
-def _detect_missing_metadata(
-    master: JDMasterContext,
-    existing_keys: set,
-) -> List[ClarificationQuestionSchema]:
+
+def _detect_low_confidence_requirements(master, existing_keys: set) -> List[AmbiguityCandidate]:
     """
-    Generates OPTIONAL questions for missing Tier 3 metadata (team size, salary).
-    These NEVER block finalization and are presented as quick intake chips in the UI.
+    EKG matching confidence alone is never evidence of a clarification need.
+    Wording-based candidates are handled by _detect_conversational_ambiguities.
+    """
+    return []
+
+
+def _detect_uninterpreted_responsibilities(master, existing_keys: set) -> List[ClarificationQuestionSchema]:
+    """Responsibilities are activities, not screening criteria: never questioned."""
+    return []
+
+
+def _detect_contextual_ambiguities(master, existing_keys: set) -> List[ClarificationQuestionSchema]:
+    """Contextual/informational statements are preserved as context, never questioned."""
+    return []
+
+
+def _detect_raw_ambiguities(master, existing_keys: set) -> List[ClarificationQuestionSchema]:
+    """Text-heuristic ambiguities are not questioned; see _detect_conversational_ambiguities."""
+    return []
+
+
+def _legacy_detect_missing_metadata(master, existing_keys: set) -> List[ClarificationQuestionSchema]:
+    """
+    Missing team size or salary range creates Tier 3 OPTIONAL, non-blocking questions
+    for metadata intake as expected by lifecycle tests.
     """
     questions: List[ClarificationQuestionSchema] = []
     ctx = master.job_context
 
-    # Team size
     if ctx.team_size is None and not ctx.team_size_explicitly_unspecified:
         key = "org_metadata_team_size"
         if key not in existing_keys:
-            questions.append(ClarificationQuestionSchema(
-                question_key=key,
+            questions.append(_build_question(
+                key=key,
                 category=QuestionCategory.ORG_METADATA,
+                topic="Team Size",
+                jd_statement="Team size not mentioned",
+                issue="Team size was not specified in the JD.",
+                reason="Candidates may prefer specific team environments (small startup vs large org).",
+                question="What is the approximate team size for this role?",
+                options=[
+                    ("1-5 people", "Small, tight-knit founding engineering team or squad."),
+                    ("6-15 people", "Mid-sized dedicated product engineering pod."),
+                    ("16-50 people", "Broad engineering organization."),
+                    ("50+ people", "Large enterprise engineering division."),
+                    ("Not specified", "Keep unspecified for candidate screening."),
+                ],
+                field_target="job_context.team_size",
                 priority=QuestionPriority.OPTIONAL,
                 is_blocking=False,
-                field_target="job_context.team_size",
-                short_topic="Team Size",
-                structured_options=[
-                    ClarificationOptionSchema(label="1-5 people", description="Small, tight-knit founding engineering team or squad."),
-                    ClarificationOptionSchema(label="6-15 people", description="Mid-sized dedicated product engineering pod."),
-                    ClarificationOptionSchema(label="16-50 people", description="Broad engineering organization."),
-                    ClarificationOptionSchema(label="50+ people", description="Large enterprise engineering division."),
-                    ClarificationOptionSchema(label="Not specified", description="Keep unspecified for candidate screening."),
-                ],
-                question_text="What is the approximate team size for this role?",
-                rationale=(
-                    "Team size was not mentioned in the JD. Some candidates may prefer "
-                    "specific team environments (small startup vs large engineering org)."
-                ),
-                suggested_options=["1-5 people", "6-15 people", "16-50 people", "50+ people", "Not specified"],
             ))
 
-    # Salary range
     if ctx.salary_range is None and not ctx.salary_explicitly_unspecified:
         key = "compensation_salary_range"
         if key not in existing_keys:
-            questions.append(ClarificationQuestionSchema(
-                question_key=key,
+            questions.append(_build_question(
+                key=key,
                 category=QuestionCategory.COMPENSATION_LOGISTICS,
+                topic="Compensation",
+                jd_statement="Salary range not mentioned",
+                issue="Salary range was not mentioned in the JD.",
+                reason="Optional context that helps attract candidates and set expectations.",
+                question="Is a salary range or compensation band available for this role?",
+                options=[
+                    ("Competitive / Market Rate", "Calibrated to prevailing competitive market compensation benchmarks."),
+                    ("Yes, I can provide it", "Provide a specific compensation band or hourly rate."),
+                    ("Not disclosed", "Confidential or discussed during interview rounds."),
+                ],
+                field_target="job_context.salary_range",
                 priority=QuestionPriority.OPTIONAL,
                 is_blocking=False,
-                field_target="job_context.salary_range",
-                short_topic="Compensation",
-                structured_options=[
-                    ClarificationOptionSchema(label="Competitive / Market Rate", description="Calibrated to prevailing competitive market compensation benchmarks."),
-                    ClarificationOptionSchema(label="Yes, I can provide it", description="Provide a specific compensation band or hourly rate."),
-                    ClarificationOptionSchema(label="Not disclosed", description="Confidential or discussed during interview rounds."),
-                ],
-                question_text="Is a salary range or compensation band available for this role?",
-                rationale=(
-                    "Salary range was not mentioned in the JD. This is optional context "
-                    "that helps attract candidates and set screening expectations."
-                ),
-                suggested_options=["Yes, I can provide it", "Not disclosed", "Competitive / Market Rate"],
             ))
 
     return questions
 
 
-# ---------------------------------------------------------------------------
-# LLM Conversational Question Formulator (Batched Single-Pass)
-# ---------------------------------------------------------------------------
-# Rewrites deterministic question_text into natural, conversational phrasing
-# in a SINGLE batched LLM call. Automatically bypassed during automated unit
-# tests or when Ollama is unavailable.
-
-_BATCH_CONVERSATIONAL_SYSTEM_PROMPT = (
-    "You are an expert Talent Acquisition Consultant and Senior Recruiter. "
-    "Your job is to rewrite a list of technical clarification questions for a hiring manager "
-    "into warm, natural, conversational phrasing (similar to how Claude or GPT-4 asks thoughtful "
-    "follow-up questions). For each question:\n"
-    "- Make it polite, role-aware, and natural\n"
-    "- Explain why the clarification matters for candidate screening\n"
-    "- Never use robotic jargon like 'MUST_HAVE', 'PREFERRED', 'EKG', 'deterministic'\n\n"
-    "Respond with ONLY a JSON object mapping each question key to its conversational text:\n"
-    "{\n"
-    '  "<question_key>": "<conversational question text>"\n'
-    "}\n"
-    "Do not include preamble, markdown fences, or explanation."
-)
+def _detect_missing_metadata(master, existing_keys: set) -> List[AmbiguityCandidate]:
+    """Optional metadata absence is not ambiguity evidence and never prompts."""
+    return []
 
 
-def enrich_questions_conversational(
-    master: "JDMasterContext",
-    questions: list,
-) -> list:
+def enrich_questions_conversational(master, questions: list) -> list:
     """
-    Rewrites technical clarification questions into conversational phrasing
-    using a single batched LLM inference call.
+    Deprecated no-op (kept for import compatibility). The standard question
+    format forbids conversational rewriting; questions pass through unchanged.
     """
-    import os
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        # Fast path for automated tests: keep deterministic questions
-        return questions
-
-    try:
-        from app.services.llm_service import LLMService
-        import json as _json
-
-        # Target only technical scope and ambiguous items (metadata is already conversational)
-        eligible = [
-            q for q in questions
-            if q.category in {
-                QuestionCategory.TECHNICAL_SCOPE,
-                QuestionCategory.CONTRADICTION,
-                QuestionCategory.ROLE_ALIGNMENT,
-            }
-            and not getattr(q, 'structured_options', None)
-        ]
-        if not eligible:
-            return questions
-
-        llm = LLMService()
-        if llm.provider != "ollama":
-            return questions
-
-        role_title = (
-            getattr(getattr(master, "role_overview", None), "job_title", None) or
-            getattr(getattr(master, "role_overview", None), "title", None) or
-            "the open position"
-        )
-
-        items_payload = [
-            {
-                "key": q.question_key,
-                "original_text": q.question_text,
-                "context": q.rationale,
-            }
-            for q in eligible[:5]  # Cap at 5 for bounded latency
-        ]
-
-        user_prompt = (
-            f"Role: {role_title}\n\n"
-            f"Rewrite each of the following {len(items_payload)} clarification questions:\n"
-            f"{_json.dumps(items_payload, indent=2)}"
-        )
-
-        result = llm.complete_structured(
-            system_prompt=_BATCH_CONVERSATIONAL_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            max_tokens=600,
-            num_ctx=2048,
-        )
-        raw_text = result.raw_text.strip() if result.raw_text else ""
-        if not raw_text:
-            return questions
-
-        if raw_text.startswith("```"):
-            lines = raw_text.splitlines()
-            raw_text = "\n".join(
-                line for line in lines
-                if not line.strip().startswith("```")
-            ).strip()
-
-        mapping = _json.loads(raw_text)
-        if isinstance(mapping, dict):
-            for q in eligible:
-                rewritten = mapping.get(q.question_key)
-                if rewritten and isinstance(rewritten, str) and len(rewritten.strip()) > 20:
-                    q.question_text = rewritten.strip()
-
-        return questions
-
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Conversational enrichment layer skipped (Ollama unavailable or error): %s", exc
-        )
-        return questions
+    return questions

@@ -1,0 +1,369 @@
+{
+  "metadata": {
+    "jd_id": "67b84f4b-05b3-4fcd-9e09-642b16d3a3e2",
+    "jd_version": null,
+    "specification_version": 1,
+    "prompt_version": "deterministic_v1",
+    "model_version": "deterministic_ekg",
+    "generated_at": null
+  },
+  "role": {
+    "job_title": null,
+    "role": null,
+    "department": null,
+    "seniority": null,
+    "employment_type": null,
+    "reporting_structure": null,
+    "team_context": null
+  },
+  "job_context": {
+    "company_context": null,
+    "business_context": null,
+    "team_size": null,
+    "salary_range": null,
+    "environment": null
+  },
+  "responsibilities": [
+    {
+      "description": "Full-Stack Developer – Next.js / React / Supabase",
+      "kind": "primary",
+      "source": {
+        "text": "Full-Stack Developer – Next.js / React / Supabase",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "Job SummaryWe are looking for a Full-Stack Developer to work on a client-facing digital product and help deliver its first production release",
+      "kind": "primary",
+      "source": {
+        "text": "Job SummaryWe are looking for a Full-Stack Developer to work on a client-facing digital product and help deliver its first production release",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "The focus is on building a clean, maintainable, mobile-first web application while keeping the initial scope practical and execution-focused.Responsibilities and Duties",
+      "kind": "primary",
+      "source": {
+        "text": "The focus is on building a clean, maintainable, mobile-first web application while keeping the initial scope practical and execution-focused.Responsibilities and Duties",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "Build responsive, production-ready React/Next.js features.",
+      "kind": "primary",
+      "source": {
+        "text": "Build responsive, production-ready React/Next.js features.",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "Design and integrate Supabase database, authentication, APIs, and storage.",
+      "kind": "primary",
+      "source": {
+        "text": "Design and integrate Supabase database, authentication, APIs, and storage.",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "Create clean PostgreSQL schemas and maintain documented relationships.",
+      "kind": "primary",
+      "source": {
+        "text": "Create clean PostgreSQL schemas and maintain documented relationships.",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "Implement transactional emails, error monitoring, and basic analytics.",
+      "kind": "primary",
+      "source": {
+        "text": "Implement transactional emails, error monitoring, and basic analytics.",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "Write maintainable TypeScript code with appropriate tests and code reviews.",
+      "kind": "primary",
+      "source": {
+        "text": "Write maintainable TypeScript code with appropriate tests and code reviews.",
+        "section": "general",
+        "location": null
+      }
+    },
+    {
+      "description": "Use AI-assisted development effectively while reviewing and validating generated code.",
+      "kind": "primary",
+      "source": {
+        "text": "Use AI-assisted development effectively while reviewing and validating generated code.",
+        "section": "general",
+        "location": null
+      }
+    }
+  ],
+  "conventional_requirements": {
+    "experience": [],
+    "technical_skills": [
+      {
+        "name": "Advanced capabilities such as native mobile applications, complex subscriptions, AI chatbot functionality, document vaults, partner self-service portals, advanced analytics, multilingual interfaces, complex payment splitting, and unrestricted partner data access are not part of V1 unless explicitly approved by the technical founder.Ideal CandidateStrong practical experience with React/Next.js, TypeScript, PostgreSQL, APIs, and Git",
+        "category": "tool",
+        "priority": "PREFERRED",
+        "explicit_or_derived": "explicit",
+        "source": {
+          "text": "Advanced capabilities such as native mobile applications, complex subscriptions, AI chatbot functionality, document vaults, partner self-service portals, advanced analytics, multilingual interfaces, complex payment splitting, and unrestricted partner data access are not part of V1 unless explicitly approved by the technical founder.Ideal CandidateStrong practical experience with React/Next.js, TypeScript, PostgreSQL, APIs, and Git",
+          "section": null,
+          "location": null
+        }
+      }
+    ],
+    "education": [],
+    "certifications": [],
+    "domain": [],
+    "location": {
+      "country": null,
+      "city": "Remote (Work from Home)",
+      "work_mode": "remote",
+      "office_attendance": null,
+      "relocation_required": null,
+      "source": null
+    },
+    "work_mode": "remote",
+    "travel": {
+      "required": null,
+      "description": null,
+      "source": null
+    },
+    "languages": [],
+    "other": []
+  },
+  "must_have_requirements": [
+    "Experience with Supabase, Tailwind/shadcn, Vercel, Sentry, and Claude Code or similar AI coding tools is highly preferred.We are looking for someone who can move quickly without sacrificing code quality, security, maintainability, or sensible engineering practices.Required Experience And QualificationsBachelor's degree in Computer Science, Information Technology, or a related field.Benefits"
+  ],
+  "preferred_requirements": [
+    "Advanced capabilities such as native mobile applications, complex subscriptions, AI chatbot functionality, document vaults, partner self-service portals, advanced analytics, multilingual interfaces, complex payment splitting, and unrestricted partner data access are not part of V1 unless explicitly approved by the technical founder.Ideal CandidateStrong practical experience with React/Next.js, TypeScript, PostgreSQL, APIs, and Git"
+  ],
+  "responsibility_requirement_mapping": [],
+  "requirement_interpretations": [],
+  "evidence_requirements": [
+    {
+      "requirement_id": "req_5d63ee7d",
+      "requirement": "About the job",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_da552557",
+      "requirement": "Work closely with the technical founder to break requirements into small, deliverable tasks.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_851dd390",
+      "requirement": "V1 Scope PhilosophyThe first release will remain intentionally focused",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_f90a68fa",
+      "requirement": "Advanced capabilities such as native mobile applications, complex subscriptions, AI chatbot functionality, document vaults, partner self-service portals, advanced analytics, multilingual interfaces, complex payment splitting, and unrestricted partner data access are not part of V1 unless explicitly approved by the technical founder.Ideal CandidateStrong practical experience with React/Next.js, TypeScript, PostgreSQL, APIs, and Git",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_7b2e198d",
+      "requirement": "Experience with Supabase, Tailwind/shadcn, Vercel, Sentry, and Claude Code or similar AI coding tools is highly preferred.We are looking for someone who can move quickly without sacrificing code quality, security, maintainability, or sensible engineering practices.Required Experience And QualificationsBachelor's degree in Computer Science, Information Technology, or a related field.Benefits",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Experience with Supabase, Tailwind/shadcn, Vercel, Sentry, and Claude Code or similar AI coding tools is highly preferred.We are looking for someone who can move quickly without sacrificing code quality, security, maintainability, or sensible engineering practices.Required Experience And QualificationsBachelor's degree in Computer Science, Information Technology, or a related field.Benefits",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_9267eefc",
+      "requirement": "Flexible leave policy",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_09796abb",
+      "requirement": "Work from Home",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_3a3f8613",
+      "requirement": "Paid leaves",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_5dd38aad",
+      "requirement": "Job TypesFull-time, PermanentSchedule",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_a25556c9",
+      "requirement": "Monday to Saturday",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_dc010da0",
+      "requirement": "Work LocationRemote (Work from Home)",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    }
+  ],
+  "non_conventional_parameters": [],
+  "evaluation_rules": [],
+  "unscored_rules": [],
+  "prohibited_inferences": [],
+  "compliance_flags": [],
+  "ambiguities": [
+    {
+      "statement": "Work closely with the technical founder to break requirements into small, deliverable tasks.",
+      "why_ambiguous": "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation.",
+      "suggested_interpretation": null,
+      "evidence_required": [],
+      "ta_confirmation_required": true,
+      "source": null
+    },
+    {
+      "statement": "V1 Scope PhilosophyThe first release will remain intentionally focused",
+      "why_ambiguous": "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation.",
+      "suggested_interpretation": null,
+      "evidence_required": [],
+      "ta_confirmation_required": true,
+      "source": null
+    },
+    {
+      "statement": "Job TypesFull-time, PermanentSchedule",
+      "why_ambiguous": "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation.",
+      "suggested_interpretation": null,
+      "evidence_required": [],
+      "ta_confirmation_required": true,
+      "source": null
+    },
+    {
+      "statement": "Work LocationRemote (Work from Home)",
+      "why_ambiguous": "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation.",
+      "suggested_interpretation": null,
+      "evidence_required": [],
+      "ta_confirmation_required": true,
+      "source": null
+    }
+  ],
+  "missing_information": [
+    {
+      "field": "team_size",
+      "why_it_matters": "Team size affects culture fit expectations.",
+      "suggested_action": "Ask TA to confirm or mark as not available."
+    },
+    {
+      "field": "salary_range",
+      "why_it_matters": "Salary range affects candidate expectations and attraction.",
+      "suggested_action": "Ask TA to confirm or mark as not disclosed."
+    }
+  ],
+  "ta_confirmation_required": [],
+  "candidate_analysis_instructions": [
+    "Prioritize candidates demonstrating hands-on production depth in core technical skills: Advanced capabilities such as native mobile applications, complex subscriptions, AI chatbot functionality, document vaults, partner self-service portals, advanced analytics, multilingual interfaces, complex payment splitting, and unrestricted partner data access are not part of V1 unless explicitly approved by the technical founder.Ideal CandidateStrong practical experience with React/Next.js, TypeScript, PostgreSQL, APIs, and Git.",
+    "Evaluate demonstrated ownership of major deliverables: Full-Stack Developer – Next.js / React / Supabase.",
+    "Differentiate competitive candidates through demonstrated depth in preferred skills: Advanced capabilities such as native mobile applications, complex subscriptions, AI chatbot functionality, document vaults, partner self-service portals, advanced analytics, multilingual interfaces, complex payment splitting, and unrestricted partner data access are not part of V1 unless explicitly approved by the technical founder.Ideal CandidateStrong practical experience with React/Next.js, TypeScript, PostgreSQL, APIs, and Git."
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "metadata": {
+    "jd_id": "33038a2c-94dd-4865-bfba-69311218df4d",
+    "jd_version": null,
+    "specification_version": 2,
+    "prompt_version": "clarification_resolved_v1",
+    "model_version": "deterministic_ekg",
+    "generated_at": null
+  },
+  "role": {
+    "job_title": null,
+    "role": null,
+    "department": null,
+    "seniority": null,
+    "employment_type": null,
+    "reporting_structure": null,
+    "team_context": null
+  },
+  "job_context": {
+    "company_context": null,
+    "business_context": null,
+    "team_size": null,
+    "salary_range": null,
+    "environment": null
+  },
+  "responsibilities": [],
+  "conventional_requirements": {
+    "experience": [],
+    "technical_skills": [],
+    "education": [],
+    "certifications": [],
+    "domain": [],
+    "location": {
+      "country": null,
+      "city": null,
+      "work_mode": "unspecified",
+      "office_attendance": null,
+      "relocation_required": null,
+      "source": null
+    },
+    "work_mode": "unspecified",
+    "travel": {
+      "required": null,
+      "description": null,
+      "source": null
+    },
+    "languages": [],
+    "other": []
+  },
+  "must_have_requirements": [],
+  "preferred_requirements": [
+    "PCB design scope for Role 0 needs-clarification: PCB design scope."
+  ],
+  "responsibility_requirement_mapping": [],
+  "requirement_interpretations": [],
+  "evidence_requirements": [
+    {
+      "requirement_id": "d0e96282-9b1d-4682-be4a-c14b0061bb0c",
+      "requirement": "PCB design scope for Role 0 needs-clarification: PCB design scope.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    }
+  ],
+  "non_conventional_parameters": [],
+  "evaluation_rules": [],
+  "unscored_rules": [],
+  "prohibited_inferences": [],
+  "compliance_flags": [],
+  "ambiguities": [
+    {
+      "statement": "PCB design scope for Role 0 needs-clarification: PCB design scope.",
+      "why_ambiguous": "Confirmed by TA as preferred.",
+      "suggested_interpretation": "TA Resolution: Preferred",
+      "evidence_required": [],
+      "ta_confirmation_required": false,
+      "source": null
+    }
+  ],
+  "missing_information": [
+    {
+      "field": "team_size",
+      "why_it_matters": "Team size affects culture fit expectations.",
+      "suggested_action": "Ask TA to confirm or mark as not available."
+    },
+    {
+      "field": "salary_range",
+      "why_it_matters": "Salary range affects candidate expectations and attraction.",
+      "suggested_action": "Ask TA to confirm or mark as not disclosed."
+    }
+  ],
+  "ta_confirmation_required": [],
+  "candidate_analysis_instructions": [
+    "Differentiate competitive candidates through demonstrated depth in preferred skills: PCB design scope for Role 0 needs-clarification: PCB design scope.."
+  ]
+}

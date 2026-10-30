@@ -187,8 +187,12 @@ def make_master_context(
     if with_ekg_derived:
         requirements.append(make_ekg_derived("Bare-metal firmware debugging (EKG derived)"))
 
+    source_text = raw_jd_text
+    if with_unresolved and "PCB design processes" not in source_text:
+        source_text += "\n\nRequirements:\n- Knowledge of PCB design processes."
+
     return JDMasterContext(
-        raw_jd_text=raw_jd_text,
+        raw_jd_text=source_text,
         role_overview=RoleOverview(
             job_title="Embedded Systems Engineer",
             seniority="Senior",

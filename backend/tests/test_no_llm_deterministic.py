@@ -64,7 +64,7 @@ def test_full_lifecycle_zero_llm_offline():
     """
     Comprehensive Zero-LLM proof:
     1. Ingest hardware JD into authoritative master context.
-    2. Generate clarification questions deterministically (zero LLMs).
+    2. Confirm a complete JD needs no semantic-verification LLM call.
     3. Verify question classification (blocking vs optional).
     4. Submit TA answers and updates (zero LLMs).
     5. Finalize the JD through the gatekeeper (zero LLMs).
@@ -75,13 +75,10 @@ def test_full_lifecycle_zero_llm_offline():
     master: JDMasterContext = make_hardware_jd_context()
     assert master.lifecycle_status == JDLifecycleStatus.DRAFT
 
-    # 2. Clarification generation (zero LLMs)
+    # 2. No source-backed ambiguity candidates means no LLM call is needed.
     master = generate_clarification_questions(master, actor="offline_runner")
-    assert master.lifecycle_status in (
-        JDLifecycleStatus.AWAITING_CLARIFICATION,
-        JDLifecycleStatus.READY_FOR_REVIEW,
-    )
-    assert len(master.clarification_history) > 0
+    assert master.lifecycle_status == JDLifecycleStatus.READY_FOR_REVIEW
+    assert master.clarification_history == []
 
     # 3. Answer any blocking questions deterministically
     blocking_questions = [
@@ -141,7 +138,8 @@ def test_clarification_engine_never_calls_ollama():
     with patch.dict(sys.modules, {"ollama": None, "httpx": None, "requests": None}):
         master = make_hardware_jd_context()
         master = generate_clarification_questions(master)
-        assert len(master.clarification_history) > 0
+        assert master.clarification_history == []
+        assert master.lifecycle_status == JDLifecycleStatus.READY_FOR_REVIEW
 
 
 def test_projection_and_query_engine_never_call_ollama():

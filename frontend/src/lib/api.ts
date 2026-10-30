@@ -47,6 +47,37 @@ export interface AnalysisStatusResponse {
   current_stage?: string;
 }
 
+export type BatchTaskStatus = "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED" | "CANCELLED";
+
+export interface BatchTask {
+  task_id: string;
+  jd_id: string;
+  title: string;
+  filename: string;
+  status: BatchTaskStatus;
+  stage: string;
+  stage_label: string;
+  progress_percent: number;
+  attempt_count: number;
+  cancel_requested: boolean;
+  error_message: string | null;
+  has_specification: boolean;
+}
+
+export interface JDBatch {
+  batch_id: string;
+  project_id: string;
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  processing: number;
+  queued: number;
+  progress_percent: number;
+  tasks: BatchTask[];
+}
+
 export interface ChatTurn {
   role: "user" | "assistant";
   content: string;
@@ -117,6 +148,62 @@ export async function uploadJD(
   if (input.file) form.append("file", input.file);
   else if (input.text) form.append("text", input.text);
   return request("/api/jds", { method: "POST", body: form, timeoutMs: 60_000 });
+}
+
+export async function createJDBatch(projectId: string, files: File[]): Promise<JDBatch> {
+  const form = new FormData();
+  form.append("project_id", projectId);
+  files.forEach((file) => form.append("files", file));
+  return request("/api/batches", { method: "POST", body: form, timeoutMs: 120_000 });
+}
+
+export async function getJDBatch(batchId: string, signal?: AbortSignal): Promise<JDBatch> {
+  return request(`/api/batches/${batchId}`, { signal, timeoutMs: 15_000 });
+}
+
+export async function listJDBatches(signal?: AbortSignal): Promise<JDBatch[]> {
+  return request("/api/batches?limit=20", { signal, timeoutMs: 15_000 });
+}
+
+export async function getBatchArtifact(
+  batchId: string,
+  jdId: string,
+  artifact: "md" | "json",
+  signal?: AbortSignal
+): Promise<string> {
+  const response = await fetch(
+    `${API_BASE}/api/batches/${batchId}/jds/${jdId}/downloads/${artifact}`,
+    { signal }
+  );
+  if (!response.ok) {
+    let detail = `Request failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(detail);
+  }
+  return response.text();
+}
+
+export async function retryBatchTask(batchId: string, taskId: string): Promise<{ status: string }> {
+  return request(`/api/batches/${batchId}/tasks/${taskId}/retry`, { method: "POST", timeoutMs: 15_000 });
+}
+
+export async function cancelBatchTask(batchId: string, taskId: string): Promise<{ status: string }> {
+  return request(`/api/batches/${batchId}/tasks/${taskId}/cancel`, { method: "POST", timeoutMs: 15_000 });
+}
+
+export async function refreshBatchTaskArtifacts(
+  batchId: string,
+  taskId: string
+): Promise<{ status: string }> {
+  return request(`/api/batches/${batchId}/tasks/${taskId}/refresh`, {
+    method: "POST",
+    timeoutMs: 30_000,
+  });
 }
 
 /** Returns immediately (HTTP 202); the analysis runs in the background. */

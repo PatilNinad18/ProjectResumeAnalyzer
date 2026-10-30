@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "jd_id": "16663026-5c61-4593-99eb-a8d0efedbe7a",
+    "jd_version": null,
+    "specification_version": 1,
+    "prompt_version": "deterministic_v1",
+    "model_version": "deterministic_ekg",
+    "generated_at": null
+  },
+  "role": {
+    "job_title": null,
+    "role": null,
+    "department": null,
+    "seniority": null,
+    "employment_type": null,
+    "reporting_structure": null,
+    "team_context": null
+  },
+  "job_context": {
+    "company_context": null,
+    "business_context": null,
+    "team_size": null,
+    "salary_range": null,
+    "environment": null
+  },
+  "responsibilities": [],
+  "conventional_requirements": {
+    "experience": [],
+    "technical_skills": [],
+    "education": [],
+    "certifications": [],
+    "domain": [],
+    "location": {
+      "country": null,
+      "city": null,
+      "work_mode": "unspecified",
+      "office_attendance": null,
+      "relocation_required": null,
+      "source": null
+    },
+    "work_mode": "unspecified",
+    "travel": {
+      "required": null,
+      "description": null,
+      "source": null
+    },
+    "languages": [],
+    "other": []
+  },
+  "must_have_requirements": [],
+  "preferred_requirements": [],
+  "responsibility_requirement_mapping": [],
+  "requirement_interpretations": [],
+  "evidence_requirements": [],
+  "non_conventional_parameters": [],
+  "evaluation_rules": [],
+  "unscored_rules": [],
+  "prohibited_inferences": [],
+  "compliance_flags": [],
+  "ambiguities": [],
+  "missing_information": [
+    {
+      "field": "team_size",
+      "why_it_matters": "Team size affects culture fit expectations.",
+      "suggested_action": "Ask TA to confirm or mark as not available."
+    },
+    {
+      "field": "salary_range",
+      "why_it_matters": "Salary range affects candidate expectations and attraction.",
+      "suggested_action": "Ask TA to confirm or mark as not disclosed."
+    }
+  ],
+  "ta_confirmation_required": [],
+  "candidate_analysis_instructions": []
+}

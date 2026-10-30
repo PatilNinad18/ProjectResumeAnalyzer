@@ -374,26 +374,29 @@ class OllamaAdapter(ProviderAdapter):
         timeout = httpx.Timeout(connect=10.0, read=float(cfg_int("OLLAMA_READ_TIMEOUT", 180)), write=30.0, pool=10.0)
         start = time.perf_counter()
         try:
-            # trust_env=False: a Windows proxy must never intercept localhost traffic.
-            with httpx.Client(timeout=timeout, trust_env=False) as client:
-                for _ in range(3):
-                    try:
-                        text, in_tok, out_tok, finish = self._consume(client, url, payload, model)
-                        break
-                    except _OllamaHTTPError as exc:
-                        if exc.status not in (400, 500):
-                            raise
-                        # Degrade gracefully: older builds reject `think`; some reject schema grammars.
-                        if "think" in payload:
-                            logger.warning("Ollama HTTP %s; retrying without think=False", exc.status)
-                            payload.pop("think")
-                        elif isinstance(payload.get("format"), dict):
-                            logger.warning("Ollama HTTP %s with JSON schema; retrying with format=json", exc.status)
-                            payload["format"] = "json"
-                        else:
-                            raise
-                else:
-                    raise RuntimeError("Ollama request failed after fallbacks.")
+            from app.core.concurrency import acquire_ollama_slot
+
+            with acquire_ollama_slot(f"ollama_{model}"):
+                # trust_env=False: a Windows proxy must never intercept localhost traffic.
+                with httpx.Client(timeout=timeout, trust_env=False) as client:
+                    for _ in range(3):
+                        try:
+                            text, in_tok, out_tok, finish = self._consume(client, url, payload, model)
+                            break
+                        except _OllamaHTTPError as exc:
+                            if exc.status not in (400, 500):
+                                raise
+                            # Degrade gracefully: older builds reject `think`; some reject schema grammars.
+                            if "think" in payload:
+                                logger.warning("Ollama HTTP %s; retrying without think=False", exc.status)
+                                payload.pop("think")
+                            elif isinstance(payload.get("format"), dict):
+                                logger.warning("Ollama HTTP %s with JSON schema; retrying with format=json", exc.status)
+                                payload["format"] = "json"
+                            else:
+                                raise
+                    else:
+                        raise RuntimeError("Ollama request failed after fallbacks.")
         except httpx.ReadTimeout as exc:
             raise RuntimeError(
                 f"Ollama produced no output for {cfg_int('OLLAMA_READ_TIMEOUT', 180)}s. "

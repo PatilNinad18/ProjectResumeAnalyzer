@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -42,7 +43,16 @@ logger = logging.getLogger("jd_agent.worker")
 settings = get_settings()
 
 
-def process_job_description_version(db: Session, jd_version_id: str) -> None:
+class JobProcessingCancelled(Exception):
+    """Raised at a safe pipeline boundary after a batch task is cancelled."""
+
+
+def process_job_description_version(
+    db: Session,
+    jd_version_id: str,
+    on_stage: Optional[Callable[[str, str, int], None]] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+) -> None:
     """The full PARSING -> READY/NEEDS_REVIEW/FAILED pipeline for one JD version."""
     jd_version = db.get(JobDescriptionVersion, jd_version_id)
     if jd_version is None:
@@ -55,12 +65,20 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
 
     storage = get_storage()
 
+    def stage(name: str, label: str, percent: int) -> None:
+        if on_stage is not None:
+            on_stage(name, label, percent)
+        if is_cancelled is not None and is_cancelled():
+            raise JobProcessingCancelled("Processing cancelled by user.")
+
     try:
+        stage("PARSING", "Reading uploaded job description", 15)
         job.status = ProcessingStatusEnum.PARSING
         job.started_at = datetime.now(timezone.utc)
         db.commit()
         raw_text = storage.get_text(jd_version.s3_raw_key)
 
+        stage("UNDERSTANDING", "Extracting requirements and matching EKG concepts", 35)
         job.status = ProcessingStatusEnum.UNDERSTANDING
         db.commit()
 
@@ -83,8 +101,24 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
 
         # Generate clarification questions on master context
         from app.services.clarification.engine import generate_clarification_questions
-        master_context = generate_clarification_questions(master_context, actor="worker_baseline")
+        job_context = master_context.job_context
+        team_size_unspecified = job_context.team_size_explicitly_unspecified
+        salary_unspecified = job_context.salary_explicitly_unspecified
+        try:
+            # Optional metadata and generic disclaimers are not clarification tasks.
+            job_context.team_size_explicitly_unspecified = True
+            job_context.salary_explicitly_unspecified = True
+            master_context = generate_clarification_questions(master_context, actor="worker_baseline")
+        finally:
+            job_context.team_size_explicitly_unspecified = team_size_unspecified
+            job_context.salary_explicitly_unspecified = salary_unspecified
 
+        if not master_context.clarification_history:
+            from app.services.clarification.updater import attempt_finalization
+
+            master_context = attempt_finalization(master_context, actor="worker_baseline")
+
+        stage("VALIDATING", "Validating the canonical specification", 70)
         job.status = ProcessingStatusEnum.VALIDATING
         db.commit()
         _, report = validate_payload(to_json_dict(spec))
@@ -92,10 +126,11 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
 
         job.status = ProcessingStatusEnum.GENERATING
         db.commit()
+        stage("GENERATING", "Generating Markdown and JSON artifacts", 85)
 
         # Attempt automatic Ollama enrichment; fall back cleanly to deterministic baseline on any failure
-        from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
-        enricher = GroundedEnrichmentService()
+        from app.services.enrichment.ta_enrichment_service import get_enrichment_service
+        enricher = get_enrichment_service()
         enrichment_report = None
         enriched_md = None
         enriched_key = None
@@ -160,6 +195,7 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
         baseline_markdown = render_markdown(spec)
         json_str = to_json_str(spec)
 
+        stage("GENERATING", "Saving independent specification artifacts", 95)
         project_id = str(jd_version.job_description.project_id) if jd_version.job_description else "unknown"
         json_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "json")
         md_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "markdown")
@@ -179,7 +215,7 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
             master_context_json=master_context.model_dump(mode="json"),
             enrichment_report_json=enrichment_report.model_dump(mode="json") if enrichment_report else None,
             s3_enriched_markdown_key=enriched_key,
-            lifecycle_status=JDLifecycleStatusEnum.ANALYZED,
+            lifecycle_status=JDLifecycleStatusEnum(master_context.lifecycle_status.value),
             prompt_version=spec.metadata.prompt_version or "deterministic_v1",
             model_version=spec.metadata.model_version or "deterministic_ekg",
             input_tokens=0,
@@ -194,28 +230,31 @@ def process_job_description_version(db: Session, jd_version_id: str) -> None:
 
         from app.models.db_models import ClarificationQuestion, ClarificationQuestionPriorityEnum, ClarificationQuestionStatusEnum
         for q in master_context.clarification_history:
-            try:
-                db.add(
-                    ClarificationQuestion(
-                        job_specification_version_id=spec_version.id,
-                        question_key=q.question_key,
-                        category=q.category.value if hasattr(q.category, "value") else str(q.category),
-                        priority=ClarificationQuestionPriorityEnum(q.priority.value),
-                        is_blocking=q.is_blocking,
-                        question_text=q.question_text,
-                        rationale=q.rationale or "",
-                        field_target=q.field_target,
-                        status=ClarificationQuestionStatusEnum(q.status.value),
-                        answer_text=q.answer_text,
-                    )
+            db.add(
+                ClarificationQuestion(
+                    job_specification_version_id=spec_version.id,
+                    question_key=q.question_key,
+                    category=q.category.value if hasattr(q.category, "value") else str(q.category),
+                    priority=ClarificationQuestionPriorityEnum(q.priority.value),
+                    is_blocking=q.is_blocking,
+                    question_text=q.question_text,
+                    rationale=q.rationale or "",
+                    field_target=q.field_target,
+                    status=ClarificationQuestionStatusEnum(q.status.value),
+                    answer_text=q.answer_text,
                 )
-            except Exception as q_exc:
-                logger.warning("Could not persist clarification question %s: %s", q.question_key, q_exc)
+            )
 
         job.status = ProcessingStatusEnum.NEEDS_REVIEW if needs_review else ProcessingStatusEnum.READY
         job.finished_at = datetime.now(timezone.utc)
         db.commit()
 
+    except JobProcessingCancelled as exc:
+        logger.info("JD processing cancelled for %s", jd_version_id)
+        job.status = ProcessingStatusEnum.FAILED
+        job.error_message = str(exc)
+        job.finished_at = datetime.now(timezone.utc)
+        db.commit()
     except JDUnderstandingError as exc:
         logger.exception("JD understanding failed for %s", jd_version_id)
         job.status = ProcessingStatusEnum.FAILED

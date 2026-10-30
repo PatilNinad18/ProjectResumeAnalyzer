@@ -25,6 +25,7 @@ Fixes in this version (tuned for qwen3:4b):
   * think=False is sent to Ollama so the thinking model does not burn its budget on hidden thinking.
   * If every batch returns nothing, an error is raised so callers fall back to the deterministic
     baseline honestly.
+  * get_enrichment_service() singleton lives at module level (end of file), NOT inside a method.
 
 Optional configuration (all have defaults):
     ENRICH_NUM_CTX=8192        (falls back to OLLAMA_NUM_CTX; keep it equal to llm_service's value
@@ -47,6 +48,7 @@ import os
 import re
 import threading
 import time
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -495,24 +497,28 @@ class GroundedEnrichmentService:
         }
 
         read_timeout = float(_cfg_int("OLLAMA_READ_TIMEOUT", 300))
+        from app.core.concurrency import acquire_ollama_slot
         try:
-            for _ in range(4):
-                try:
-                    return self._stream_once(payload, read_timeout)
-                except httpx.HTTPStatusError as exc:
-                    status = exc.response.status_code
-                    if status in (400, 500):
-                        # Degrade gracefully: older builds reject `think`; some reject schema grammars.
-                        if "think" in payload:
-                            logger.warning("Ollama HTTP %s; retrying without think=False", status)
-                            payload.pop("think")
-                            continue
-                        if isinstance(payload.get("format"), dict):
-                            logger.warning("Ollama HTTP %s with JSON schema; retrying with format=json", status)
-                            payload["format"] = "json"
-                            continue
-                    raise
+            with acquire_ollama_slot(f"ollama_{self.model}"):
+                for _ in range(4):
+                    try:
+                        return self._stream_once(payload, read_timeout)
+                    except httpx.HTTPStatusError as exc:
+                        status = exc.response.status_code
+                        if status in (400, 500):
+                            # Degrade gracefully: older builds reject `think`; some reject schema grammars.
+                            if "think" in payload:
+                                logger.warning("Ollama HTTP %s; retrying without think=False", status)
+                                payload.pop("think")
+                                continue
+                            if isinstance(payload.get("format"), dict):
+                                logger.warning("Ollama HTTP %s with JSON schema; retrying with format=json", status)
+                                payload["format"] = "json"
+                                continue
+                        raise
             raise RuntimeError("Ollama request failed after fallbacks.")
+        except TimeoutError as exc:
+            raise OllamaUnavailableError(str(exc)) from exc
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             with _AVAILABILITY_LOCK:
                 _AVAILABILITY_CACHE[f"{self.base_url}|{self.model}"] = (False, time.time())
@@ -787,23 +793,17 @@ class GroundedEnrichmentService:
 
         batch_results: List[Tuple[int, List[RequirementEnrichmentItem], List[str], Optional[Exception]]] = []
 
-        from app.core.concurrency import acquire_ollama_slot
-        try:
-            with acquire_ollama_slot(f"enrich_spec_{spec_version_id}"):
-                if max_workers == 1:
-                    for b_idx, chunk in enumerate(batches, start=1):
-                        batch_results.append(_run(b_idx, chunk))
-                else:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = [
-                            executor.submit(_run, b_idx, chunk)
-                            for b_idx, chunk in enumerate(batches, start=1)
-                        ]
-                        for fut in concurrent.futures.as_completed(futures):
-                            batch_results.append(fut.result())  # OllamaUnavailableError propagates
-        except TimeoutError as exc:
-            logger.warning("Timed out waiting for Ollama concurrency slot: %s", exc)
-            raise OllamaUnavailableError(str(exc))
+        if max_workers == 1:
+            for b_idx, chunk in enumerate(batches, start=1):
+                batch_results.append(_run(b_idx, chunk))
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_run, b_idx, chunk)
+                    for b_idx, chunk in enumerate(batches, start=1)
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    batch_results.append(fut.result())  # OllamaUnavailableError propagates
 
         batch_results.sort(key=lambda x: x[0])
 
@@ -854,3 +854,12 @@ class GroundedEnrichmentService:
             status="completed",
             model_version=self.model,
         )
+
+
+# --------------------------------------------------------------------------
+# Process-wide singleton (MODULE LEVEL: must stay outside the class and methods)
+# --------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def get_enrichment_service() -> GroundedEnrichmentService:
+    """Return the process-wide enrichment service used by all JD workers."""
+    return GroundedEnrichmentService()

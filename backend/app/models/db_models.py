@@ -208,6 +208,45 @@ class ProcessingJob(Base):
     jd_version = relationship("JobDescriptionVersion", back_populates="processing_jobs")
 
 
+class JobDescriptionBatch(Base):
+    __tablename__ = "job_description_batches"
+
+    id = Column(UUID_COL, primary_key=True, default=gen_uuid)
+    project_id = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="QUEUED", index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    tasks = relationship("JobDescriptionBatchTask", back_populates="batch", cascade="all, delete-orphan")
+
+
+class JobDescriptionBatchTask(Base):
+    __tablename__ = "job_description_batch_tasks"
+
+    id = Column(UUID_COL, primary_key=True, default=gen_uuid)
+    batch_id = Column(UUID_COL, ForeignKey("job_description_batches.id"), nullable=False, index=True)
+    job_description_id = Column(UUID_COL, ForeignKey("job_descriptions.id"), nullable=False, index=True)
+    job_description_version_id = Column(UUID_COL, ForeignKey("job_description_versions.id"), nullable=False)
+    source_filename = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="QUEUED", index=True)
+    stage = Column(String, nullable=False, default="QUEUED")
+    stage_label = Column(String, nullable=False, default="Waiting for a worker")
+    progress_percent = Column(Integer, nullable=False, default=0)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    error_message = Column(Text, nullable=True)
+    markdown_path = Column(Text, nullable=True)
+    json_path = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    batch = relationship("JobDescriptionBatch", back_populates="tasks")
+    job_description = relationship("JobDescription")
+    jd_version = relationship("JobDescriptionVersion")
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

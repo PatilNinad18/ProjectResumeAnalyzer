@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     ollama_use_schema: bool = os.environ.get("OLLAMA_USE_SCHEMA", "false").lower() in ("true", "1", "yes")
     ollama_num_ctx: int = int(os.environ.get("OLLAMA_NUM_CTX", "4096"))
     ollama_read_timeout: int = int(os.environ.get("OLLAMA_READ_TIMEOUT", "300"))
+    # OLLAMA_MAX_CONCURRENCY=0 selects a GPU-memory-aware value at startup.
+    # Set a positive value to explicitly override the detected limit.
+    ollama_max_concurrency: int = int(os.environ.get("OLLAMA_MAX_CONCURRENCY", "0"))
+    jd_processing_concurrency: int = int(os.environ.get("JD_PROCESSING_CONCURRENCY", "4"))
+    ollama_slot_timeout_seconds: float = float(os.environ.get("OLLAMA_SLOT_TIMEOUT_SECONDS", "120"))
 
     # LLM API keys (only needed if using cloud providers like gemini/anthropic)
     anthropic_api_key: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")

@@ -26,6 +26,8 @@ app.include_router(jds_router)
 def on_startup() -> None:
     # In production, use Alembic migrations instead of create_all().
     init_db()
+    from app.services.batch_queue import jd_batch_queue
+    jd_batch_queue.start()
 
 
 @app.get("/health")

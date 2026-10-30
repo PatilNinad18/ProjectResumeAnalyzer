@@ -2,10 +2,9 @@
 tests/test_clarification_lifecycle.py — Clarification Engine & Lifecycle Tests.
 
 Validates:
-  1. 3-Tier Clarification Question Generation (Problem 2 B):
-     - Contradictions & unresolved items produce Tier 1 BLOCKING questions.
-     - Missing metadata (salary, team size) produces Tier 3 OPTIONAL questions.
-     - Optional questions NEVER have is_blocking=True.
+  1. Evidence-grounded clarification question generation:
+     - Verified contradictions and unresolved screening priorities are blocking.
+     - Missing optional metadata does not produce clarification questions.
      - Idempotency: re-running question generation never duplicates questions.
   2. Clarification Answer Submission & Atomic Updates:
      - Answering questions updates status, sets TA provenance, updates master context.
@@ -70,6 +69,36 @@ from tests.stubs import (
 )
 
 
+@pytest.fixture(autouse=True)
+def approve_candidates_for_lifecycle_tests(monkeypatch):
+    """Keep updater/lifecycle tests deterministic; semantic quality is tested separately."""
+    def verify(_master, candidate, context):
+        source = " / ".join(context.statements)
+        first_term = next(
+            (word for word in source.split() if len(word.strip(".,:-()")) > 3),
+            "requirement",
+        ).strip(".,:-()")
+        return {
+            "is_genuine_ambiguity": True,
+            "ambiguity_type": candidate.kind,
+            "interpretation_a": "The requirement is mandatory for screening.",
+            "interpretation_b": "The requirement is preferred and not disqualifying.",
+            "material_impact": "The interpretation changes candidate eligibility.",
+            "source_evidence": source,
+            "clarification_question": f"Should {first_term} be mandatory or preferred?",
+            "answer_options": [
+                {"label": "Mandatory", "description": "Candidates must meet this criterion."},
+                {"label": "Preferred", "description": "The criterion is not disqualifying."},
+            ],
+            "reasoning": "Both interpretations affect screening.",
+        }
+
+    monkeypatch.setattr(
+        "app.services.clarification.engine._verify_ambiguity_candidate",
+        verify,
+    )
+
+
 # ===========================================================================
 # 1. Question Generation & 3-Tier Classification Tests
 # ===========================================================================
@@ -83,7 +112,7 @@ def test_generate_questions_with_unresolved_creates_blocking_question():
     assert len(master.clarification_history) > 0
 
     unresolved_q = next(
-        (q for q in master.clarification_history if "unresolved" in q.question_key),
+        (q for q in master.clarification_history if "unresolved_priority" in q.question_key),
         None,
     )
     assert unresolved_q is not None
@@ -92,19 +121,13 @@ def test_generate_questions_with_unresolved_creates_blocking_question():
     assert unresolved_q.status == QuestionStatus.UNANSWERED
 
 
-def test_generate_questions_missing_metadata_is_optional_not_blocking():
-    """Missing team size or salary range creates Tier 3 OPTIONAL, non-blocking questions."""
+def test_missing_optional_metadata_does_not_create_questions():
+    """Missing salary/team size is not a screening ambiguity."""
     master = make_master_context(with_unresolved=False)
     master = generate_clarification_questions(master, actor="test_runner")
 
-    metadata_questions = [
-        q for q in master.clarification_history
-        if q.category in (QuestionCategory.ORG_METADATA, QuestionCategory.COMPENSATION_LOGISTICS)
-    ]
-    assert len(metadata_questions) > 0
-    for q in metadata_questions:
-        assert q.priority == QuestionPriority.OPTIONAL
-        assert q.is_blocking is False, f"Optional question {q.question_key} must never be blocking"
+    assert master.clarification_history == []
+    assert master.lifecycle_status == JDLifecycleStatus.READY_FOR_REVIEW
 
 
 def test_generate_questions_idempotent():
@@ -153,12 +176,14 @@ def test_submit_valid_answer_updates_master_and_provenance():
     assert "clarification_answered" in audit_events
 
 
-def test_skip_optional_question_succeeds_without_override():
-    """Skipping a Tier 3 OPTIONAL question succeeds without requiring an override record."""
-    master = make_master_context()
+def test_skip_recommended_question_succeeds_without_override():
+    """Skipping a non-blocking generated question succeeds without an override."""
+    master = make_master_context(with_unresolved=True)
     master = generate_clarification_questions(master)
 
-    opt_q = next(q for q in master.clarification_history if q.priority == QuestionPriority.OPTIONAL)
+    opt_q = next(q for q in master.clarification_history if q.priority == QuestionPriority.BLOCKING)
+    opt_q.priority = QuestionPriority.RECOMMENDED
+    opt_q.is_blocking = False
     master = submit_answer(
         master,
         question_key=opt_q.question_key,
@@ -219,23 +244,12 @@ def test_skip_blocking_question_with_override_succeeds():
 
 
 def test_submit_explicitly_unspecified_marks_field():
-    """Submitting EXPLICITLY_UNSPECIFIED marks the question and sets explicit absence on the domain model."""
+    """Missing optional metadata is left unspecified without creating a question."""
     master = make_master_context()
     master = generate_clarification_questions(master)
 
-    team_q = next(
-        (q for q in master.clarification_history if "team_size" in q.question_key),
-        None,
-    )
-    if team_q:
-        master = submit_answer(
-            master,
-            question_key=team_q.question_key,
-            answer_text="Not specified at this time",
-            answered_by="recruiter_jane",
-            status=QuestionStatus.EXPLICITLY_UNSPECIFIED,
-        )
-        assert master.job_context.team_size_explicitly_unspecified is True
+    assert master.clarification_history == []
+    assert master.job_context.team_size_explicitly_unspecified is False
 
 
 # ===========================================================================
@@ -483,8 +497,8 @@ def test_api_endpoints_full_workflow(monkeypatch):
     assert any("c" in a["text"].lower() or "freertos" in a["text"].lower() for a in chat_data["answers"])
 
 
-def test_clarification_answers_reflected_in_markdown():
-    """Verify that submitting TA clarifications updates the domain model and reflects in rendered Markdown."""
+def test_missing_optional_metadata_does_not_create_markdown_clarifications():
+    """Optional metadata remains absent rather than being presented as ambiguity."""
     from app.services.deterministic.extractor import DeterministicExtractor
     from app.schemas.master_context import ExtractionResult
     from app.services.markdown_renderer import render_markdown
@@ -518,34 +532,13 @@ def test_clarification_answers_reflected_in_markdown():
     )
     master = extraction.to_master_context("test_clarif_jd", raw_text)
     master = generate_clarification_questions(master)
-
-    answers = {
-        "org_metadata_team_size": "8 to 12 engineers",
-        "compensation_salary_range": "$160,000 - $190,000",
-    }
-    # If there are any ambiguity questions, answer them too
-    for q in master.clarification_history:
-        if "ambiguity" in q.question_key or "contextual" in q.question_key:
-            answers[q.question_key] = "Confirmed by TA: Strictly required for lead role"
-
-    for q_key, ans_text in answers.items():
-        master = submit_answer(master, question_key=q_key, answer_text=ans_text, answered_by="TA Lead")
+    assert master.clarification_history == []
 
     master = attempt_finalization(master, actor="TA Lead")
     spec = project_to_canonical(master, jd_id="test_clarif_jd", specification_version=2)
     md = render_markdown(spec)
 
-    # 1. Section 1 must reflect team size and salary range
-    assert "- **Team Size:** 8 to 12 engineers" in md
-    assert "- **Salary Range:** $160,000 - $190,000" in md
-
-    # 2. Section 6 must reflect resolved clarifications under Resolved Clarifications
-    if any("ambiguity" in k or "contextual" in k for k in answers):
-        assert "**Resolved Clarifications (TA Confirmed)**" in md
-        assert "TA Resolution:" in md or "Confirmed by TA" in md
-
-    # 3. Missing Information must be empty since both metadata fields were answered
-    assert "**Missing Information**" not in md
+    assert "**Resolved Clarifications (TA Confirmed)**" not in md
 
 
 def test_answering_contextual_ambiguity_moves_to_resolved_in_markdown():

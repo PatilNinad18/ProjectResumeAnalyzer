@@ -1,0 +1,550 @@
+{
+  "metadata": {
+    "jd_id": "82af528f-e936-4383-9e41-825f02d2ba64",
+    "jd_version": null,
+    "specification_version": 2,
+    "prompt_version": "clarification_resolved_v1",
+    "model_version": "deterministic_ekg",
+    "generated_at": null
+  },
+  "role": {
+    "job_title": "Type: Technical Lead / Architect",
+    "role": null,
+    "department": null,
+    "seniority": null,
+    "employment_type": null,
+    "reporting_structure": null,
+    "team_context": null
+  },
+  "job_context": {
+    "company_context": null,
+    "business_context": null,
+    "team_size": null,
+    "salary_range": null,
+    "environment": null
+  },
+  "responsibilities": [
+    {
+      "description": "Customer XPU / Chiplet Architecture Analysis: Study customer XPU/SoC architecture, identify software-visible and performance-critical components, define virtualization requirements and model abstraction levels, and identify interfaces between the customer compute die and the company’s chiplets.",
+      "kind": "primary",
+      "source": {
+        "text": "Customer XPU / Chiplet Architecture Analysis: Study customer XPU/SoC architecture, identify software-visible and performance-critical components, define virtualization requirements and model abstraction levels, and identify interfaces between the customer compute die and the company’s chiplets.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "Virtual Platform / VDK Foundation: Architect and establish the Synopsys Virtualizer/VDK environment; develop reusable SystemC/TLM- based platform infrastructure; define platform configuration, component hierarchy, and interconnect architecture; establish reusable VP templates for different customer XPU configurations.",
+      "kind": "primary",
+      "source": {
+        "text": "Virtual Platform / VDK Foundation: Architect and establish the Synopsys Virtualizer/VDK environment; develop reusable SystemC/TLM- based platform infrastructure; define platform configuration, component hierarchy, and interconnect architecture; establish reusable VP templates for different customer XPU configurations.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "Multi-Chiplet / Multi-XPU Scalability: Define scalable virtual architectures representing multiple chiplets/XPUs, and support scale-up and multi-device configurations.",
+      "kind": "primary",
+      "source": {
+        "text": "Multi-Chiplet / Multi-XPU Scalability: Define scalable virtual architectures representing multiple chiplets/XPUs, and support scale-up and multi-device configurations.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "AI Infrastructure System Modelling: Define the complete system-level virtual platform architecture and integrate compute, connectivity, memory, power, and I/O models.",
+      "kind": "primary",
+      "source": {
+        "text": "AI Infrastructure System Modelling: Define the complete system-level virtual platform architecture and integrate compute, connectivity, memory, power, and I/O models.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "System Performance & Architecture Exploration: Work with performance architects to enable architecture trade-off studies.",
+      "kind": "primary",
+      "source": {
+        "text": "System Performance & Architecture Exploration: Work with performance architects to enable architecture trade-off studies.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "RTL / VP / Emulation Correlation: Define the methodology for correlating TLM models with RTL and emulation.",
+      "kind": "primary",
+      "source": {
+        "text": "RTL / VP / Emulation Correlation: Define the methodology for correlating TLM models with RTL and emulation.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "Automated Regression & Performance Infrastructure: Define the overall VP validation and regression strategy.",
+      "kind": "primary",
+      "source": {
+        "text": "Automated Regression & Performance Infrastructure: Define the overall VP validation and regression strategy.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "Synopsys Virtualizer/VDK-based platform architecture and reusable VP templates.",
+      "kind": "primary",
+      "source": {
+        "text": "Synopsys Virtualizer/VDK-based platform architecture and reusable VP templates.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "System-level virtual platform integrating compute, connectivity, memory, power, and I/O models.",
+      "kind": "primary",
+      "source": {
+        "text": "System-level virtual platform integrating compute, connectivity, memory, power, and I/O models.",
+        "section": "responsibilities",
+        "location": null
+      }
+    },
+    {
+      "description": "VP validation/regression strategy and RTL/emulation correlation methodology.",
+      "kind": "primary",
+      "source": {
+        "text": "VP validation/regression strategy and RTL/emulation correlation methodology.",
+        "section": "responsibilities",
+        "location": null
+      }
+    }
+  ],
+  "conventional_requirements": {
+    "experience": [],
+    "technical_skills": [
+      {
+        "name": "Strong C++ and SystemC/TLM.",
+        "category": "tool",
+        "priority": "AMBIGUOUS",
+        "explicit_or_derived": "explicit",
+        "source": {
+          "text": "Strong C++ and SystemC/TLM.",
+          "section": null,
+          "location": null
+        }
+      },
+      {
+        "name": "Python automation.",
+        "category": "tool",
+        "priority": "PREFERRED",
+        "explicit_or_derived": "explicit",
+        "source": {
+          "text": "Python automation.",
+          "section": null,
+          "location": null
+        }
+      }
+    ],
+    "education": [],
+    "certifications": [],
+    "domain": [],
+    "location": {
+      "country": null,
+      "city": "Bangalore / Hyderabad (Hybrid)",
+      "work_mode": "hybrid",
+      "office_attendance": null,
+      "relocation_required": null,
+      "source": null
+    },
+    "work_mode": "hybrid",
+    "travel": {
+      "required": null,
+      "description": null,
+      "source": null
+    },
+    "languages": [],
+    "other": []
+  },
+  "must_have_requirements": [
+    "10–15+ years of semiconductor/system engineering experience.",
+    "Strong C++ and SystemC/TLM.",
+    "Synopsys Virtualizer / VDK experience.",
+    "SoC/system architecture and virtual prototyping.",
+    "PCIe / CXL / UCIe / AMBA.",
+    "Strong understanding of AI/HPC infrastructure.",
+    "Experience working with both RTL and software teams.",
+    "B.E. / B.Tech / M.E. / M.Tech / M.S. in Electronics, Electrical, Computer Engineering, or related discipline.",
+    "Demonstrated ownership of a virtual platform / VDK architecture used across multiple products or customer configurations.",
+    "Experience defining platform architecture spanning compute, connectivity, memory, power, and I/O.",
+    "Strong systems-thinking and architecture leadership across hardware, software, and verification teams.",
+    "Ability to translate customer XPU requirements into a virtual platform architecture.",
+    "Clear technical communication with RTL, software, and performance teams."
+  ],
+  "preferred_requirements": [
+    "Chiplet architecture and HBM.",
+    "AI accelerator/XPU architecture.",
+    "Emulation platforms such as ZeBu / Palladium / Veloce.",
+    "Python automation.",
+    "Prior experience architecting a virtual platform that shipped across more than one customer program.",
+    "Direct exposure to correlating TLM models against RTL/emulation results."
+  ],
+  "responsibility_requirement_mapping": [],
+  "requirement_interpretations": [],
+  "evidence_requirements": [
+    {
+      "requirement_id": "req_7fd1bbd5",
+      "requirement": "10–15+ years of semiconductor/system engineering experience.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "10–15+ years of semiconductor/system engineering experience.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_6818dc52",
+      "requirement": "Strong C++ and SystemC/TLM.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Strong C++ and SystemC/TLM.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_cba7f273",
+      "requirement": "Synopsys Virtualizer / VDK experience.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Synopsys Virtualizer / VDK experience.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_2a39ab47",
+      "requirement": "SoC/system architecture and virtual prototyping.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "SoC/system architecture and virtual prototyping.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_cc2ecd9c",
+      "requirement": "PCIe / CXL / UCIe / AMBA.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "PCIe / CXL / UCIe / AMBA.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_f7563c64",
+      "requirement": "Strong understanding of AI/HPC infrastructure.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Strong understanding of AI/HPC infrastructure.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_6ec80cdd",
+      "requirement": "Experience working with both RTL and software teams.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Experience working with both RTL and software teams.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_0daa8eb6",
+      "requirement": "Chiplet architecture and HBM.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_45c6ff81",
+      "requirement": "AI accelerator/XPU architecture.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_90d1fc64",
+      "requirement": "Emulation platforms such as ZeBu / Palladium / Veloce.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_4cf24304",
+      "requirement": "Python automation.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_69cef8e4",
+      "requirement": "B.E. / B.Tech / M.E. / M.Tech / M.S. in Electronics, Electrical, Computer Engineering, or related discipline.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "B.E. / B.Tech / M.E. / M.Tech / M.S. in Electronics, Electrical, Computer Engineering, or related discipline.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_00c63e90",
+      "requirement": "Demonstrated ownership of a virtual platform / VDK architecture used across multiple products or customer configurations.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Demonstrated ownership of a virtual platform / VDK architecture used across multiple products or customer configurations.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_e5c69cbd",
+      "requirement": "Experience defining platform architecture spanning compute, connectivity, memory, power, and I/O.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Experience defining platform architecture spanning compute, connectivity, memory, power, and I/O.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_9f9b7f90",
+      "requirement": "Strong systems-thinking and architecture leadership across hardware, software, and verification teams.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Strong systems-thinking and architecture leadership across hardware, software, and verification teams.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_96ddce93",
+      "requirement": "Ability to translate customer XPU requirements into a virtual platform architecture.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Ability to translate customer XPU requirements into a virtual platform architecture.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_b8d13580",
+      "requirement": "Clear technical communication with RTL, software, and performance teams.",
+      "priority": "MUST_HAVE",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": {
+        "text": "Clear technical communication with RTL, software, and performance teams.",
+        "section": null,
+        "location": null
+      }
+    },
+    {
+      "requirement_id": "req_0d8e52d6",
+      "requirement": "Prior experience architecting a virtual platform that shipped across more than one customer program.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    },
+    {
+      "requirement_id": "req_000b5fe1",
+      "requirement": "Direct exposure to correlating TLM models against RTL/emulation results.",
+      "priority": "PREFERRED",
+      "explicit_or_derived": "explicit",
+      "evidence_to_look_for": [],
+      "strong_evidence": null,
+      "moderate_evidence": null,
+      "weak_evidence": null,
+      "insufficient_evidence": null,
+      "prohibited_inference": null,
+      "confidence": "medium",
+      "source": null
+    }
+  ],
+  "non_conventional_parameters": [],
+  "evaluation_rules": [],
+  "unscored_rules": [],
+  "prohibited_inferences": [],
+  "compliance_flags": [],
+  "ambiguities": [
+    {
+      "statement": "10–15+ years of semiconductor/system engineering experience.",
+      "why_ambiguous": "Experience range unclear (e.g., \"5+ years\")",
+      "suggested_interpretation": null,
+      "evidence_required": [],
+      "ta_confirmation_required": true,
+      "source": null
+    },
+    {
+      "statement": "Strong understanding of AI/HPC infrastructure.",
+      "why_ambiguous": "Subjective qualifier without objective criteria",
+      "suggested_interpretation": null,
+      "evidence_required": [],
+      "ta_confirmation_required": true,
+      "source": null
+    }
+  ],
+  "missing_information": [
+    {
+      "field": "team_size",
+      "why_it_matters": "Team size affects culture fit expectations.",
+      "suggested_action": "Ask TA to confirm or mark as not available."
+    },
+    {
+      "field": "salary_range",
+      "why_it_matters": "Salary range affects candidate expectations and attraction.",
+      "suggested_action": "Ask TA to confirm or mark as not disclosed."
+    }
+  ],
+  "ta_confirmation_required": [],
+  "candidate_analysis_instructions": [
+    "Prioritize candidates demonstrating hands-on production depth in core technical skills: Strong C++ and SystemC/TLM., Python automation..",
+    "Evaluate demonstrated ownership of major deliverables: Customer XPU / Chiplet Architecture Analysis: Study customer XPU/SoC architecture, identify software-visible and perform.",
+    "Differentiate competitive candidates through demonstrated depth in preferred skills: Chiplet architecture and HBM., AI accelerator/XPU architecture., Emulation platforms such as ZeBu / Palladium / Veloce.."
+  ]
+}

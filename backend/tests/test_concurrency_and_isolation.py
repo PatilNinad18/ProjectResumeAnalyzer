@@ -6,6 +6,10 @@ Validates:
 3. Multiple concurrent JDs execute Stage 1 deterministic analysis without mutual blocking.
 4. JD isolation, deterministic fallback, and result ordering are strictly preserved.
 """
+import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import pytest
@@ -14,9 +18,57 @@ from unittest.mock import patch, MagicMock
 from app.core.concurrency import (
     acquire_ollama_slot,
     get_concurrency_metrics,
+    resolve_ollama_concurrency,
     reset_concurrency_metrics,
 )
 from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
+
+
+def test_environment_configures_more_than_two_ollama_slots():
+    """A fresh backend process honors an explicit concurrency value above two."""
+    script = """
+import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from app.config import get_settings
+from app.core.concurrency import acquire_ollama_slot, get_concurrency_metrics
+
+barrier = threading.Barrier(5)
+def request():
+    barrier.wait()
+    with acquire_ollama_slot("test_request"):
+        time.sleep(0.1)
+
+with ThreadPoolExecutor(max_workers=5) as pool:
+    list(pool.map(lambda _: request(), range(5)))
+metrics = get_concurrency_metrics()
+metrics["worker_pool_size"] = get_settings().jd_processing_concurrency
+print(json.dumps(metrics))
+"""
+    env = {**os.environ, "OLLAMA_MAX_CONCURRENCY": "3"}
+    env["JD_PROCESSING_CONCURRENCY"] = "5"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+        timeout=15,
+    )
+    metrics = json.loads(result.stdout.strip().splitlines()[-1])
+    assert metrics["configured_max_concurrency"] == 3
+    assert metrics["max_observed_concurrency"] == 3
+    assert metrics["worker_pool_size"] == 5
+
+
+def test_gpu_memory_aware_concurrency_default():
+    assert resolve_ollama_concurrency(0, None) == 1
+    assert resolve_ollama_concurrency(0, 900) == 1
+    assert resolve_ollama_concurrency(0, 2_048) == 2
+    assert resolve_ollama_concurrency(0, 3_072) == 3
+    assert resolve_ollama_concurrency(0, 6_144) == 4
+    assert resolve_ollama_concurrency(3, 1_000) == 3
 
 
 def test_lock_wait_tracked_separately_from_inference():
@@ -869,5 +921,3 @@ def test_failure_during_incremental_enrichment_preserves_prior_and_falls_back():
     assert v2_md_res.status_code == 200
     assert v2_md_res.json()["specification_version"] == 2
     assert v2_md_res.json()["is_enriched"] is False
-
-

@@ -11,10 +11,9 @@ The two other slow LLM operations work the same way:
 When a task is "done" the client fetches the result with GET /markdown, /json and
 /clarifications (the new specification version is simply the latest one).
 
-A local Ollama model serves one request at a time, so every heavy LLM job
-(analysis, enrichment, clarification resolve) runs under one lock (_ollama_lock).
-A second click while a job is running does NOT start a second job; it returns
-status="already_running".
+Ollama inference is bounded by the shared configurable semaphore. Batch task
+state is persisted in the database; legacy enrichment/clarification task
+deduplication remains in-process.
 
 NOTE: in-flight tracking is in-process memory, which is correct for a single
 uvicorn worker (local Ollama). For multi-worker production, replace
@@ -27,9 +26,13 @@ import json
 import logging
 import threading
 import time
+import io
+import zipfile
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -38,6 +41,8 @@ from app.models.db_models import (
     Agent,
     AuditEvent,
     JobDescription,
+    JobDescriptionBatch,
+    JobDescriptionBatchTask,
     JobDescriptionVersion,
     JobSpecificationVersion,
     ProcessingJob,
@@ -70,8 +75,9 @@ _errors: Dict[str, str] = {}       # jd_id -> last failure message (analysis)
 _tasks: Dict[str, Dict[str, Any]] = {}
 TASK_KINDS = ("enrich", "resolve")
 
-# One heavy Ollama job at a time (the local model cannot serve them in parallel anyway).
-_ollama_lock = threading.Lock()
+# Serialize mutations for one JD while allowing unrelated JDs to use the shared
+# inference semaphore concurrently.
+_jd_task_locks: Dict[str, threading.Lock] = {}
 
 
 def _any_llm_job_running() -> bool:
@@ -86,8 +92,7 @@ def _run_processing(jd_id: str, jd_version_id: str) -> None:
 
     db = SessionLocal()
     try:
-        with _ollama_lock:
-            process_job_description_version(db, jd_version_id)
+        process_job_description_version(db, jd_version_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Background analysis failed for jd_id=%s", jd_id)
         with _state_lock:
@@ -116,7 +121,9 @@ def _task_runner(key: str, fn, jd_id: str, *args) -> None:
 
     db = SessionLocal()
     try:
-        with _ollama_lock:
+        with _state_lock:
+            jd_lock = _jd_task_locks.setdefault(jd_id, threading.Lock())
+        with jd_lock:
             fn(db, jd_id, *args)
         with _state_lock:
             _tasks[key].update(
@@ -297,6 +304,274 @@ def upload_jd(
         "title": jd.title,
         "status": "UPLOADED",
     }
+
+
+def _batch_task_payload(task: JobDescriptionBatchTask) -> Dict[str, Any]:
+    jd = task.job_description
+    return {
+        "task_id": task.id,
+        "jd_id": task.job_description_id,
+        "title": jd.title if jd else task.source_filename,
+        "filename": task.source_filename,
+        "status": task.status,
+        "stage": task.stage,
+        "stage_label": task.stage_label,
+        "progress_percent": task.progress_percent,
+        "attempt_count": task.attempt_count,
+        "cancel_requested": task.cancel_requested,
+        "error_message": task.error_message,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "started_at": task.started_at.isoformat() if task.started_at else None,
+        "finished_at": task.finished_at.isoformat() if task.finished_at else None,
+        "has_specification": task.status == "COMPLETED",
+    }
+
+
+def _batch_payload(batch: JobDescriptionBatch) -> Dict[str, Any]:
+    tasks = [_batch_task_payload(task) for task in batch.tasks]
+    return {
+        "batch_id": batch.id,
+        "project_id": batch.project_id,
+        "status": batch.status,
+        "created_at": batch.created_at.isoformat() if batch.created_at else None,
+        "total": len(tasks),
+        "completed": sum(task["status"] == "COMPLETED" for task in tasks),
+        "failed": sum(task["status"] == "FAILED" for task in tasks),
+        "cancelled": sum(task["status"] == "CANCELLED" for task in tasks),
+        "processing": sum(task["status"] == "PROCESSING" for task in tasks),
+        "queued": sum(task["status"] == "QUEUED" for task in tasks),
+        "progress_percent": round(
+            sum(task["progress_percent"] for task in tasks) / len(tasks)
+        ) if tasks else 0,
+        "tasks": tasks,
+    }
+
+
+@router.post("/batches", status_code=202)
+def create_jd_batch(
+    files: List[UploadFile] = File(...),
+    project_id: str = Form("default-project"),
+    db: Session = Depends(get_db),
+):
+    """Create a persisted batch and queue one independent task per uploaded JD."""
+    if not files:
+        raise HTTPException(400, "Upload at least one .pdf, .docx, or .txt file.")
+
+    parsed_files = []
+    for uploaded in files:
+        filename = uploaded.filename or "upload.txt"
+        try:
+            file_bytes = uploaded.file.read(MAX_UPLOAD_BYTES + 1)
+            if len(file_bytes) > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f"{filename}: file is too large (max 5 MB).")
+            raw_text = parse_document(filename, file_bytes)
+        except HTTPException:
+            raise
+        except DocumentParseError as exc:
+            raise HTTPException(400, f"{filename}: {exc}") from exc
+        except Exception as exc:
+            raise HTTPException(400, f"{filename}: could not read uploaded file: {exc}") from exc
+        parsed_files.append((filename, raw_text))
+
+    batch = JobDescriptionBatch(
+        id=gen_uuid(),
+        project_id=project_id.strip() or "default-project",
+        status="QUEUED",
+    )
+    db.add(batch)
+    db.flush()
+    task_ids = []
+    for filename, raw_text in parsed_files:
+        title = filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip() or "Untitled JD"
+        jd = JobDescription(project_id=batch.project_id, title=title, current_version=1)
+        db.add(jd)
+        db.flush()
+        raw_key = build_key(batch.project_id, jd.id, 1, "raw")
+        storage.put_text(raw_key, raw_text)
+        jd_version = JobDescriptionVersion(
+            job_description_id=jd.id,
+            version=1,
+            s3_raw_key=raw_key,
+            raw_text_checksum=checksum(raw_text),
+        )
+        db.add(jd_version)
+        db.flush()
+        task = JobDescriptionBatchTask(
+            id=gen_uuid(),
+            batch_id=batch.id,
+            job_description_id=jd.id,
+            job_description_version_id=jd_version.id,
+            source_filename=filename,
+        )
+        db.add(task)
+        db.flush()
+        task_ids.append(task.id)
+
+    db.commit()
+    try:
+        from app.services.batch_queue import jd_batch_queue
+        jd_batch_queue.enqueue(task_ids)
+    except Exception as exc:
+        logger.exception("Batch %s was persisted but queue submission failed", batch.id)
+        raise HTTPException(
+            503,
+            "The batch was saved, but workers could not be started. It will be recovered when the backend restarts.",
+        ) from exc
+
+    db.refresh(batch)
+    return _batch_payload(batch)
+
+
+@router.get("/batches/{batch_id}")
+def get_jd_batch(batch_id: str, db: Session = Depends(get_db)):
+    batch = db.get(JobDescriptionBatch, batch_id)
+    if batch is None:
+        raise HTTPException(404, "JD batch not found")
+    return _batch_payload(batch)
+
+
+@router.get("/batches")
+def list_jd_batches(limit: int = 20, db: Session = Depends(get_db)):
+    limit = max(1, min(limit, 100))
+    batches = (
+        db.query(JobDescriptionBatch)
+        .order_by(JobDescriptionBatch.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_batch_payload(batch) for batch in batches]
+
+
+@router.get("/batches/{batch_id}/jds")
+def list_batch_jds(batch_id: str, db: Session = Depends(get_db)):
+    batch = db.get(JobDescriptionBatch, batch_id)
+    if batch is None:
+        raise HTTPException(404, "JD batch not found")
+    return {"batch_id": batch.id, "status": batch.status, "jds": _batch_payload(batch)["tasks"]}
+
+
+@router.get("/batches/{batch_id}/tasks/{task_id}")
+def get_batch_task(batch_id: str, task_id: str, db: Session = Depends(get_db)):
+    task = (
+        db.query(JobDescriptionBatchTask)
+        .filter(
+            JobDescriptionBatchTask.batch_id == batch_id,
+            JobDescriptionBatchTask.id == task_id,
+        )
+        .first()
+    )
+    if task is None:
+        raise HTTPException(404, "JD batch task not found")
+    return _batch_task_payload(task)
+
+
+@router.post("/batches/{batch_id}/tasks/{task_id}/retry", status_code=202)
+def retry_batch_task(batch_id: str, task_id: str, db: Session = Depends(get_db)):
+    if db.get(JobDescriptionBatch, batch_id) is None:
+        raise HTTPException(404, "JD batch not found")
+    from app.services.batch_queue import jd_batch_queue
+    result = jd_batch_queue.retry(batch_id, task_id)
+    if result == "not_found":
+        raise HTTPException(404, "JD batch task not found")
+    if result == "not_retryable":
+        raise HTTPException(409, "Only failed or cancelled tasks can be retried.")
+    return {"batch_id": batch_id, "task_id": task_id, "status": result}
+
+
+@router.post("/batches/{batch_id}/tasks/{task_id}/cancel")
+def cancel_batch_task(batch_id: str, task_id: str, db: Session = Depends(get_db)):
+    if db.get(JobDescriptionBatch, batch_id) is None:
+        raise HTTPException(404, "JD batch not found")
+    from app.services.batch_queue import jd_batch_queue
+    result = jd_batch_queue.cancel(batch_id, task_id)
+    if result == "not_found":
+        raise HTTPException(404, "JD batch task not found")
+    if result == "not_running":
+        raise HTTPException(409, "This task is already finished.")
+    return {"batch_id": batch_id, "task_id": task_id, "status": result}
+
+
+@router.post("/batches/{batch_id}/tasks/{task_id}/refresh")
+def refresh_batch_task_artifacts(batch_id: str, task_id: str, db: Session = Depends(get_db)):
+    if db.get(JobDescriptionBatch, batch_id) is None:
+        raise HTTPException(404, "JD batch not found")
+    from app.services.batch_queue import jd_batch_queue
+
+    result = jd_batch_queue.refresh_completed_artifacts(batch_id, task_id)
+    if result == "not_found":
+        raise HTTPException(404, "JD batch task not found")
+    if result == "not_completed":
+        raise HTTPException(409, "Only completed JD tasks can refresh their artifacts.")
+    if result == "no_specification":
+        raise HTTPException(404, "No specification is available for this JD.")
+    return {"batch_id": batch_id, "task_id": task_id, "status": result}
+
+
+def _get_batch_task_for_download(
+    batch_id: str, jd_id: str, db: Session, artifact: str
+) -> tuple[JobDescriptionBatchTask, Path]:
+    task = (
+        db.query(JobDescriptionBatchTask)
+        .filter(
+            JobDescriptionBatchTask.batch_id == batch_id,
+            JobDescriptionBatchTask.job_description_id == jd_id,
+        )
+        .first()
+    )
+    if task is None:
+        raise HTTPException(404, "JD batch task not found")
+    if task.status != "COMPLETED":
+        raise HTTPException(409, "This JD has not completed successfully.")
+    stored_path = task.markdown_path if artifact == "md" else task.json_path
+    if not stored_path:
+        raise HTTPException(404, "The requested specification file is not available.")
+    path = Path(stored_path).resolve()
+    if not path.is_file():
+        raise HTTPException(404, "The requested specification file is missing.")
+    return task, path
+
+
+@router.get("/batches/{batch_id}/jds/{jd_id}/downloads/{artifact}")
+def download_batch_jd_artifact(
+    batch_id: str,
+    jd_id: str,
+    artifact: str,
+    db: Session = Depends(get_db),
+):
+    if artifact not in {"md", "json"}:
+        raise HTTPException(404, "Artifact must be 'md' or 'json'.")
+    task, path = _get_batch_task_for_download(batch_id, jd_id, db, artifact)
+    media_type = "text/markdown" if artifact == "md" else "application/json"
+    filename = "job_specification.md" if artifact == "md" else "job_specification.json"
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@router.get("/batches/{batch_id}/downloads.zip")
+def download_batch_zip(batch_id: str, db: Session = Depends(get_db)):
+    batch = db.get(JobDescriptionBatch, batch_id)
+    if batch is None:
+        raise HTTPException(404, "JD batch not found")
+    completed = [task for task in batch.tasks if task.status == "COMPLETED"]
+    if not completed:
+        raise HTTPException(409, "No completed JD specifications are available to download.")
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        for task in completed:
+            for path_value in (task.markdown_path, task.json_path):
+                if not path_value:
+                    continue
+                path = Path(path_value).resolve()
+                if not path.is_file():
+                    logger.warning("Completed batch artifact is missing: %s", path)
+                    continue
+                zipped.write(path, arcname=f"{task.job_description_id}/{path.name}")
+    archive.seek(0)
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="jd_batch_{batch_id}.zip"'},
+    )
 
 
 @router.get("/jds/{jd_id}")
@@ -568,9 +843,10 @@ def _do_enrich(db: Session, jd_id: str) -> None:
     if not jd:
         raise HTTPException(404, "JD not found")
 
-    from app.services.enrichment import GroundedEnrichmentService, OllamaUnavailableError
+    from app.services.enrichment import OllamaUnavailableError
+    from app.services.enrichment.ta_enrichment_service import get_enrichment_service
 
-    enricher = GroundedEnrichmentService()
+    enricher = get_enrichment_service()
     if not enricher.check_ollama_available():
         raise HTTPException(
             status_code=503,
@@ -759,7 +1035,7 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
     # Pass original JD, initial analysis, deterministic extraction results,
     # and updated clarification context back to Ollama to generate the final, refined Markdown.
     from app.schemas.enrichment import TAEnrichmentReport
-    from app.services.enrichment.ta_enrichment_service import GroundedEnrichmentService
+    from app.services.enrichment.ta_enrichment_service import get_enrichment_service
     from app.services.projection.canonical_projector import _flatten_requirements
 
     clarification_context = [
@@ -812,7 +1088,7 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
     enriched_md = None
     enriched_key = None
 
-    enricher = GroundedEnrichmentService()
+    enricher = get_enrichment_service()
     if enricher.check_ollama_available():
         try:
             if reqs:
