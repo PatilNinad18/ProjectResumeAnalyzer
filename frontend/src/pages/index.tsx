@@ -6,7 +6,7 @@
 // JSX stay exactly as they are (see the 3 small JSX edits listed in my reply).
 // ============================================================================
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   uploadJD,
@@ -135,6 +135,8 @@ export default function Home() {
   // Ambiguities & Clarification State
   const [clarificationsData, setClarificationsData] = useState<ClarificationsResponse | null>(null);
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
+  const [activeClarificationIndex, setActiveClarificationIndex] = useState<number>(0);
+  const [clarificationViewMode, setClarificationViewMode] = useState<"wizard" | "all">("wizard");
   const [isResolvingClarifications, setIsResolvingClarifications] = useState<boolean>(false);
   const [resolveSuccessMsg, setResolveSuccessMsg] = useState<string | null>(null);
 
@@ -270,6 +272,97 @@ export default function Home() {
     }
   }, [clarificationsData]);
 
+  // Unified, normalized clarification items (includes Claude-style topics & structured options)
+  const allClarificationItems = useMemo(() => {
+    const items: Array<{
+      key: string;
+      topic: string;
+      questionText: string;
+      rationale?: string;
+      category?: string;
+      priority?: string;
+      structuredOptions: Array<{ label: string; description: string }>;
+      isResolved: boolean;
+      currentValue: string;
+    }> = [];
+
+    if (clarificationsData?.questions && clarificationsData.questions.length > 0) {
+      for (const q of clarificationsData.questions) {
+        const currentVal = clarificationAnswers[q.question_key] !== undefined
+          ? clarificationAnswers[q.question_key]
+          : (q.answer_text || q.answer || "");
+
+        const structured: Array<{ label: string; description: string }> = [];
+        if (q.structured_options && q.structured_options.length > 0) {
+          structured.push(...q.structured_options);
+        } else if (q.suggested_options && q.suggested_options.length > 0) {
+          for (const opt of q.suggested_options) {
+            const parts = opt.split(" — ");
+            if (parts.length === 2) {
+              structured.push({ label: parts[0].trim(), description: parts[1].trim() });
+            } else {
+              structured.push({ label: opt, description: "" });
+            }
+          }
+        }
+
+        items.push({
+          key: q.question_key,
+          topic: q.short_topic || q.category.replace(/_/g, " "),
+          questionText: q.question_text,
+          rationale: q.rationale,
+          category: q.category,
+          priority: q.priority,
+          structuredOptions: structured,
+          isResolved: q.status === "ANSWERED" || Boolean(currentVal && currentVal.trim()),
+          currentValue: currentVal,
+        });
+      }
+    }
+
+    // Standalone ambiguities not already in questions
+    if (clarificationsData?.ambiguities && clarificationsData.ambiguities.length > 0) {
+      for (let idx = 0; idx < clarificationsData.ambiguities.length; idx++) {
+        const a: any = clarificationsData.ambiguities[idx];
+        if (a.ta_confirmation_required === false) continue;
+        if (a.suggested_interpretation && a.suggested_interpretation.includes("TA Resolution:")) continue;
+        const statement = (a.statement || "").trim();
+        if (!statement) continue;
+        if (items.some(it => it.questionText.toLowerCase().includes(statement.toLowerCase().slice(0, 30)))) continue;
+
+        const ambKey = a.statement ? `statement:${a.statement}` : (a.ambiguity_id || a.id || `amb_${idx}`);
+        const currentVal = clarificationAnswers[ambKey] || clarificationAnswers[`amb_${idx}`] || "";
+
+        const structured: Array<{ label: string; description: string }> = [];
+        if (a.suggested_options && a.suggested_options.length > 0) {
+          for (const opt of a.suggested_options) {
+            structured.push({ label: opt, description: "" });
+          }
+        } else {
+          structured.push(
+            { label: "MUST HAVE — mandatory", description: "Required qualification for candidate screening." },
+            { label: "PREFERRED — nice to have", description: "Advantageous but not disqualifying." },
+            { label: "INFORMATIONAL — role context only", description: "Provides role context without candidate scoring." }
+          );
+        }
+
+        items.push({
+          key: ambKey,
+          topic: `Scope ${items.length + 1}`,
+          questionText: `Clarification needed on "${statement}"`,
+          rationale: a.why_ambiguous || "Flagged ambiguous statement requiring TA confirmation.",
+          category: "TECHNICAL_SCOPE",
+          priority: "RECOMMENDED",
+          structuredOptions: structured,
+          isResolved: Boolean(currentVal && currentVal.trim()),
+          currentValue: currentVal,
+        });
+      }
+    }
+
+    return items;
+  }, [clarificationsData, clarificationAnswers]);
+
   // Derived Workflow Progress Step (1 to 5)
   const isStep1Done = isCompanySaved || Boolean(companyDetails.companyName.trim());
   const isStep2Done = Boolean(jdText.trim()) || Boolean(selectedFile);
@@ -367,6 +460,7 @@ export default function Home() {
     setEnrichError(null);
     setClarificationsData(null);
     setClarificationAnswers({});
+    setActiveClarificationIndex(0);
     setResolveSuccessMsg(null);
     setResolveError(null);
     setAnalysisSuccessMsg(null);
@@ -521,6 +615,7 @@ export default function Home() {
     setCreatedAgentSuccess(null);
     setClarificationsData(null);
     setClarificationAnswers({});
+    setActiveClarificationIndex(0);
     setResolveSuccessMsg(null);
     setResolveError(null);
     setComparisonData(null);
@@ -2849,14 +2944,14 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Ambiguities & Clarifications Requiring TA Input */}
-              {isStep3Done && clarificationsData?.has_ambiguities && (
-                <div className="card" style={{ borderLeft: "4px solid #f59e0b" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }}>
+                            {/* Ambiguities & Clarifications Requiring TA Input */}
+              {isStep3Done && (clarificationsData?.has_ambiguities || allClarificationItems.length > 0) && (
+                <div className="card" style={{ borderLeft: "4px solid #f59e0b", padding: "20px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "16px", flexWrap: "wrap", gap: "10px" }}>
                     <div>
-                      <h3 style={{ margin: "0 0 4px 0", fontSize: "1.1rem", display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span>🔍 Ambiguities Requiring TA Clarification</span>
-                        {clarificationsData.lifecycle_status === "FINALIZED" ? (
+                      <h3 style={{ margin: "0 0 4px 0", fontSize: "1.15rem", display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span>🔍 Ambiguities & Trade-offs Requiring TA Clarification</span>
+                        {clarificationsData?.lifecycle_status === "FINALIZED" ? (
                           <span style={{ background: "#dcfce7", color: "#166534", fontSize: "0.75rem", padding: "2px 8px", borderRadius: "12px", fontWeight: 600 }}>
                             ✓ Finalized
                           </span>
@@ -2865,10 +2960,58 @@ export default function Home() {
                             Action Required
                           </span>
                         )}
+                        <span style={{
+                          background: "#e0e7ff",
+                          color: "#4338ca",
+                          fontSize: "0.75rem",
+                          padding: "2px 8px",
+                          borderRadius: "12px",
+                          fontWeight: 600,
+                        }}>
+                          {allClarificationItems.filter(i => i.isResolved).length} / {allClarificationItems.length} Resolved
+                        </span>
                       </h3>
                       <p style={{ margin: 0, fontSize: "0.85rem", color: "#667085" }}>
-                        The deterministic engine flagged the following ambiguous statements or missing parameters. Answer below to generate the final disambiguated specification.
+                        Select domain options below or provide custom notes. Answering these trade-offs generates the final disambiguated specification.
                       </p>
+                    </div>
+
+                    {/* View mode toggle */}
+                    <div style={{ display: "flex", gap: "4px", background: "#f1f5f9", padding: "3px", borderRadius: "8px" }}>
+                      <button
+                        type="button"
+                        onClick={() => setClarificationViewMode("wizard")}
+                        style={{
+                          fontSize: "0.76rem",
+                          fontWeight: clarificationViewMode === "wizard" ? 700 : 500,
+                          padding: "4px 10px",
+                          borderRadius: "6px",
+                          border: "none",
+                          background: clarificationViewMode === "wizard" ? "#ffffff" : "transparent",
+                          color: clarificationViewMode === "wizard" ? "#1e293b" : "#64748b",
+                          cursor: "pointer",
+                          boxShadow: clarificationViewMode === "wizard" ? "0 1px 2px rgba(0,0,0,0.06)" : "none",
+                        }}
+                      >
+                        🎯 Step-by-Step
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setClarificationViewMode("all")}
+                        style={{
+                          fontSize: "0.76rem",
+                          fontWeight: clarificationViewMode === "all" ? 700 : 500,
+                          padding: "4px 10px",
+                          borderRadius: "6px",
+                          border: "none",
+                          background: clarificationViewMode === "all" ? "#ffffff" : "transparent",
+                          color: clarificationViewMode === "all" ? "#1e293b" : "#64748b",
+                          cursor: "pointer",
+                          boxShadow: clarificationViewMode === "all" ? "0 1px 2px rgba(0,0,0,0.06)" : "none",
+                        }}
+                      >
+                        📄 View All
+                      </button>
                     </div>
                   </div>
 
@@ -2962,237 +3105,535 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* List of Ambiguities / Questions */}
-                  <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "16px" }}>
-                    {/* 1. First-class Clarification Questions (includes JD technical ambiguities, contextual phrasing, & metadata) */}
-                    {clarificationsData.questions && clarificationsData.questions.length > 0 && (
-                      clarificationsData.questions.map((q) => {
-                        const currentVal = clarificationAnswers[q.question_key] !== undefined
-                          ? clarificationAnswers[q.question_key]
-                          : (q.answer_text || q.answer || "");
-                        const isResolved = q.status === "ANSWERED" || Boolean(q.answer_text);
-                        const optionsToRender = (q.suggested_options && q.suggested_options.length > 0)
-                          ? q.suggested_options
-                          : (q.category === "TECHNICAL_SCOPE" || q.question_key.includes("amb") || q.question_key.includes("contextual") || q.question_key.includes("priority"))
-                            ? ["MUST HAVE — mandatory", "PREFERRED — nice to have", "INFORMATIONAL — role context only"]
-                            : [];
+                  {/* Horizontal Topic Tab Bar (Claude Stepper) */}
+                  <div style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    overflowX: "auto",
+                    paddingBottom: "8px",
+                    marginBottom: "16px",
+                    borderBottom: "1px solid #e2e8f0",
+                  }}>
+                    {allClarificationItems.map((item, idx) => {
+                      const isActive = activeClarificationIndex === idx && clarificationViewMode === "wizard";
+                      const isDone = item.isResolved;
+                      return (
+                        <button
+                          key={item.key}
+                          type="button"
+                          onClick={() => {
+                            setActiveClarificationIndex(idx);
+                            if (clarificationViewMode !== "wizard") setClarificationViewMode("wizard");
+                          }}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "5px",
+                            padding: "6px 12px",
+                            borderRadius: "16px",
+                            fontSize: "0.80rem",
+                            fontWeight: isActive ? 700 : 500,
+                            whiteSpace: "nowrap",
+                            border: isActive
+                              ? "1.5px solid #4f46e5"
+                              : isDone
+                              ? "1px solid #86efac"
+                              : "1px solid #cbd5e1",
+                            background: isActive
+                              ? "#4f46e5"
+                              : isDone
+                              ? "#f0fdf4"
+                              : "#ffffff",
+                            color: isActive
+                              ? "#ffffff"
+                              : isDone
+                              ? "#166534"
+                              : "#334155",
+                            cursor: "pointer",
+                            transition: "all 0.12s ease",
+                          }}
+                        >
+                          <span>{isDone ? "✓" : "○"}</span>
+                          <span>{item.topic}</span>
+                        </button>
+                      );
+                    })}
+
+                    {/* Submit / Review Tab */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveClarificationIndex(allClarificationItems.length);
+                        if (clarificationViewMode !== "wizard") setClarificationViewMode("wizard");
+                      }}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "5px",
+                        padding: "6px 14px",
+                        borderRadius: "16px",
+                        fontSize: "0.80rem",
+                        fontWeight: activeClarificationIndex === allClarificationItems.length ? 700 : 600,
+                        whiteSpace: "nowrap",
+                        border: activeClarificationIndex === allClarificationItems.length
+                          ? "1.5px solid #d97706"
+                          : "1px solid #fcd34d",
+                        background: activeClarificationIndex === allClarificationItems.length
+                          ? "#d97706"
+                          : "#fffbeb",
+                        color: activeClarificationIndex === allClarificationItems.length
+                          ? "#ffffff"
+                          : "#92400e",
+                        cursor: "pointer",
+                        transition: "all 0.12s ease",
+                      }}
+                    >
+                      <span>✓</span>
+                      <span>Submit →</span>
+                    </button>
+                  </div>
+
+                  {/* Mode 1: Step-by-Step Wizard */}
+                  {clarificationViewMode === "wizard" && (
+                    <>
+                      {activeClarificationIndex < allClarificationItems.length ? (
+                        (() => {
+                          const item = allClarificationItems[activeClarificationIndex];
+                          const hasStructured = item.structuredOptions.length > 0;
+                          const currentVal = item.currentValue;
+
+                          // Check if current value matches any predefined option
+                          const matchingPredefinedIndex = hasStructured
+                            ? item.structuredOptions.findIndex((opt) => {
+                                const optVal = opt.description ? `${opt.label}: ${opt.description}` : opt.label;
+                                return (
+                                  currentVal === optVal ||
+                                  currentVal === opt.label ||
+                                  (opt.label.length > 4 && currentVal.toLowerCase().startsWith(opt.label.toLowerCase()))
+                                );
+                              })
+                            : -1;
+
+                          const isCustomActive = currentVal && matchingPredefinedIndex === -1;
+
+                          return (
+                            <div
+                              style={{
+                                background: "#ffffff",
+                                border: "1px solid #e2e8f0",
+                                borderRadius: "10px",
+                                padding: "20px",
+                                marginBottom: "16px",
+                                boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+                              }}
+                            >
+                              {/* Header Meta */}
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                                <span style={{ fontSize: "0.78rem", fontWeight: 700, color: "#6366f1", letterSpacing: "0.03em" }}>
+                                  TOPIC {activeClarificationIndex + 1} OF {allClarificationItems.length}: {item.topic.toUpperCase()}
+                                </span>
+                                <div style={{ display: "flex", gap: "6px" }}>
+                                  {item.isResolved && (
+                                    <span style={{ fontSize: "0.72rem", fontWeight: 700, padding: "2px 8px", borderRadius: "12px", background: "#dcfce7", color: "#166534" }}>
+                                      ✓ ANSWERED
+                                    </span>
+                                  )}
+                                  <span style={{
+                                    fontSize: "0.72rem",
+                                    fontWeight: 600,
+                                    padding: "2px 8px",
+                                    borderRadius: "12px",
+                                    background: item.priority === "BLOCKING" ? "#fee2e2" : "#fef3c7",
+                                    color: item.priority === "BLOCKING" ? "#991b1b" : "#92400e",
+                                  }}>
+                                    {item.priority || "RECOMMENDED"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Conversational Question Headline */}
+                              <h4 style={{ margin: "4px 0 10px 0", fontSize: "1.08rem", fontWeight: 600, color: "#0f172a", lineHeight: 1.45 }}>
+                                {item.questionText}
+                              </h4>
+
+                              {/* Rationale hint */}
+                              {item.rationale && (
+                                <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "16px", padding: "8px 12px", background: "#f8fafc", borderRadius: "6px", borderLeft: "3px solid #cbd5e1" }}>
+                                  <strong>Context:</strong> {item.rationale}
+                                </div>
+                              )}
+
+                              {/* Structured Options (Claude Style numbered cards) */}
+                              <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginBottom: "18px" }}>
+                                {item.structuredOptions.map((opt, optIdx) => {
+                                  const isSelected = matchingPredefinedIndex === optIdx;
+                                  return (
+                                    <div
+                                      key={optIdx}
+                                      onClick={() => {
+                                        const answerPayload = opt.description ? `${opt.label}: ${opt.description}` : opt.label;
+                                        setClarificationAnswers((prev) => ({
+                                          ...prev,
+                                          [item.key]: answerPayload,
+                                        }));
+                                      }}
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "flex-start",
+                                        gap: "12px",
+                                        padding: "12px 14px",
+                                        borderRadius: "8px",
+                                        border: isSelected ? "1.5px solid #4f46e5" : "1px solid #e2e8f0",
+                                        background: isSelected ? "#f5f3ff" : "#ffffff",
+                                        cursor: "pointer",
+                                        transition: "all 0.15s ease",
+                                      }}
+                                    >
+                                      {/* Radio indicator */}
+                                      <div
+                                        style={{
+                                          width: "18px",
+                                          height: "18px",
+                                          borderRadius: "50%",
+                                          border: isSelected ? "5px solid #4f46e5" : "1.5px solid #94a3b8",
+                                          background: "#ffffff",
+                                          marginTop: "2px",
+                                          flexShrink: 0,
+                                        }}
+                                      />
+                                      <div style={{ flex: 1 }}>
+                                        <div style={{ fontSize: "0.92rem", fontWeight: 700, color: isSelected ? "#3730a3" : "#1e293b", marginBottom: "2px" }}>
+                                          {optIdx + 1}. {opt.label}
+                                        </div>
+                                        {opt.description && (
+                                          <div style={{ fontSize: "0.83rem", color: isSelected ? "#4338ca" : "#64748b", lineHeight: 1.4 }}>
+                                            {opt.description}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+
+                                {/* Freeform Custom Option: 'Type something.' */}
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    padding: "12px 14px",
+                                    borderRadius: "8px",
+                                    border: isCustomActive ? "1.5px solid #4f46e5" : "1px solid #e2e8f0",
+                                    background: isCustomActive ? "#f5f3ff" : "#ffffff",
+                                    transition: "all 0.15s ease",
+                                  }}
+                                >
+                                  <div
+                                    onClick={() => {
+                                      if (!isCustomActive) {
+                                        setClarificationAnswers((prev) => ({
+                                          ...prev,
+                                          [item.key]: prev[item.key] && matchingPredefinedIndex === -1 ? prev[item.key] : "",
+                                        }));
+                                      }
+                                    }}
+                                    style={{ display: "flex", alignItems: "center", gap: "12px", cursor: "pointer", marginBottom: isCustomActive ? "10px" : "0" }}
+                                  >
+                                    <div
+                                      style={{
+                                        width: "18px",
+                                        height: "18px",
+                                        borderRadius: "50%",
+                                        border: isCustomActive ? "5px solid #4f46e5" : "1.5px solid #94a3b8",
+                                        background: "#ffffff",
+                                        flexShrink: 0,
+                                      }}
+                                    />
+                                    <span style={{ fontSize: "0.92rem", fontWeight: 700, color: isCustomActive ? "#3730a3" : "#334155" }}>
+                                      {item.structuredOptions.length + 1}. Type something...
+                                    </span>
+                                  </div>
+
+                                  {/* Custom input textarea */}
+                                  <textarea
+                                    className="input-text"
+                                    rows={2}
+                                    style={{
+                                      width: "100%",
+                                      marginTop: "4px",
+                                      background: "#ffffff",
+                                      borderColor: isCustomActive ? "#4f46e5" : "#cbd5e1",
+                                      fontSize: "0.85rem",
+                                      lineHeight: 1.4,
+                                    }}
+                                    placeholder="Write your custom TA clarification or specific screening instructions..."
+                                    value={isCustomActive ? currentVal : ""}
+                                    onChange={(e) => {
+                                      setClarificationAnswers((prev) => ({
+                                        ...prev,
+                                        [item.key]: e.target.value,
+                                      }));
+                                    }}
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Stepper Footer Controls */}
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: "12px", borderTop: "1px solid #f1f5f9" }}>
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  disabled={activeClarificationIndex === 0}
+                                  onClick={() => setActiveClarificationIndex(Math.max(0, activeClarificationIndex - 1))}
+                                  style={{ fontSize: "0.84rem", padding: "6px 14px" }}
+                                >
+                                  ← Previous
+                                </button>
+                                <span style={{ fontSize: "0.80rem", color: "#64748b", fontWeight: 500 }}>
+                                  Question {activeClarificationIndex + 1} of {allClarificationItems.length}
+                                </span>
+                                {activeClarificationIndex < allClarificationItems.length - 1 ? (
+                                  <button
+                                    type="button"
+                                    className="btn-primary"
+                                    onClick={() => setActiveClarificationIndex(activeClarificationIndex + 1)}
+                                    style={{ fontSize: "0.84rem", padding: "6px 16px" }}
+                                  >
+                                    Next →
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="btn-primary"
+                                    onClick={() => setActiveClarificationIndex(allClarificationItems.length)}
+                                    style={{ fontSize: "0.84rem", padding: "6px 16px", background: "#d97706", borderColor: "#b45309" }}
+                                  >
+                                    Review & Submit →
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()
+                      ) : (
+                        /* Submission & Review Screen (Submit Tab) */
+                        <div
+                          style={{
+                            background: "#ffffff",
+                            border: "1px solid #e2e8f0",
+                            borderRadius: "10px",
+                            padding: "24px",
+                            marginBottom: "16px",
+                          }}
+                        >
+                          <h4 style={{ margin: "0 0 8px 0", fontSize: "1.1rem", fontWeight: 700, color: "#0f172a" }}>
+                            📋 Review Your Clarification Answers
+                          </h4>
+                          <p style={{ margin: "0 0 16px 0", fontSize: "0.86rem", color: "#64748b" }}>
+                            You have resolved {allClarificationItems.filter(i => i.isResolved).length} of {allClarificationItems.length} items. Review your selections below before finalizing the specification.
+                          </p>
+
+                          <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "20px" }}>
+                            {allClarificationItems.map((item, idx) => (
+                              <div
+                                key={item.key}
+                                onClick={() => setActiveClarificationIndex(idx)}
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  padding: "10px 14px",
+                                  borderRadius: "6px",
+                                  background: item.isResolved ? "#f0fdf4" : "#fef2f2",
+                                  border: item.isResolved ? "1px solid #bbf7d0" : "1px solid #fecaca",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1, marginRight: "12px" }}>
+                                  <span style={{ fontWeight: 700, color: item.isResolved ? "#166534" : "#991b1b" }}>
+                                    {item.isResolved ? "✓" : "!"}
+                                  </span>
+                                  <div style={{ fontSize: "0.86rem" }}>
+                                    <strong>{item.topic}:</strong>{" "}
+                                    <span style={{ color: item.isResolved ? "#1e293b" : "#991b1b" }}>
+                                      {item.currentValue ? item.currentValue.slice(0, 85) + (item.currentValue.length > 85 ? "..." : "") : "Unanswered (Click to answer)"}
+                                    </span>
+                                  </div>
+                                </div>
+                                <span style={{ fontSize: "0.75rem", color: "#6366f1", fontWeight: 600 }}>Edit ✎</span>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() => setActiveClarificationIndex(0)}
+                              style={{ fontSize: "0.85rem", padding: "8px 16px" }}
+                            >
+                              ← Back to First Question
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              disabled={isResolvingClarifications}
+                              onClick={handleResolveClarifications}
+                              style={{ background: "#d97706", borderColor: "#b45309", fontSize: "0.88rem", padding: "8px 20px" }}
+                            >
+                              {isResolvingClarifications
+                                ? "⏳ Resolving & Generating Final Markdown..."
+                                : "✓ Confirm Answers & Generate Final Specification"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* Mode 2: View All (Stacked) */}
+                  {clarificationViewMode === "all" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "16px", marginBottom: "20px" }}>
+                      {allClarificationItems.map((item, idx) => {
+                        const hasStructured = item.structuredOptions.length > 0;
+                        const currentVal = item.currentValue;
+
+                        const matchingPredefinedIndex = hasStructured
+                          ? item.structuredOptions.findIndex((opt) => {
+                              const optVal = opt.description ? `${opt.label}: ${opt.description}` : opt.label;
+                              return (
+                                currentVal === optVal ||
+                                currentVal === opt.label ||
+                                (opt.label.length > 4 && currentVal.toLowerCase().startsWith(opt.label.toLowerCase()))
+                              );
+                            })
+                          : -1;
+
+                        const isCustomActive = currentVal && matchingPredefinedIndex === -1;
 
                         return (
                           <div
-                            key={q.question_key}
+                            key={item.key}
                             style={{
-                              padding: "14px",
-                              background: isResolved ? "#f8fdf9" : "#f8fafc",
+                              background: item.isResolved ? "#faf5ff" : "#ffffff",
+                              border: item.isResolved ? "1px solid #ddd6fe" : "1px solid #e2e8f0",
                               borderRadius: "8px",
-                              border: isResolved ? "1px solid #bbf7d0" : "1px solid #e2e8f0",
+                              padding: "16px",
                             }}
                           >
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "6px", gap: "8px" }}>
-                              <span style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", flex: 1 }}>
-                                {q.question_text}
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
+                              <span style={{ fontWeight: 700, fontSize: "0.95rem", color: "#1e293b", flex: 1 }}>
+                                {idx + 1}. {item.questionText}
                               </span>
-                              <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-                                {isResolved && (
-                                  <span
-                                    style={{
-                                      fontSize: "0.72rem",
-                                      fontWeight: 700,
-                                      padding: "2px 8px",
-                                      borderRadius: "4px",
-                                      background: "#dcfce7",
-                                      color: "#166534",
-                                      border: "1px solid #86efac",
-                                    }}
-                                  >
-                                    ✓ RESOLVED
+                              <div style={{ display: "flex", gap: "6px" }}>
+                                {item.isResolved && (
+                                  <span style={{ fontSize: "0.72rem", fontWeight: 700, padding: "2px 8px", borderRadius: "12px", background: "#dcfce7", color: "#166534" }}>
+                                    ✓ ANSWERED
                                   </span>
                                 )}
-                                <span
-                                  style={{
-                                    fontSize: "0.72rem",
-                                    fontWeight: 600,
-                                    padding: "2px 8px",
-                                    borderRadius: "4px",
-                                    background: "#f1f5f9",
-                                    color: "#475569",
-                                    textTransform: "capitalize",
-                                  }}
-                                >
-                                  {q.category.replace(/_/g, " ")}
-                                </span>
-                                <span
-                                  style={{
-                                    fontSize: "0.72rem",
-                                    fontWeight: 600,
-                                    padding: "2px 8px",
-                                    borderRadius: "4px",
-                                    background: q.priority === "BLOCKING" ? "#fee2e2" : "#fef3c7",
-                                    color: q.priority === "BLOCKING" ? "#991b1b" : "#92400e",
-                                  }}
-                                >
-                                  {q.priority}
+                                <span style={{ fontSize: "0.72rem", fontWeight: 600, padding: "2px 8px", borderRadius: "12px", background: "#f1f5f9", color: "#475569" }}>
+                                  {item.topic}
                                 </span>
                               </div>
                             </div>
 
-                            {q.rationale && (
-                              <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
-                                <strong>Context:</strong> {q.rationale}
+                            {item.rationale && (
+                              <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "12px" }}>
+                                <strong>Context:</strong> {item.rationale}
                               </div>
                             )}
 
-                            {/* Quick-select chips if suggested_options are provided */}
-                            {optionsToRender && optionsToRender.length > 0 && (
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
-                                {optionsToRender.map((opt, oIdx) => {
-                                  const isSelected = currentVal && (
-                                    currentVal.trim().toLowerCase() === opt.trim().toLowerCase() ||
-                                    (opt.toLowerCase().includes("must have") && currentVal.toLowerCase().includes("must have")) ||
-                                    (opt.toLowerCase().includes("preferred") && currentVal.toLowerCase().includes("preferred")) ||
-                                    (opt.toLowerCase().includes("informational") && currentVal.toLowerCase().includes("informational"))
-                                  );
-
-                                  return (
-                                    <button
-                                      key={oIdx}
-                                      type="button"
-                                      onClick={() =>
-                                        setClarificationAnswers((prev) => ({
-                                          ...prev,
-                                          [q.question_key]: opt,
-                                        }))
-                                      }
-                                      style={{
-                                        fontSize: "0.75rem",
-                                        padding: "3px 8px",
-                                        borderRadius: "12px",
-                                        border: isSelected ? "1px solid #4f46e5" : "1px solid #cbd5e1",
-                                        background: isSelected ? "#e0e7ff" : "#fff",
-                                        color: isSelected ? "#4338ca" : "#334155",
-                                        fontWeight: isSelected ? 700 : 500,
-                                        cursor: "pointer",
-                                      }}
-                                    >
-                                      {opt}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
-
-                            <input
-                              type="text"
-                              className="input-text"
-                              style={{
-                                width: "100%",
-                                background: isResolved ? "#f0fdf4" : "#fff",
-                                borderColor: isResolved ? "#86efac" : "#cbd5e1",
-                              }}
-                              placeholder={isResolved ? `Current answer: ${currentVal}` : (q.answer_text || q.answer || "Enter TA clarification or select an option above...")}
-                              value={currentVal}
-                              onChange={(e) =>
-                                setClarificationAnswers((prev) => ({
-                                  ...prev,
-                                  [q.question_key]: e.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                        );
-                      })
-                    )}
-
-                    {/* 2. Any additional standalone ambiguities from JD not already covered */}
-                    {clarificationsData.ambiguities && clarificationsData.ambiguities.length > 0 && (
-                      clarificationsData.ambiguities
-                        .filter((a: any) => {
-                          if (a.ta_confirmation_required === false) return false;
-                          if (a.suggested_interpretation && a.suggested_interpretation.includes("TA Resolution:")) return false;
-                          const statement = (a.statement || "").trim().toLowerCase();
-                          return !(clarificationsData.questions || []).some((q) =>
-                            q.question_text.toLowerCase().includes(statement.slice(0, 30))
-                          );
-                        })
-                        .map((a: any, idx: number) => {
-                          const ambKey = a.statement ? `statement:${a.statement}` : (a.ambiguity_id || a.id || `amb_${idx}`);
-                          const currentVal = clarificationAnswers[ambKey] || clarificationAnswers[`amb_${idx}`] || "";
-                          const defaultOptions = a.suggested_options && a.suggested_options.length > 0
-                            ? a.suggested_options
-                            : ["MUST HAVE — mandatory", "PREFERRED — nice to have", "INFORMATIONAL — role context only"];
-
-                          return (
-                            <div key={`amb_${idx}`} style={{ padding: "14px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                              <div style={{ fontWeight: 600, fontSize: "0.92rem", color: "#1e293b", marginBottom: "4px" }}>
-                                "{a.statement}"
-                              </div>
-                              <div style={{ fontSize: "0.82rem", color: "#64748b", marginBottom: "8px" }}>
-                                <strong>Why ambiguous:</strong> {a.why_ambiguous}
-                              </div>
-
-                              {/* Quick selection chips for options */}
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
-                                {defaultOptions.map((opt: string, oIdx: number) => (
-                                  <button
-                                    key={oIdx}
-                                    type="button"
-                                    onClick={() =>
+                            {/* Options cards */}
+                            <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "12px" }}>
+                              {item.structuredOptions.map((opt, optIdx) => {
+                                const isSelected = matchingPredefinedIndex === optIdx;
+                                return (
+                                  <div
+                                    key={optIdx}
+                                    onClick={() => {
+                                      const answerPayload = opt.description ? `${opt.label}: ${opt.description}` : opt.label;
                                       setClarificationAnswers((prev) => ({
                                         ...prev,
-                                        [ambKey]: opt,
-                                        [`amb_${idx}`]: opt,
-                                      }))
-                                    }
+                                        [item.key]: answerPayload,
+                                      }));
+                                    }}
                                     style={{
-                                      fontSize: "0.75rem",
-                                      padding: "3px 8px",
-                                      borderRadius: "12px",
-                                      border: currentVal === opt ? "1px solid #4f46e5" : "1px solid #cbd5e1",
-                                      background: currentVal === opt ? "#e0e7ff" : "#fff",
-                                      color: currentVal === opt ? "#4338ca" : "#334155",
+                                      display: "flex",
+                                      alignItems: "flex-start",
+                                      gap: "10px",
+                                      padding: "10px 12px",
+                                      borderRadius: "6px",
+                                      border: isSelected ? "1.5px solid #4f46e5" : "1px solid #e2e8f0",
+                                      background: isSelected ? "#f5f3ff" : "#ffffff",
                                       cursor: "pointer",
                                     }}
                                   >
-                                    {opt}
-                                  </button>
-                                ))}
-                              </div>
+                                    <div
+                                      style={{
+                                        width: "16px",
+                                        height: "16px",
+                                        borderRadius: "50%",
+                                        border: isSelected ? "5px solid #4f46e5" : "1.5px solid #94a3b8",
+                                        background: "#ffffff",
+                                        marginTop: "2px",
+                                        flexShrink: 0,
+                                      }}
+                                    />
+                                    <div>
+                                      <span style={{ fontSize: "0.88rem", fontWeight: 700, color: isSelected ? "#3730a3" : "#1e293b" }}>
+                                        {opt.label}
+                                      </span>
+                                      {opt.description && (
+                                        <span style={{ fontSize: "0.82rem", color: "#64748b", marginLeft: "6px" }}>
+                                          — {opt.description}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
 
-                              <input
-                                type="text"
+                              {/* Custom input */}
+                              <textarea
                                 className="input-text"
-                                style={{ width: "100%" }}
-                                placeholder="Provide clarification (e.g. Mandatory, Preferred, or specific range)..."
-                                value={currentVal}
-                                onChange={(e) =>
+                                rows={2}
+                                style={{
+                                  width: "100%",
+                                  background: "#ffffff",
+                                  borderColor: isCustomActive ? "#4f46e5" : "#cbd5e1",
+                                  fontSize: "0.85rem",
+                                }}
+                                placeholder="Type custom clarification or notes..."
+                                value={isCustomActive ? currentVal : ""}
+                                onChange={(e) => {
                                   setClarificationAnswers((prev) => ({
                                     ...prev,
-                                    [ambKey]: e.target.value,
-                                    [`amb_${idx}`]: e.target.value,
-                                  }))
-                                }
+                                    [item.key]: e.target.value,
+                                  }));
+                                }}
                               />
                             </div>
-                          );
-                        })
-                    )}
-                  </div>
+                          </div>
+                        );
+                      })}
 
-                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                    <button
-                      className="btn-primary"
-                      disabled={isResolvingClarifications}
-                      onClick={handleResolveClarifications}
-                      style={{ background: "#d97706", borderColor: "#b45309" }}
-                    >
-                      {isResolvingClarifications
-                        ? "⏳ Resolving & Generating Final Markdown..."
-                        : "✓ Confirm Answers & Generate Final Specification"}
-                    </button>
-                  </div>
+                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                        <button
+                          className="btn-primary"
+                          disabled={isResolvingClarifications}
+                          onClick={handleResolveClarifications}
+                          style={{ background: "#d97706", borderColor: "#b45309", padding: "8px 22px" }}
+                        >
+                          {isResolvingClarifications
+                            ? "⏳ Resolving & Generating Final Markdown..."
+                            : "✓ Confirm Answers & Generate Final Specification"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-
-              {/* Step 5: Create Agent */}
+{/* Step 5: Create Agent */}
               {isStep3Done && (
                 <div className="card" style={{ borderColor: "#6366f1" }}>
                   <h3 style={{ margin: "0 0 8px 0", fontSize: "1.1rem" }}>Step 5: Create JD Agent</h3>

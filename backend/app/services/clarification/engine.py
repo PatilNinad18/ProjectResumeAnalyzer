@@ -16,9 +16,11 @@ Design Invariants:
 from __future__ import annotations
 
 import logging
+import re
 from typing import List, Optional
 
 from app.schemas.master_context import (
+    ClarificationOptionSchema,
     ClarificationQuestionSchema,
     ConfidenceBand,
     InterpretationStatus,
@@ -62,6 +64,12 @@ def generate_clarification_questions(
 
     # --- Tier 1: BLOCKING — UNRESOLVED mandatory requirements ---
     new_questions.extend(_detect_unresolved_mandatory(master, existing_keys))
+
+    # --- Conversational Ambiguities & Scope (Claude-Style Topics & Options) ---
+
+    new_questions.extend(_detect_conversational_ambiguities(master, existing_keys))
+
+
 
     # --- Tier 2: RECOMMENDED — Technical scope disambiguation ---
     new_questions.extend(_detect_low_confidence_requirements(master, existing_keys))
@@ -219,6 +227,952 @@ def _detect_unresolved_mandatory(
 # ---------------------------------------------------------------------------
 # Tier 2: RECOMMENDED Question Generators
 # ---------------------------------------------------------------------------
+
+def _detect_conversational_ambiguities(
+
+    master: JDMasterContext,
+
+    existing_keys: set,
+
+) -> List[ClarificationQuestionSchema]:
+
+    """
+
+    Analyzes JD requirements, role overview, and responsibilities to generate
+
+    conversational, tailored questions with structured options (label + description)
+
+    and short topic tags for wizard navigation (e.g. 'VDK tooling', 'Experience',
+
+    'Leadership', 'Protocols', 'Chiplet exp', 'Hands-on %', 'Customer', 'Location').
+
+    """
+
+    questions: List[ClarificationQuestionSchema] = []
+
+    ro = getattr(master, "role_overview", None)
+
+    job_title = getattr(ro, "job_title", None) or getattr(ro, "title", None) or getattr(ro, "role_title", None) or ""
+
+    raw_jd = getattr(master, "raw_jd_text", None) or getattr(getattr(master, "extraction_metadata", None), "source_text", None) or ""
+
+
+
+    req_texts = [
+
+        getattr(r, "text", "") for r in getattr(master, "requirements", [])
+
+        if getattr(r, "text", None)
+
+    ]
+
+    resp_texts = [
+
+        getattr(r, "raw_statement", "") for r in getattr(master, "responsibilities", [])
+
+        if getattr(r, "raw_statement", None)
+
+    ]
+
+    all_text = f"{job_title}\n{raw_jd}\n" + "\n".join(req_texts) + "\n" + "\n".join(resp_texts)
+
+    text_lower = all_text.lower()
+
+    title_lower = job_title.lower()
+
+
+
+    # 1. Tooling / Framework Strictness vs Equivalence
+
+    if "vdk_tooling_strictness" not in existing_keys and "tooling_strictness" not in existing_keys:
+
+        if any(k in text_lower for k in ("virtualizer", "vdk", "virtual prototyping", "systemc/tlm", "systemc")):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="vdk_tooling_strictness",
+
+                category=QuestionCategory.TECHNICAL_SCOPE,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="requirements.tooling.synopsys_vdk",
+
+                short_topic="VDK tooling",
+
+                question_text="The JD lists 'Synopsys Virtualizer / VDK experience' under Required Skills. Is Synopsys tooling a strict must-have, or would equivalent virtual prototyping experience qualify?",
+
+                rationale="Synopsys Virtualizer is specialized. Clarifying whether equivalent platforms qualify determines candidate pool size.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Strict must-have",
+
+                        description="Only candidates with hands-on Synopsys Virtualizer/VDK experience qualify.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Equivalents acceptable",
+
+                        description="Cadence Helium, Arm Fast Models/FVP, Siemens Vista, or QEMU+SystemC co-sim count as equivalent; Synopsys ramp-up expected.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Strong preference",
+
+                        description="Synopsys is preferred, but a strong SystemC/TLM architect without it can still be considered.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Strict must-have — Only candidates with hands-on Synopsys Virtualizer/VDK experience qualify.",
+
+                    "Equivalents acceptable — Cadence Helium, Arm Fast Models/FVP, Siemens Vista, or QEMU+SystemC co-sim count as equivalent; Synopsys ramp-up expected.",
+
+                    "Strong preference — Synopsys is preferred, but a strong SystemC/TLM architect without it can still be considered.",
+
+                ],
+
+            ))
+
+        elif any(k in text_lower for k in ("fastapi", "django", "flask", "spring", "react", "kubernetes", "flutter", "golang", "pytorch")):
+
+            detected_tool = "Core Framework"
+
+            detected_equivs = "equivalent modern frameworks"
+
+            if "fastapi" in text_lower:
+
+                detected_tool = "FastAPI"
+
+                detected_equivs = "Django, Flask, Go/Gin, or Spring Boot"
+
+            elif "pytorch" in text_lower:
+
+                detected_tool = "PyTorch"
+
+                detected_equivs = "TensorFlow, JAX, or ONNX"
+
+            elif "react" in text_lower:
+
+                detected_tool = "React"
+
+                detected_equivs = "Vue.js, Angular, or Next.js"
+
+            elif "kubernetes" in text_lower:
+
+                detected_tool = "Kubernetes"
+
+                detected_equivs = "Docker Swarm, Nomad, or ECS"
+
+            elif "golang" in text_lower or "go " in text_lower:
+
+                detected_tool = "Go (Golang)"
+
+                detected_equivs = "C++, Rust, or Java"
+
+
+
+            key = f"tooling_strictness_{detected_tool.lower().replace(' ', '_')}"
+
+            if key not in existing_keys:
+
+                questions.append(ClarificationQuestionSchema(
+
+                    question_key=key,
+
+                    category=QuestionCategory.TECHNICAL_SCOPE,
+
+                    priority=QuestionPriority.RECOMMENDED,
+
+                    is_blocking=False,
+
+                    field_target=f"requirements.tooling.{detected_tool.lower()}",
+
+                    short_topic=f"{detected_tool} tooling",
+
+                    question_text=f"The JD lists '{detected_tool}' under Required Skills. Is {detected_tool} tooling a strict must-have, or would equivalent experience qualify?",
+
+                    rationale=f"Clarifying whether {detected_tool} is mandatory or interchangeable with equivalents ({detected_equivs}) calibrates screening selectivity.",
+
+                    structured_options=[
+
+                        ClarificationOptionSchema(
+
+                            label="Strict must-have",
+
+                            description=f"Only candidates with hands-on {detected_tool} experience qualify.",
+
+                        ),
+
+                        ClarificationOptionSchema(
+
+                            label="Equivalents acceptable",
+
+                            description=f"{detected_equivs} count as equivalent; {detected_tool} ramp-up expected.",
+
+                        ),
+
+                        ClarificationOptionSchema(
+
+                            label="Strong preference",
+
+                            description=f"{detected_tool} is preferred, but a strong architect/engineer with adjacent modern stack can still be considered.",
+
+                        ),
+
+                    ],
+
+                    suggested_options=[
+
+                        f"Strict must-have — Only candidates with hands-on {detected_tool} experience qualify.",
+
+                        f"Equivalents acceptable — {detected_equivs} count as equivalent; {detected_tool} ramp-up expected.",
+
+                        f"Strong preference — {detected_tool} is preferred, but a strong candidate without it can still be considered.",
+
+                    ],
+
+                ))
+
+
+
+    # 2. Experience Specialization Split (Topic: 'Experience')
+
+    if "experience_specialization_split" not in existing_keys:
+
+        exp_match = re.search(r"(\d+[\s–\-]+\d+\+?|\d+\+?)\s*(?:years|yrs)", text_lower)
+
+        exp_str = exp_match.group(0) if exp_match else None
+
+
+
+        if any(k in text_lower for k in ("10–15+", "10-15+", "10-15", "10 to 15")) or (exp_str and "10" in exp_str and "semiconductor" in text_lower):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="experience_specialization_split",
+
+                category=QuestionCategory.TECHNICAL_SCOPE,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="requirements.experience.vp_split",
+
+                short_topic="Experience",
+
+                question_text="'10-15+ years of semiconductor/system engineering experience' - how much of that must be specifically in virtual platforms / SystemC-TLM modelling?",
+
+                rationale="A 10-15 year band is broad. Calibrating how many years must be directly in virtual platforms vs general semiconductor/RTL engineering avoids false negatives.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="10+ total, 5+ in VP",
+
+                        description="At least 10 years overall, with 5+ years directly in virtual prototyping / SystemC-TLM.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="10+ total, any domain",
+
+                        description="10+ years in semiconductor/system engineering is enough; VP depth is assessed via skills, not years.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="8+ if VP-heavy",
+
+                        description="Exceptional candidates with ~8 years, mostly in VP architecture, can be considered.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="15+ preferred",
+
+                        description="Target the upper band; 10-12 years is the floor only for outstanding profiles.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "10+ total, 5+ in VP — At least 10 years overall, with 5+ years directly in virtual prototyping / SystemC-TLM.",
+
+                    "10+ total, any domain — 10+ years in semiconductor/system engineering is enough; VP depth is assessed via skills, not years.",
+
+                    "8+ if VP-heavy — Exceptional candidates with ~8 years, mostly in VP architecture, can be considered.",
+
+                    "15+ preferred — Target the upper band; 10-12 years is the floor only for outstanding profiles.",
+
+                ],
+
+            ))
+
+        elif exp_str:
+
+            num = re.search(r"\d+", exp_str).group(0)
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="experience_specialization_split",
+
+                category=QuestionCategory.TECHNICAL_SCOPE,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="requirements.experience.domain_split",
+
+                short_topic="Experience",
+
+                question_text=f"'{exp_str} of engineering experience' - how much of that must be specifically in core domain systems vs general development?",
+
+                rationale="Calibrating total engineering tenure against specialized hands-on domain focus ensures balanced candidate qualification.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label=f"{num}+ total, dedicated focus",
+
+                        description=f"At least {num} years overall, with primary hands-on specialization in core role domains.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label=f"{num}+ total, any domain",
+
+                        description=f"{num}+ years in general engineering is sufficient; specific domain depth is evaluated via technical assessment.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Fast-track for exceptional",
+
+                        description="Exceptional candidates with slightly fewer years but demonstrated architectural depth qualify.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Upper band preferred",
+
+                        description=f"Target the upper band; {num} years is the minimum floor for consideration.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    f"{num}+ total, dedicated focus — At least {num} years overall, with primary hands-on specialization in core role domains.",
+
+                    f"{num}+ total, any domain — {num}+ years in general engineering is sufficient; domain depth assessed via skills.",
+
+                    "Fast-track for exceptional — Exceptional candidates with slightly fewer years but heavy depth qualify.",
+
+                    f"Upper band preferred — Target the upper band; {num} years is the floor only for outstanding profiles.",
+
+                ],
+
+            ))
+
+
+
+    # 3. Leadership & Reporting Scope (Topic: 'Leadership')
+
+    if "leadership_people_management" not in existing_keys:
+
+        if "jd 2–7" in text_lower or "jd 2-7" in text_lower or ("technical lead" in text_lower and "architect" in text_lower):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="leadership_people_management",
+
+                category=QuestionCategory.ROLE_ALIGNMENT,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="role_overview.people_management",
+
+                short_topic="Leadership",
+
+                question_text="The role is titled 'Technical Lead / Architect' and is the anchor for JD 2-7. Does this role carry people-management responsibility?",
+
+                rationale="Understanding whether this anchor architect will directly manage team hires vs provide purely technical architecture guidance defines the hiring persona.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Technical lead, no reports",
+
+                        description="Sets architecture and guides JD 2-7 engineers technically, but has no formal reporting lines.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Lead with direct reports",
+
+                        description="Directly manages the JD 2-7 hires (hiring, appraisals, task allocation).",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Lead now, manager later",
+
+                        description="Starts as technical lead; formal people management added once the team scales.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Technical lead, no reports — Sets architecture and guides JD 2-7 engineers technically, but has no formal reporting lines.",
+
+                    "Lead with direct reports — Directly manages the JD 2-7 hires (hiring, appraisals, task allocation).",
+
+                    "Lead now, manager later — Starts as technical lead; formal people management added once the team scales.",
+
+                ],
+
+            ))
+
+        elif any(k in title_lower for k in ("lead", "architect", "principal", "manager", "director", "staff")):
+
+            clean_title = job_title or "Lead / Architect"
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="leadership_people_management",
+
+                category=QuestionCategory.ROLE_ALIGNMENT,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="role_overview.people_management",
+
+                short_topic="Leadership",
+
+                question_text=f"The role is titled '{clean_title}'. Does this role carry direct people-management responsibility?",
+
+                rationale="Clarifying whether this role is an individual contributor technical lead or has direct managerial reports aligns candidate screening.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Technical lead, no reports",
+
+                        description="Sets technical direction and architecture, but has no formal managerial reporting lines.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Lead with direct reports",
+
+                        description="Directly manages team engineers (hiring, 1-on-1s, appraisals, task allocation).",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Lead now, manager later",
+
+                        description="Starts as technical lead; formal people management added once the team scales.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Technical lead, no reports — Sets technical direction, but has no formal reporting lines.",
+
+                    "Lead with direct reports — Directly manages team engineers (hiring, appraisals, task allocation).",
+
+                    "Lead now, manager later — Starts as technical lead; formal people management added once the team scales.",
+
+                ],
+
+            ))
+
+
+
+    # 4. Protocol / Interconnects Coverage (Topic: 'Protocols')
+
+    if "protocols_coverage_depth" not in existing_keys:
+
+        if any(k in text_lower for k in ("pcie", "cxl", "ucie", "amba")):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="protocols_coverage_depth",
+
+                category=QuestionCategory.TECHNICAL_SCOPE,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="requirements.protocols.coverage",
+
+                short_topic="Protocols",
+
+                question_text="Required skills list 'PCIe / CXL / UCIe / AMBA'. What depth of protocol coverage is expected?",
+
+                rationale="Expecting all four high-speed interconnects significantly narrows the candidate pool. Setting the coverage floor improves sourcing efficiency.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="All four required",
+
+                        description="Candidate must have worked with each of PCIe, CXL, UCIe and AMBA.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="1 high-speed + AMBA",
+
+                        description="At least one of PCIe/CXL/UCIe plus AMBA (AXI/CHI) is sufficient.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="UCIe mandatory",
+
+                        description="Given the chiplet focus, UCIe is must-have; others are a plus.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Any one is fine",
+
+                        description="Familiarity with any of these interconnects is enough; the rest can be learned.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "All four required — Candidate must have worked with each of PCIe, CXL, UCIe and AMBA.",
+
+                    "1 high-speed + AMBA — At least one of PCIe/CXL/UCIe plus AMBA (AXI/CHI) is sufficient.",
+
+                    "UCIe mandatory — Given the chiplet focus, UCIe is must-have; others are a plus.",
+
+                    "Any one is fine — Familiarity with any of these interconnects is enough; the rest can be learned.",
+
+                ],
+
+            ))
+
+
+
+    # 5. Title vs Preferred Skills Tension (Topic: 'Chiplet exp' / 'Specialization')
+
+    if "chiplet_experience_must_have" not in existing_keys:
+
+        if "chiplet" in text_lower and ("hbm" in text_lower or "preferred" in text_lower):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="chiplet_experience_must_have",
+
+                category=QuestionCategory.TECHNICAL_SCOPE,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="requirements.chiplet.priority",
+
+                short_topic="Chiplet exp",
+
+                question_text="The JD is for an 'AI Chiplet' architect, yet 'Chiplet architecture and HBM' is only under Preferred Skills. Is prior chiplet experience a must-have?",
+
+                rationale="The role title emphasizes 'Chiplet', but chiplet architecture is categorized under Preferred Skills. Clarifying this resolves screening inconsistency.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Must-have",
+
+                        description="Candidate must have worked on multi-die/chiplet systems (D2D links, partitioning).",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Preferred only",
+
+                        description="Keep as stated: a strong SoC VP architect without chiplet exposure still qualifies.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Chiplet yes, HBM optional",
+
+                        description="Chiplet experience is required; HBM/memory-subsystem knowledge is a plus.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Must-have — Candidate must have worked on multi-die/chiplet systems (D2D links, partitioning).",
+
+                    "Preferred only — Keep as stated: a strong SoC VP architect without chiplet exposure still qualifies.",
+
+                    "Chiplet yes, HBM optional — Chiplet experience is required; HBM/memory-subsystem knowledge is a plus.",
+
+                ],
+
+            ))
+
+
+
+    # 6. Hands-on Implementation % (Topic: 'Hands-on %')
+
+    if "hands_on_coding_percentage" not in existing_keys:
+
+        if any(k in text_lower for k in ("systemc/tlm", "systemc", "reusable", "infrastructure", "coding", "develop reusable")):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="hands_on_coding_percentage",
+
+                category=QuestionCategory.ROLE_ALIGNMENT,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="role_overview.hands_on_percentage",
+
+                short_topic="Hands-on %",
+
+                question_text="Responsibilities include both architecture and 'develop reusable SystemC/TLM-based platform infrastructure'. How hands-on is this role expected to be?",
+
+                rationale="Architect roles vary from pure documentation to heavy active coding. Setting hands-on expectations calibrates technical screening.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Heavily hands-on (>50%)",
+
+                        description="Writes significant SystemC/TLM code and model infrastructure personally.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Balanced (25-50%)",
+
+                        description="Codes key framework pieces and templates; rest is architecture, reviews and guidance.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Mostly architecture (<25%)",
+
+                        description="Defines architecture and reviews; JD 2-7 engineers do most implementation.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Heavily hands-on (>50%) — Writes significant SystemC/TLM code and model infrastructure personally.",
+
+                    "Balanced (25-50%) — Codes key framework pieces and templates; rest is architecture, reviews and guidance.",
+
+                    "Mostly architecture (<25%) — Defines architecture and reviews; other engineers do most implementation.",
+
+                ],
+
+            ))
+
+
+
+    # 7. Customer / Stakeholder Engagement (Topic: 'Customer')
+
+    if "customer_facing_interaction" not in existing_keys:
+
+        if any(k in text_lower for k in ("customer", "xpu/soc", "partner", "stakeholder", "client")):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="customer_facing_interaction",
+
+                category=QuestionCategory.ROLE_ALIGNMENT,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="role_overview.customer_facing",
+
+                short_topic="Customer",
+
+                question_text="The role involves studying customer XPU/SoC architectures. How customer-facing is this position?",
+
+                rationale="Knowing if the architect presents directly to external customer leadership vs consumes specs internally dictates communication evaluation.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Direct customer-facing",
+
+                        description="Regularly engages customer architects, leads technical meetings, may travel.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Occasional interaction",
+
+                        description="Joins customer calls for key milestones; requirements mostly come via internal PM/FAE teams.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Internal only",
+
+                        description="Works from customer specs provided internally; no direct customer engagement.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Direct customer-facing — Regularly engages customer architects, leads technical meetings, may travel.",
+
+                    "Occasional interaction — Joins customer calls for key milestones; requirements mostly come via internal PM/FAE teams.",
+
+                    "Internal only — Works from customer specs provided internally; no direct customer engagement.",
+
+                ],
+
+            ))
+
+
+
+    # 8. Location & Hybrid Arrangement (Topic: 'Location')
+
+    if "location_hybrid_schedule" not in existing_keys:
+
+        loc_str = getattr(getattr(master, "conventional_requirements", None), "location", None) or ""
+
+        if isinstance(loc_str, dict):
+
+            loc_str = loc_str.get("raw", "") or loc_str.get("city", "")
+
+        if not loc_str and ("bangalore" in text_lower or "hyderabad" in text_lower or "pune" in text_lower or "hybrid" in text_lower):
+
+            if "bangalore" in text_lower and "hyderabad" in text_lower:
+
+                loc_str = "Bangalore / Hyderabad (Hybrid)"
+
+            elif "pune" in text_lower:
+
+                loc_str = "Pune (Work from Office)"
+
+
+
+        if "bangalore" in loc_str.lower() or "hyderabad" in loc_str.lower():
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="location_hybrid_schedule",
+
+                category=QuestionCategory.COMPENSATION_LOGISTICS,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="job_context.location_hybrid",
+
+                short_topic="Location",
+
+                question_text="Location is listed as 'Bangalore / Hyderabad (Hybrid)'. What does the hybrid arrangement look like?",
+
+                rationale="Candidates need clear expectations on in-office attendance requirements across Bangalore and Hyderabad.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Either city, 3 days office",
+
+                        description="Candidate can be based in either city; 3 days/week in office.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Either city, 2 days office",
+
+                        description="Candidate can be based in either city; 2 days/week in office.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Bangalore preferred",
+
+                        description="Bangalore is primary; Hyderabad only for exceptional candidates.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Flexible / mostly remote",
+
+                        description="Office visits as needed; open to strong candidates in other Indian cities.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Either city, 3 days office — Candidate can be based in either city; 3 days/week in office.",
+
+                    "Either city, 2 days office — Candidate can be based in either city; 2 days/week in office.",
+
+                    "Bangalore preferred — Bangalore is primary; Hyderabad only for exceptional candidates.",
+
+                    "Flexible / mostly remote — Office visits as needed; open to strong candidates in other Indian cities.",
+
+                ],
+
+            ))
+
+        elif loc_str and ("hybrid" in loc_str.lower() or "office" in loc_str.lower()):
+
+            questions.append(ClarificationQuestionSchema(
+
+                question_key="location_hybrid_schedule",
+
+                category=QuestionCategory.COMPENSATION_LOGISTICS,
+
+                priority=QuestionPriority.RECOMMENDED,
+
+                is_blocking=False,
+
+                field_target="job_context.location_hybrid",
+
+                short_topic="Location",
+
+                question_text=f"Location is listed as '{loc_str}'. What does the hybrid/workplace schedule look like?",
+
+                rationale="Clarifying on-site schedule and remote flexibility ensures accurate expectations during candidate outreach.",
+
+                structured_options=[
+
+                    ClarificationOptionSchema(
+
+                        label="Hybrid (3 days office)",
+
+                        description="Candidate expected on-site 3 days/week with 2 days remote flexibility.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Hybrid (2 days office)",
+
+                        description="Candidate expected on-site 2 days/week with 3 days remote flexibility.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Full-time in office",
+
+                        description="Full-time 5 days/week in-office attendance required.",
+
+                    ),
+
+                    ClarificationOptionSchema(
+
+                        label="Flexible / mostly remote",
+
+                        description="Remote-first with on-site visits only as required for key team milestones.",
+
+                    ),
+
+                ],
+
+                suggested_options=[
+
+                    "Hybrid (3 days office) — Candidate expected on-site 3 days/week with 2 days remote flexibility.",
+
+                    "Hybrid (2 days office) — Candidate expected on-site 2 days/week with 3 days remote flexibility.",
+
+                    "Full-time in office — Full-time 5 days/week in-office attendance required.",
+
+                    "Flexible / mostly remote — Remote-first with occasional on-site visits as needed.",
+
+                ],
+
+            ))
+
+
+
+    return questions
+
+
+
+
 
 def _detect_low_confidence_requirements(
     master: JDMasterContext,
@@ -425,6 +1379,14 @@ def _detect_missing_metadata(
                 priority=QuestionPriority.OPTIONAL,
                 is_blocking=False,
                 field_target="job_context.team_size",
+                short_topic="Team Size",
+                structured_options=[
+                    ClarificationOptionSchema(label="1-5 people", description="Small, tight-knit founding engineering team or squad."),
+                    ClarificationOptionSchema(label="6-15 people", description="Mid-sized dedicated product engineering pod."),
+                    ClarificationOptionSchema(label="16-50 people", description="Broad engineering organization."),
+                    ClarificationOptionSchema(label="50+ people", description="Large enterprise engineering division."),
+                    ClarificationOptionSchema(label="Not specified", description="Keep unspecified for candidate screening."),
+                ],
                 question_text="What is the approximate team size for this role?",
                 rationale=(
                     "Team size was not mentioned in the JD. Some candidates may prefer "
@@ -443,6 +1405,12 @@ def _detect_missing_metadata(
                 priority=QuestionPriority.OPTIONAL,
                 is_blocking=False,
                 field_target="job_context.salary_range",
+                short_topic="Compensation",
+                structured_options=[
+                    ClarificationOptionSchema(label="Competitive / Market Rate", description="Calibrated to prevailing competitive market compensation benchmarks."),
+                    ClarificationOptionSchema(label="Yes, I can provide it", description="Provide a specific compensation band or hourly rate."),
+                    ClarificationOptionSchema(label="Not disclosed", description="Confidential or discussed during interview rounds."),
+                ],
                 question_text="Is a salary range or compensation band available for this role?",
                 rationale=(
                     "Salary range was not mentioned in the JD. This is optional context "
@@ -502,6 +1470,7 @@ def enrich_questions_conversational(
                 QuestionCategory.CONTRADICTION,
                 QuestionCategory.ROLE_ALIGNMENT,
             }
+            and not getattr(q, 'structured_options', None)
         ]
         if not eligible:
             return questions

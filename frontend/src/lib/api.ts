@@ -182,6 +182,11 @@ export async function cancelTask(jdId: string, kind: TaskKind): Promise<{ status
   return request(`/api/jds/${jdId}/tasks/${kind}/cancel`, { method: "POST", timeoutMs: 10_000 });
 }
 
+export interface ClarificationOption {
+  label: string;
+  description: string;
+}
+
 export interface ClarificationQuestionItem {
   question_key: string;
   category: string;
@@ -192,6 +197,8 @@ export interface ClarificationQuestionItem {
   answer?: string | null;
   answer_text?: string | null;
   rationale?: string;
+  short_topic?: string;
+  structured_options?: ClarificationOption[];
   suggested_options?: string[];
 }
 
