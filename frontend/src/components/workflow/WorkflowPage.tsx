@@ -1,6 +1,6 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
-import type { ClarificationsResponse, ProcessingStatus, CompanyDetails, CreatedAgent, ChatTurn, ContextComparisonResponse, RequirementDiffItem, AmbiguityItem, JDContextType } from "@/lib/api";
+import type { ClarificationsResponse, ProcessingStatus, CompanyDetails, CreatedAgent, ChatTurn, ContextComparisonResponse, RequirementDiffItem, AmbiguityItem, JDContextType, BatchTask } from "@/lib/api";
 import { statusConfig, formatElapsed } from "@/lib/ui";
 import styles from "./WorkflowPage.module.css";
 import WorkflowStepper from "./WorkflowStepper";
@@ -13,6 +13,7 @@ import type { useJDBatch } from "@/hooks/useJDBatch";
 
 export interface WorkflowPageProps {
   batchState: ReturnType<typeof useJDBatch>;
+  handleLaunchBatchAgent: (agentName: string, task: BatchTask, markdown: string) => Promise<void>;
   isStep1Done: boolean;
   isStep2Done: boolean;
   currentStep: number;
@@ -92,6 +93,7 @@ export interface WorkflowPageProps {
 
 export default function WorkflowPage({
     batchState,
+    handleLaunchBatchAgent,
     isStep1Done,
     isStep2Done,
     currentStep,
@@ -169,6 +171,7 @@ export default function WorkflowPage({
     handleCreateAgent,
 }: WorkflowPageProps) {
   const sharedProps = {
+    handleLaunchBatchAgent,
     isStep1Done,
     isStep2Done,
     currentStep,

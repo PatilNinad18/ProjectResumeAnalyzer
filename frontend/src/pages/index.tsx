@@ -11,7 +11,8 @@ import { useChat } from "@/hooks/useChat";
 import { useJDWorkflow } from "@/hooks/useJDWorkflow";
 import { useJDBatch } from "@/hooks/useJDBatch";
 import { useAgents } from "@/hooks/useAgents";
-import type { CompanyDetails, CreatedAgent } from "@/lib/api";
+import { createAgentApi, getJson } from "@/lib/api";
+import type { CompanyDetails, CreatedAgent, BatchTask } from "@/lib/api";
 
 export default function Home() {
   // Navigation
@@ -76,10 +77,34 @@ export default function Home() {
     handleRegenerateAgentContext,
   } = agentManagement;
 
+  async function handleLaunchBatchAgent(agentName: string, task: BatchTask, agentMarkdown: string) {
+    const trimmedName = agentName.trim();
+    if (!trimmedName) throw new Error("Enter an agent name before launching.");
+    if (task.status !== "COMPLETED" || !agentMarkdown.trim()) {
+      throw new Error("This job description must finish processing before its agent can be launched.");
+    }
+
+    const jsonResponse = await getJson(task.jd_id);
+    const created = await createAgentApi({
+      agentName: trimmedName,
+      title: task.title,
+      companyDetails: { ...companyDetails },
+      jdId: task.jd_id,
+      markdown: agentMarkdown,
+      jsonData: jsonResponse.json,
+      specificationVersion: jsonResponse.specification_version,
+      status: "ACTIVE",
+    });
+    setAgents((previous) => [created, ...previous.filter((agent) => agent.id !== created.id)]);
+    setSelectedAgentId(created.id);
+    setActiveTab("chat");
+  }
+
   const hasReadyContext = isStep3Done || Boolean(activeAgentForChat);
 
   const workflowPageProps = {
     batchState,
+    handleLaunchBatchAgent,
     isStep1Done,
     isStep2Done,
     currentStep,

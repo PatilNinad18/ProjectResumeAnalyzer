@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelBatchTask,
   createJDBatch,
-  getComparison,
   getClarifications,
   getJDBatch,
   getMarkdown,
@@ -14,7 +13,6 @@ import {
   waitForTask,
   type BatchTask,
   type ClarificationsResponse,
-  type ContextComparisonResponse,
   type JDBatch,
 } from "@/lib/api";
 
@@ -31,8 +29,6 @@ export function useJDBatch(projectId: string) {
   const [enrichedMarkdown, setEnrichedMarkdown] = useState<string | null>(null);
   const [hasEnrichedMarkdown, setHasEnrichedMarkdown] = useState(false);
   const [isEnrichedView, setIsEnrichedView] = useState(true);
-  const [comparison, setComparison] = useState<ContextComparisonResponse | null>(null);
-  const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
@@ -57,7 +53,6 @@ export function useJDBatch(projectId: string) {
     setBaselineMarkdown(null);
     setEnrichedMarkdown(null);
     setHasEnrichedMarkdown(false);
-    setComparison(null);
     setAnswersByJd({});
     setSelectedTaskId(null);
     try {
@@ -105,8 +100,6 @@ export function useJDBatch(projectId: string) {
       setBaselineMarkdown(null);
       setEnrichedMarkdown(null);
       setHasEnrichedMarkdown(false);
-      setComparison(null);
-      setComparisonError(null);
       return;
     }
     if (selectedTask.status !== "COMPLETED") {
@@ -114,7 +107,6 @@ export function useJDBatch(projectId: string) {
       setBaselineMarkdown(null);
       setEnrichedMarkdown(null);
       setHasEnrichedMarkdown(false);
-      setComparison(null);
       setIsLoadingTask(false);
       setTaskError(null);
       return;
@@ -124,12 +116,10 @@ export function useJDBatch(projectId: string) {
     let stopped = false;
     setIsLoadingTask(true);
     setTaskError(null);
-    setComparisonError(null);
     setClarifications(null);
     setBaselineMarkdown(null);
     setEnrichedMarkdown(null);
     setHasEnrichedMarkdown(false);
-    setComparison(null);
     Promise.all([
       getClarifications(selectedTask.jd_id),
       getMarkdown(selectedTask.jd_id, false),
@@ -151,19 +141,6 @@ export function useJDBatch(projectId: string) {
           }
           return { ...current, [selectedTask.jd_id]: next };
         });
-        void getComparison(selectedTask.jd_id, "baseline", "enriched")
-          .then((result) => {
-            if (!stopped) setComparison(result);
-          })
-          .catch((cause: unknown) => {
-            if (!stopped) {
-              setComparisonError(
-                cause instanceof Error
-                  ? cause.message
-                  : "Could not compare deterministic and enriched requirements."
-              );
-            }
-          });
       })
       .catch((cause: unknown) => {
         if (!stopped) {
@@ -262,8 +239,6 @@ export function useJDBatch(projectId: string) {
     hasEnrichedMarkdown,
     isEnrichedView,
     setIsEnrichedView,
-    comparison,
-    comparisonError,
     isSubmitting,
     isResolving,
     isLoadingTask,
