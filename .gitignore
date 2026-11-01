@@ -61,3 +61,13 @@ Thumbs.db
 .agents
 skills-lock.json
 .run_state
+
+# Output artifacts and generated files
+outputs/
+outputs/**/*.md
+outputs/**/*.json
+
+# Sample files and directories
+samples/
+sample/
+sample_jds/
