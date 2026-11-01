@@ -1,0 +1,54 @@
+.jdInputSection { display: block; }
+
+.batchSelection {
+  margin-top: 10px;
+  padding: 11px 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  background: #f8f8ff;
+}
+
+.batchSelectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #3730a3;
+  font-size: 0.84rem;
+}
+
+.batchFileList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 6px 12px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batchFileList li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  color: #475467;
+  font-size: 0.78rem;
+}
+
+.batchFileList li span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batchFileList li span:last-child {
+  flex: 0 0 auto;
+  color: #667085;
+}
+
+@media (max-width: 600px) {
+  .batchSelectionHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

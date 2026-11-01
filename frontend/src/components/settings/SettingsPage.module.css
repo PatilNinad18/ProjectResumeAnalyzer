@@ -1,0 +1,24 @@
+.settingsPage { display: block; }
+.settingsPage :global(.agent-grid) {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+          gap: 16px;
+        }
+
+        .settingsPage :global(.agent-card) {
+          background: #fff;
+          border: 1px solid #e5e7eb;
+          border-radius: 14px;
+          padding: 20px;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          transition: all 0.2s ease;
+          box-shadow: var(--shadow-sm);
+        }
+
+        .settingsPage :global(.agent-card):hover {
+          border-color: #c7c9f7;
+          transform: translateY(-2px);
+          box-shadow: 0 10px 24px rgba(16,24,40,0.07);
+        }

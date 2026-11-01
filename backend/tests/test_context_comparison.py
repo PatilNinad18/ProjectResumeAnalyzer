@@ -176,6 +176,55 @@ def test_compute_context_diff_detects_added_removed_modified_unchanged():
     assert counts["unchanged"] == 2
 
 
+def test_enrichment_diff_marks_only_populated_guidance_fields():
+    baseline = [
+        {
+            "id": "req_enriched",
+            "text": "Experience with Python",
+            "priority": "MUST_HAVE",
+            "provenance_type": "source_evidence",
+            "provenance_badge": "Source Evidence (Verbatim JD)",
+        },
+        {
+            "id": "req_unchanged",
+            "text": "Experience with SQL",
+            "priority": "PREFERRED",
+            "provenance_type": "source_evidence",
+            "provenance_badge": "Source Evidence (Verbatim JD)",
+        },
+    ]
+    report = {
+        "items": [
+            {
+                "requirement_id": "req_enriched",
+                "technical_concept_summary": "Python application development.",
+                "strong_evidence_signals": ["Production services"],
+                "weak_or_ambiguous_signals": [],
+                "screening_question": "",
+            },
+        ],
+    }
+
+    diff = compute_context_diff(
+        baseline,
+        baseline,
+        "baseline",
+        "enriched",
+        enrichment_report=report,
+    )
+
+    assert len(diff["modified"]) == 1
+    modified = diff["modified"][0]
+    assert modified["id"] == "req_enriched"
+    assert modified["changes"] == [
+        "Enrichment added: Technical concept summary",
+        "Enrichment added: Strong evidence signals",
+    ]
+    assert modified["enriched_guidance"]["weak_or_ambiguous_signals"] == []
+    assert modified["enriched_guidance"]["screening_question"] == ""
+    assert [item["id"] for item in diff["unchanged"]] == ["req_unchanged"]
+
+
 def test_build_comparison_payload_handles_missing_versions_gracefully():
     # Mock DB session where no specifications exist
     db_mock = MagicMock()

@@ -1,0 +1,57 @@
+.workflowStepper { display: block; }
+
+.workflowStepper:global(.stepper) {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          position: relative;
+          margin: 4px 2px 34px;
+          padding: 0 10px;
+        }
+
+        .workflowStepper:global(.stepper)::before {
+          content: "";
+          position: absolute;
+          top: 19px;
+          left: 9%;
+          right: 9%;
+          height: 2px;
+          background: linear-gradient(90deg, #c9ccda, #e6e8ef);
+          z-index: 1;
+        }
+
+        .workflowStepper :global(.step-item) {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 9px;
+          position: relative;
+          z-index: 2;
+          min-width: 118px;
+        }
+
+        .workflowStepper :global(.step-circle) {
+          width: 40px;
+          height: 40px;
+          border-radius: 50%;
+          background: #fff;
+          border: 2px solid #d6d9e2;
+          color: #7b8394;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 0.9rem;
+          transition: all 0.25s ease;
+          box-shadow: 0 2px 8px rgba(16,24,40,0.04);
+        }
+
+        .workflowStepper :global(.step-label) {
+          font-size: 0.8rem;
+          font-weight: 600;
+          color: #7b8496;
+          text-align: center;
+        }
+          .workflowStepper:global(.stepper) { overflow-x: auto; justify-content: flex-start; gap: 34px; padding-bottom: 8px; }
+          .workflowStepper:global(.stepper)::before { left: 58px; right: 58px; min-width: 520px; }
+          .workflowStepper :global(.step-item) { min-width: 100px; }

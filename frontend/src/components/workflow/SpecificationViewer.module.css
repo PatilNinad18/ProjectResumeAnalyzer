@@ -1,0 +1,179 @@
+.specificationViewer { display: block; }
+
+        .specificationViewer :global(.preview-header) {
+          display: flex;
+          align-items: flex-end;
+          justify-content: space-between;
+          gap: 20px;
+          padding-bottom: 18px;
+          margin-bottom: 20px;
+          border-bottom: 1px solid #edf0f4;
+        }
+
+        .specificationViewer :global(.sub-tabs) {
+          display: flex;
+          gap: 4px;
+          background: #f6f7fa;
+          padding: 4px;
+          border: 1px solid #e7e9ef;
+          border-radius: 10px;
+        }
+
+        .specificationViewer :global(.sub-tab-btn) {
+          background: transparent;
+          border: none;
+          color: #667085;
+          padding: 7px 12px;
+          border-radius: 7px;
+          font-size: 0.82rem;
+          cursor: pointer;
+          font-weight: 600;
+          transition: all 0.18s ease;
+        }
+
+        .specificationViewer :global(.sub-tab-btn):hover { color: #344054; }
+
+        .specificationViewer :global(.code-preview) {
+          background: #fbfcfe;
+          border: 1px solid #e5e7eb;
+          border-radius: 14px;
+          padding: 24px;
+          max-height: 520px;
+          overflow-y: auto;
+          font-size: 0.9rem;
+          line-height: 1.7;
+          color: #344054;
+          box-shadow: inset 0 1px 1px rgba(16,24,40,0.02);
+        }
+
+        .specificationViewer :global(.code-preview) pre {
+          margin: 0;
+          color: #344054 !important;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+        }
+
+        .specificationViewer :global(.code-preview) h1 {
+          color: #101828;
+          letter-spacing: -0.02em;
+        }
+
+        .specificationViewer :global(.code-preview) h2 {
+          color: #101828;
+          letter-spacing: -0.02em;
+        }
+
+        .specificationViewer :global(.code-preview) h3 {
+          color: #101828;
+          letter-spacing: -0.02em;
+        }
+
+        .specificationViewer :global(.code-preview) h4 {
+          color: #101828;
+          letter-spacing: -0.02em;
+        }
+
+        .specificationViewer :global(.code-preview) code {
+          background: #f2f4f7;
+          border: 1px solid #eaecf0;
+          border-radius: 5px;
+          padding: 2px 5px;
+          color: #475467;
+        }
+        .specificationViewer :global(.code-preview)::-webkit-scrollbar { width: 9px; height: 9px; }
+
+        .specificationViewer :global(.code-preview)::-webkit-scrollbar-thumb {
+          background: #d7dbe4;
+          border-radius: 999px;
+          border: 2px solid transparent;
+          background-clip: padding-box;
+        }
+          .specificationViewer :global(.preview-header) { flex-direction: column; align-items: stretch; }
+        .specificationViewer :global(.kpi-card) {
+          padding: 12px;
+          border-radius: 10px;
+          border: 1px solid #eaecf0;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .specificationViewer :global(.kpi-label) {
+          font-size: 0.75rem;
+          font-weight: 600;
+        }
+
+        .specificationViewer :global(.kpi-value) {
+          font-size: 1.35rem;
+          font-weight: 750;
+          line-height: 1.1;
+        }
+        .specificationViewer :global(.filter-btn) {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          color: #475569;
+          padding: 5px 12px;
+          border-radius: 8px;
+          font-size: 0.78rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+
+        .specificationViewer :global(.filter-btn):hover {
+          background: #f1f5f9;
+          color: #1e293b;
+        }
+
+        .specificationViewer :global(.active-chip) {
+          background: #e0e7ff !important;
+          color: #3730a3 !important;
+          border-color: #a5b4fc !important;
+          font-weight: 700 !important;
+        }
+        .specificationViewer :global(.diff-badge-added) {
+          background: #ecfdf3;
+          color: #027a48;
+          border: 1px solid #a6f4c5;
+        }
+
+        .specificationViewer :global(.diff-badge-modified) {
+          background: #fffaeb;
+          color: #b54708;
+          border: 1px solid #fedf89;
+        }
+
+        .specificationViewer :global(.diff-badge-removed) {
+          background: #fef3f2;
+          color: #b42318;
+          border: 1px solid #fecdca;
+        }
+
+        .specificationViewer :global(.diff-badge-unchanged) {
+          background: #f8fafc;
+          color: #475569;
+          border: 1px solid #e2e8f0;
+        }
+        .specificationViewer :global(.provenance-badge-source_evidence) {
+          background: #eff8ff;
+          color: #175cd3;
+          border: 1px solid #b2ddff;
+        }
+
+        .specificationViewer :global(.provenance-badge-ta_confirmed) {
+          background: #fdf4ff;
+          color: #86198f;
+          border: 1px solid #f5d0fe;
+        }
+
+        .specificationViewer :global(.provenance-badge-llm_hypothesis) {
+          background: #f0fdf4;
+          color: #15803d;
+          border: 1px solid #bbf7d0;
+        }
+
+        .specificationViewer :global(.provenance-badge-ekg_derived) {
+          background: #faf5ff;
+          color: #6b21a8;
+          border: 1px solid #e9d5ff;
+        }

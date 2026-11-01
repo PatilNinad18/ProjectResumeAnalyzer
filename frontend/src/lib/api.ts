@@ -15,6 +15,37 @@ export type ProcessingStatus =
 
 export const TERMINAL_STATUSES: ProcessingStatus[] = ["READY", "NEEDS_REVIEW", "FAILED"];
 
+export type BatchTaskStatus = "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED" | "CANCELLED";
+
+export interface BatchTask {
+  task_id: string;
+  jd_id: string;
+  title: string;
+  filename: string;
+  status: BatchTaskStatus;
+  stage: string;
+  stage_label: string;
+  progress_percent: number;
+  attempt_count: number;
+  cancel_requested: boolean;
+  error_message: string | null;
+  has_specification: boolean;
+}
+
+export interface JDBatch {
+  batch_id: string;
+  project_id: string;
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  processing: number;
+  queued: number;
+  progress_percent: number;
+  tasks: BatchTask[];
+}
+
 export interface CompanyDetails {
   companyName: string;
   department: string;
@@ -45,37 +76,6 @@ export interface AnalysisStatusResponse {
   progress_percent?: number;
   stage_label?: string;
   current_stage?: string;
-}
-
-export type BatchTaskStatus = "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED" | "CANCELLED";
-
-export interface BatchTask {
-  task_id: string;
-  jd_id: string;
-  title: string;
-  filename: string;
-  status: BatchTaskStatus;
-  stage: string;
-  stage_label: string;
-  progress_percent: number;
-  attempt_count: number;
-  cancel_requested: boolean;
-  error_message: string | null;
-  has_specification: boolean;
-}
-
-export interface JDBatch {
-  batch_id: string;
-  project_id: string;
-  status: string;
-  total: number;
-  completed: number;
-  failed: number;
-  cancelled: number;
-  processing: number;
-  queued: number;
-  progress_percent: number;
-  tasks: BatchTask[];
 }
 
 export interface ChatTurn {
@@ -158,11 +158,31 @@ export async function createJDBatch(projectId: string, files: File[]): Promise<J
 }
 
 export async function getJDBatch(batchId: string, signal?: AbortSignal): Promise<JDBatch> {
-  return request(`/api/batches/${batchId}`, { signal, timeoutMs: 15_000 });
+  return request(`/api/batches/${encodeURIComponent(batchId)}`, { signal, timeoutMs: 15_000 });
 }
 
-export async function listJDBatches(signal?: AbortSignal): Promise<JDBatch[]> {
-  return request("/api/batches?limit=20", { signal, timeoutMs: 15_000 });
+export async function retryBatchTask(batchId: string, taskId: string): Promise<{ status: string }> {
+  return request(`/api/batches/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(taskId)}/retry`, {
+    method: "POST",
+    timeoutMs: 15_000,
+  });
+}
+
+export async function cancelBatchTask(batchId: string, taskId: string): Promise<{ status: string }> {
+  return request(`/api/batches/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: "POST",
+    timeoutMs: 15_000,
+  });
+}
+
+export async function refreshBatchTaskArtifacts(
+  batchId: string,
+  taskId: string
+): Promise<{ status: string }> {
+  return request(`/api/batches/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(taskId)}/refresh`, {
+    method: "POST",
+    timeoutMs: 30_000,
+  });
 }
 
 export async function getBatchArtifact(
@@ -172,7 +192,7 @@ export async function getBatchArtifact(
   signal?: AbortSignal
 ): Promise<string> {
   const response = await fetch(
-    `${API_BASE}/api/batches/${batchId}/jds/${jdId}/downloads/${artifact}`,
+    `${API_BASE}/api/batches/${encodeURIComponent(batchId)}/jds/${encodeURIComponent(jdId)}/downloads/${artifact}`,
     { signal }
   );
   if (!response.ok) {
@@ -186,24 +206,6 @@ export async function getBatchArtifact(
     throw new Error(detail);
   }
   return response.text();
-}
-
-export async function retryBatchTask(batchId: string, taskId: string): Promise<{ status: string }> {
-  return request(`/api/batches/${batchId}/tasks/${taskId}/retry`, { method: "POST", timeoutMs: 15_000 });
-}
-
-export async function cancelBatchTask(batchId: string, taskId: string): Promise<{ status: string }> {
-  return request(`/api/batches/${batchId}/tasks/${taskId}/cancel`, { method: "POST", timeoutMs: 15_000 });
-}
-
-export async function refreshBatchTaskArtifacts(
-  batchId: string,
-  taskId: string
-): Promise<{ status: string }> {
-  return request(`/api/batches/${batchId}/tasks/${taskId}/refresh`, {
-    method: "POST",
-    timeoutMs: 30_000,
-  });
 }
 
 /** Returns immediately (HTTP 202); the analysis runs in the background. */
@@ -289,11 +291,31 @@ export interface ClarificationQuestionItem {
   suggested_options?: string[];
 }
 
+export interface CanonicalAmbiguityItem {
+  id?: string;
+  ambiguity_id?: string;
+  statement?: string;
+  why_ambiguous?: string;
+  suggested_interpretation?: string | null;
+  evidence_required?: string[];
+  ta_confirmation_required?: boolean;
+  source?: Record<string, unknown> | null;
+}
+
+export interface MissingInformationItem {
+  field?: string;
+  parameter_name?: string;
+  reason?: string;
+  why_it_matters?: string;
+  recommended_action?: string;
+  [key: string]: unknown;
+}
+
 export interface ClarificationsResponse {
   has_ambiguities: boolean;
   questions: ClarificationQuestionItem[];
-  ambiguities: Array<Record<string, unknown>>;
-  missing_information: Array<Record<string, unknown>>;
+  ambiguities: CanonicalAmbiguityItem[];
+  missing_information: MissingInformationItem[];
   specification_version: number;
   lifecycle_status: string;
 }

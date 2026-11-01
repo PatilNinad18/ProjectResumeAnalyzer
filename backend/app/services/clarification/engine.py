@@ -291,9 +291,17 @@ def generate_clarification_questions(
 
     seen: set = set()
     unique: List[AmbiguityCandidate] = []
+    seen_sources: set = set()
     for candidate in proposals:
         if candidate.key not in seen:
             seen.add(candidate.key)
+            source_keys = {
+                _normalize_evidence(statement)
+                for statement in candidate.source_statements
+            }
+            if candidate.kind == "detected_ambiguity" and source_keys & seen_sources:
+                continue
+            seen_sources.update(source_keys)
             unique.append(candidate)
 
     raw_jd = _original_jd_text(master)
@@ -996,9 +1004,50 @@ def _detect_contextual_ambiguities(master, existing_keys: set) -> List[Clarifica
     return []
 
 
-def _detect_raw_ambiguities(master, existing_keys: set) -> List[ClarificationQuestionSchema]:
-    """Text-heuristic ambiguities are not questioned; see _detect_conversational_ambiguities."""
-    return []
+def _detect_raw_ambiguities(master, existing_keys: set) -> List[AmbiguityCandidate]:
+    """Re-submit source-backed deterministic findings for strict semantic verification."""
+    raw_jd = _original_jd_text(master)
+    candidates: List[AmbiguityCandidate] = []
+    seen_statements: set = set()
+
+    for index, ambiguity in enumerate(getattr(master, "raw_ambiguities", []) or []):
+        if getattr(ambiguity, "requires_ta_confirmation", True) is False:
+            continue
+        statement = " ".join((getattr(ambiguity, "text", "") or "").split())
+        normalized = _normalize_evidence(statement)
+        reason = getattr(ambiguity, "reason", "")
+        if (
+            len(statement) < 25
+            or not normalized
+            or normalized in seen_statements
+            or _is_boilerplate(statement)
+            or statement.lower().startswith(("in ", "or ", "and "))
+            or (
+                "experience range unclear" in reason.lower()
+                and re.search(
+                    r"\b\d+\s*\+\s*(?:years?|yrs?)\b|\b(?:at least|minimum of?)\s+\d+\s+(?:years?|yrs?)\b",
+                    statement,
+                    re.IGNORECASE,
+                )
+            )
+        ):
+            continue
+        if _source_context(raw_jd, (statement,)) is None:
+            continue
+
+        seen_statements.add(normalized)
+        ambiguity_id = getattr(ambiguity, "ambiguity_id", f"amb_{index}")
+        candidates.append(AmbiguityCandidate(
+            key=f"jd_ambiguity_{ambiguity_id}",
+            category=QuestionCategory.TECHNICAL_SCOPE,
+            kind="detected_ambiguity",
+            source_statements=(statement,),
+            requirement_id=None,
+            field_target=f"ambiguities[{ambiguity_id}]",
+            reason=reason or "Deterministic detector identified ambiguous JD wording.",
+        ))
+
+    return candidates
 
 
 def _legacy_detect_missing_metadata(master, existing_keys: set) -> List[ClarificationQuestionSchema]:

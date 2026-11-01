@@ -8,6 +8,7 @@ import pytest
 
 from app.schemas.master_context import (
     ConfidenceBand,
+    DetectedAmbiguity,
     JDMasterContext,
     RequirementPriority,
     RoleOverview,
@@ -213,6 +214,36 @@ def test_semantic_verifier_fails_closed_when_model_evidence_is_not_from_jd(monke
     result = engine.generate_clarification_questions(_master(raw_jd, [requirement]))
 
     assert result.clarification_history == []
+
+
+def test_source_backed_detector_ambiguities_are_verified_once(monkeypatch):
+    statement = "Strong experience with semiconductor simulation tools is required."
+    raw_jd = f"Requirements:\n- {statement}"
+    master = _master(raw_jd)
+    master.raw_ambiguities = [
+        DetectedAmbiguity(
+            ambiguity_id="amb_001_tools",
+            text=statement,
+            reason="The JD does not identify which tools are in scope.",
+        ),
+        DetectedAmbiguity(
+            ambiguity_id="amb_002_tools",
+            text=statement,
+            reason="Duplicate detector finding for the same statement.",
+        ),
+    ]
+    question = "Which semiconductor simulation tools are required for this role?"
+    _install_fake_llm(
+        monkeypatch,
+        _verified_payload(statement, question),
+    )
+
+    result = engine.generate_clarification_questions(master)
+
+    assert len(result.clarification_history) == 1
+    assert result.clarification_history[0].question_text == question
+    assert result.clarification_history[0].question_key == "jd_ambiguity_amb_001_tools"
+    assert result.clarification_history[0].rationale.count(statement) == 1
 
 
 def test_unresolved_extraction_is_rejected_when_jd_context_resolves_priority(monkeypatch):

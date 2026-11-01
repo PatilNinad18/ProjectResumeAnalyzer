@@ -401,7 +401,18 @@ def compute_context_diff(
             if _normalize_text(breq.get("text", "")) != t_norm:
                 changes.append("Requirement phrasing refined")
             if target_type == "enriched" and enriched_item:
-                changes.append("Enriched with technical explanation, resume signals, and screening question")
+                enriched_fields = (
+                    ("technical_concept_summary", "Technical concept summary"),
+                    ("strong_evidence_signals", "Strong evidence signals"),
+                    ("weak_or_ambiguous_signals", "Weak or ambiguous signals"),
+                    ("screening_question", "Screening question"),
+                )
+                for field, label in enriched_fields:
+                    value = enriched_item.get(field)
+                    if (isinstance(value, str) and value.strip()) or (
+                        isinstance(value, list) and any(str(item).strip() for item in value)
+                    ):
+                        changes.append(f"Enrichment added: {label}")
 
             if changes:
                 modified.append({

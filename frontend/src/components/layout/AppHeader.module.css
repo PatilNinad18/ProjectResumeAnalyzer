@@ -1,0 +1,150 @@
+.appHeader { display: flex; }
+        .appHeader:global(.topbar) {
+          height: 74px;
+          background: rgba(255, 255, 255, 0.9);
+          backdrop-filter: blur(16px);
+          -webkit-backdrop-filter: blur(16px);
+          border-bottom: 1px solid rgba(229, 231, 235, 0.92);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0 32px;
+          position: sticky;
+          top: 0;
+          z-index: 50;
+          box-shadow: 0 1px 0 rgba(16, 24, 40, 0.02), 0 6px 20px rgba(16, 24, 40, 0.03);
+          gap: 20px;
+        }
+
+        .appHeader :global(.topbar-left) {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          flex: 1;
+        }
+
+        .appHeader :global(.user-avatar) {
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          background: var(--ink);
+          color: #fff;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 0.92rem;
+          flex: 0 0 auto;
+        }
+
+        .appHeader :global(.ask-anything-btn) {
+          display: inline-flex;
+          align-items: center;
+          gap: 9px;
+          background: linear-gradient(135deg, #6668ed, #5153dd);
+          color: #fff;
+          border: none;
+          padding: 8px 8px 8px 16px;
+          border-radius: 999px;
+          font-weight: 650;
+          font-size: 0.85rem;
+          cursor: pointer;
+          box-shadow: 0 8px 18px rgba(81, 82, 221, 0.18);
+          transition: transform 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .appHeader :global(.ask-anything-btn):hover {
+          transform: translateY(-1px);
+          box-shadow: 0 12px 22px rgba(81, 82, 221, 0.24);
+        }
+
+        .appHeader :global(.chatbot-badge) {
+          background: rgba(255, 255, 255, 0.2);
+          padding: 4px 9px;
+          border-radius: 999px;
+          font-size: 0.64rem;
+          letter-spacing: 0.03em;
+          font-weight: 700;
+        }
+
+        .appHeader :global(.topbar-center) {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          flex: 1.4;
+          justify-content: center;
+        }
+
+        .appHeader :global(.ai-icon-box) {
+          width: 34px;
+          height: 34px;
+          border-radius: 10px;
+          background: var(--ink);
+          color: #fff;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 0.76rem;
+          letter-spacing: 0.02em;
+          flex: 0 0 auto;
+        }
+
+        .appHeader :global(.brand-text) {
+          display: flex;
+          flex-direction: column;
+          line-height: 1.28;
+        }
+
+        .appHeader :global(.brand-title) {
+          font-weight: 750;
+          font-size: 1.03rem;
+          letter-spacing: -0.02em;
+          color: var(--text);
+          white-space: nowrap;
+        }
+
+        .appHeader :global(.brand-subtitle) {
+          font-size: 0.78rem;
+          color: var(--text-muted);
+          white-space: nowrap;
+        }
+
+        .appHeader :global(.topbar-right) {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 10px;
+          flex: 1;
+        }
+
+        .appHeader :global(.context-btn) {
+          background: var(--surface-muted);
+          color: #344054;
+          border: 1px solid #e3e5ec;
+          padding: 9px 16px;
+          border-radius: 10px;
+          font-size: 0.83rem;
+          font-weight: 650;
+          cursor: pointer;
+          transition: all 0.18s ease;
+          white-space: nowrap;
+        }
+
+        .appHeader :global(.context-btn):hover {
+          background: #e9eaf1;
+          border-color: #d5d8e3;
+          transform: translateY(-1px);
+        }
+        @media (max-width: 900px) {
+          .appHeader:global(.topbar) { padding: 0 18px; }
+          .appHeader :global(.brand-subtitle) { display: none; }
+        }
+
+        @media (max-width: 680px) {
+          .appHeader:global(.topbar) { height: auto; min-height: 66px; gap: 10px; align-items: center; padding: 12px 14px; flex-wrap: wrap; }
+          .appHeader :global(.topbar-left) { flex: 1 1 auto; }
+          .appHeader :global(.topbar-center) { display: none; }
+          .appHeader :global(.topbar-right) { flex: 0 0 auto; }
+          .appHeader :global(.ask-anything-btn) span:not(:global(.chatbot-badge)) { display: none; }
+        }
