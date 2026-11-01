@@ -30,10 +30,12 @@ type JDInputSectionProps = Pick<
 
 type JDInputSectionPropsWithBatch = JDInputSectionProps & {
   batchState: ReturnType<typeof useJDBatch>;
+  handleLaunchBatchAgent: WorkflowPageProps["handleLaunchBatchAgent"];
 };
 
 export default function JDInputSection({
   batchState,
+  handleLaunchBatchAgent,
   agents,
   handleResetForNewJD,
   status,
@@ -268,7 +270,12 @@ export default function JDInputSection({
         </button>
       </div>
 
-      {batchState.batch && <BatchUploadSection state={batchState} />}
+      {batchState.batch && (
+        <BatchUploadSection
+          state={batchState}
+          onLaunchAgent={handleLaunchBatchAgent}
+        />
+      )}
     </div>
   );
 }

@@ -1,4 +1,5 @@
-import ReactMarkdown from "react-markdown";
+import { useRef, useState, type FormEvent } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import { API_BASE, type BatchTask, type ClarificationsResponse, type CanonicalAmbiguityItem } from "@/lib/api";
 import type { useJDBatch } from "@/hooks/useJDBatch";
 import styles from "./BatchUploadSection.module.css";
@@ -7,6 +8,7 @@ type BatchHook = ReturnType<typeof useJDBatch>;
 
 export interface BatchUploadSectionProps {
   state: BatchHook;
+  onLaunchAgent: (agentName: string, task: BatchTask, markdown: string) => Promise<void>;
 }
 
 const taskStatusLabel: Record<BatchTask["status"], string> = {
@@ -42,29 +44,43 @@ function distinctAmbiguities(data: ClarificationsResponse) {
     });
 }
 
-function changedEnrichedLines(baseline: string, enriched: string) {
+function changedEnrichedLineNumbers(baseline: string, enriched: string) {
   const available = new Map<string, number>();
   for (const line of baseline.split(/\r?\n/)) {
     available.set(line, (available.get(line) ?? 0) + 1);
   }
-  const changed: Array<{ line: string; index: number }> = [];
+  const changed = new Set<number>();
   enriched.split(/\r?\n/).forEach((line, index) => {
     const remaining = available.get(line) ?? 0;
     if (remaining > 0) {
       available.set(line, remaining - 1);
     } else if (line.trim()) {
-      changed.push({ line, index: index + 1 });
+      changed.add(index + 1);
     }
   });
   return changed;
 }
 
-function missingInfoLabel(item: Record<string, unknown>, index: number) {
-  const name = item.parameter_name ?? item.field ?? item.name;
-  return typeof name === "string" && name.trim() ? name.replace(/_/g, " ") : `Missing information ${index + 1}`;
+function hasChangedLine(node: { position?: { start: { line: number }; end: { line: number } } } | undefined, lines: Set<number>) {
+  if (!node?.position) return false;
+  for (let line = node.position.start.line; line <= node.position.end.line; line += 1) {
+    if (lines.has(line)) return true;
+  }
+  return false;
 }
 
-export default function BatchUploadSection({ state }: BatchUploadSectionProps) {
+function missingInfoLabel(item: Record<string, unknown>, index: number) {
+  const name = item.parameter_name ?? item.field ?? item.name;
+  return typeof name === "string" && name.trim()
+    ? name.replace(/_/g, " ")
+    : `Missing information ${index + 1}`;
+}
+
+export default function BatchUploadSection({ state, onLaunchAgent }: BatchUploadSectionProps) {
+  const [agentName, setAgentName] = useState("");
+  const [isLaunchingAgent, setIsLaunchingAgent] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const launchInFlight = useRef(false);
   const {
     batch,
     selectedTask,
@@ -79,8 +95,6 @@ export default function BatchUploadSection({ state }: BatchUploadSectionProps) {
     hasEnrichedMarkdown,
     isEnrichedView,
     setIsEnrichedView,
-    comparison,
-    comparisonError,
     isResolving,
     isLoadingTask,
     error,
@@ -98,12 +112,70 @@ export default function BatchUploadSection({ state }: BatchUploadSectionProps) {
     ) || pendingAmbiguities.some(({ ambiguity }) => ambiguity.ta_confirmation_required !== false)
   );
   const finalSpecification = isFinalSpecification(clarifications);
-  const changedLines = baselineMarkdown && enrichedMarkdown
-    ? changedEnrichedLines(baselineMarkdown, enrichedMarkdown)
-    : [];
-  const requirementChanges = comparison
-    ? [...comparison.diff.added, ...comparison.diff.modified]
-    : [];
+  const hasClarificationItems = actionableQuestions.length > 0 || pendingAmbiguities.length > 0;
+  const hasUnansweredItems =
+    actionableQuestions.some((question) => !(selectedAnswers[question.question_key] ?? "").trim()) ||
+    pendingAmbiguities.some(
+      ({ ambiguity, index }) =>
+        ambiguity.ta_confirmation_required !== false &&
+        !(selectedAnswers[`amb_${index}`] ?? "").trim()
+    );
+  const changedMarkdownLines = isEnrichedView && hasEnrichedMarkdown && baselineMarkdown && enrichedMarkdown
+    ? changedEnrichedLineNumbers(baselineMarkdown, enrichedMarkdown)
+    : new Set<number>();
+  const markdownComponents: Components = {
+    h1({ node, ...props }) {
+      return <h1 {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    h2({ node, ...props }) {
+      return <h2 {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    h3({ node, ...props }) {
+      return <h3 {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    h4({ node, ...props }) {
+      return <h4 {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    h5({ node, ...props }) {
+      return <h5 {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    h6({ node, ...props }) {
+      return <h6 {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    p({ node, ...props }) {
+      return <p {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    li({ node, ...props }) {
+      return <li {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    blockquote({ node, ...props }) {
+      return <blockquote {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    td({ node, ...props }) {
+      return <td {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+    th({ node, ...props }) {
+      return <th {...props} className={hasChangedLine(node, changedMarkdownLines) ? styles.enrichedMarkdownChange : undefined} />;
+    },
+  };
+
+  async function handleLaunchAgent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = agentName.trim();
+    if (!selectedTask || !markdown?.trim() || !name || launchInFlight.current) return;
+
+    launchInFlight.current = true;
+    setIsLaunchingAgent(true);
+    setLaunchError(null);
+    try {
+      await onLaunchAgent(name, selectedTask, markdown);
+    } catch (error) {
+      setLaunchError(error instanceof Error ? error.message : "Could not launch the agent. Please try again.");
+    } finally {
+      launchInFlight.current = false;
+      setIsLaunchingAgent(false);
+    }
+  }
 
   if (!batch) return null;
 
@@ -143,6 +215,7 @@ export default function BatchUploadSection({ state }: BatchUploadSectionProps) {
               id="batch-jd-selector"
               value={selectedTaskId ?? ""}
               onChange={(event) => setSelectedTaskId(event.currentTarget.value || null)}
+              disabled={isLaunchingAgent}
             >
               <option value="" disabled>Select a JD</option>
               {batch.tasks.map((task) => (
@@ -181,6 +254,55 @@ export default function BatchUploadSection({ state }: BatchUploadSectionProps) {
 
               {selectedTask.status === "COMPLETED" && !isLoadingTask && clarifications && (
                 <>
+                  {markdown && (
+                    <section className={styles.markdown}>
+                      <div className={styles.markdownHeader}>
+                        <div>
+                          <h5>{finalSpecification ? "Final Markdown" : "Prepared Markdown"}</h5>
+                          <div className={styles.viewToggle}>
+                            <button
+                              type="button"
+                              className={!isEnrichedView ? styles.activeView : ""}
+                              onClick={() => setIsEnrichedView(false)}
+                            >
+                              Deterministic
+                            </button>
+                            <button
+                              type="button"
+                              className={isEnrichedView ? styles.activeView : ""}
+                              onClick={() => setIsEnrichedView(true)}
+                              disabled={!hasEnrichedMarkdown}
+                              title={hasEnrichedMarkdown ? "Show enriched Markdown" : "Enriched Markdown is not available for this JD"}
+                            >
+                              Enriched
+                            </button>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => {
+                            const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+                            const url = URL.createObjectURL(blob);
+                            const link = document.createElement("a");
+                            link.href = url;
+                            link.download = `${selectedTask.filename.replace(/\.[^.]+$/, "")}-specification.md`;
+                            link.click();
+                            setTimeout(() => URL.revokeObjectURL(url), 1000);
+                          }}
+                        >
+                          Download .md
+                        </button>
+                      </div>
+                      {!hasEnrichedMarkdown && (
+                        <p className={styles.statusMessage}>Enrichment is unavailable; showing the deterministic specification.</p>
+                      )}
+                      <div className={styles.markdownBody}>
+                        <ReactMarkdown components={markdownComponents}>{markdown}</ReactMarkdown>
+                      </div>
+                    </section>
+                  )}
+
                   <section className={styles.ambiguities}>
                     <h5>
                       {hasOpenAmbiguities
@@ -256,103 +378,48 @@ export default function BatchUploadSection({ state }: BatchUploadSectionProps) {
                       </div>
                     )}
 
-                    {hasOpenAmbiguities && !finalSpecification && (
+                    {hasClarificationItems && (
                       <button
                         type="button"
                         className="btn-primary"
                         onClick={() => void resolveSelectedTask()}
-                        disabled={isResolving || actionableQuestions.some(
-                          (question) =>
-                            question.status !== "ANSWERED" &&
-                            question.status !== "EXPLICITLY_UNSPECIFIED" &&
-                            !(selectedAnswers[question.question_key] ?? "").trim()
-                        ) || pendingAmbiguities.some(
-                          ({ ambiguity, index }) =>
-                            ambiguity.ta_confirmation_required !== false &&
-                            !(selectedAnswers[`amb_${index}`] ?? "").trim()
-                        )}
+                        disabled={isResolving || hasUnansweredItems}
                       >
-                        {isResolving ? "Generating final Markdown…" : "Apply answers and generate final Markdown"}
+                        {isResolving ? "Regenerating Markdown…" : "Regenerate Markdown with solved ambiguities"}
                       </button>
                     )}
-                    {finalSpecification && hasOpenAmbiguities && (
+                    {hasOpenAmbiguities && finalSpecification && (
                       <p className={styles.finalNotice}>All ambiguities are resolved. This JD has a final specification.</p>
                     )}
                   </section>
 
-                  {markdown && (
-                    <section className={styles.markdown}>
-                      <div className={styles.markdownHeader}>
-                        <div>
-                          <h5>{finalSpecification ? "Final Markdown" : "Job Description Markdown"}</h5>
-                          <div className={styles.viewToggle}>
-                            <button
-                              type="button"
-                              className={!isEnrichedView ? styles.activeView : ""}
-                              onClick={() => setIsEnrichedView(false)}
-                            >
-                              Deterministic
-                            </button>
-                            <button
-                              type="button"
-                              className={isEnrichedView ? styles.activeView : ""}
-                              onClick={() => setIsEnrichedView(true)}
-                              disabled={!hasEnrichedMarkdown}
-                              title={hasEnrichedMarkdown ? "Show enriched Markdown" : "Enriched Markdown is not available for this JD"}
-                            >
-                              Enriched
-                            </button>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          onClick={() => {
-                            const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-                            const url = URL.createObjectURL(blob);
-                            const link = document.createElement("a");
-                            link.href = url;
-                            link.download = `${selectedTask.filename.replace(/\.[^.]+$/, "")}-specification.md`;
-                            link.click();
-                            setTimeout(() => URL.revokeObjectURL(url), 1000);
-                          }}
-                        >
-                          Download .md
-                        </button>
-                      </div>
-                      {!hasEnrichedMarkdown && (
-                        <p className={styles.statusMessage}>Enrichment is unavailable; showing the deterministic specification.</p>
-                      )}
-                      {isEnrichedView && hasEnrichedMarkdown && changedLines.length > 0 && (
-                        <section className={styles.diffPanel}>
-                          <strong>Enrichment changes</strong>
-                          <p>Green lines are additions or modifications in the enriched Markdown.</p>
-                          <ul>
-                            {changedLines.map(({ line, index }) => (
-                              <li key={`${index}-${line}`}><code>{line}</code></li>
-                            ))}
-                          </ul>
-                        </section>
-                      )}
-                      {isEnrichedView && hasEnrichedMarkdown && comparisonError && (
-                        <div className="alert-error" role="alert">{comparisonError}</div>
-                      )}
-                      {isEnrichedView && hasEnrichedMarkdown && comparison && requirementChanges.length > 0 && (
-                        <section className={styles.fieldChanges}>
-                          <strong>Requirement-level changes</strong>
-                          {requirementChanges.map((item) => (
-                            <div className={styles.fieldChange} key={item.id}>
-                              <span>{item.diff_status === "added" ? "Added" : "Modified"}</span>
-                              <p>{item.text}</p>
-                              {item.changes?.length ? <small>{item.changes.join(" · ")}</small> : null}
-                            </div>
-                          ))}
-                        </section>
-                      )}
-                      <div className={styles.markdownBody}><ReactMarkdown>{markdown}</ReactMarkdown></div>
-                    </section>
-                  )}
                 </>
+              )}
+              {selectedTask.status === "COMPLETED" && !isLoadingTask && markdown?.trim() && (
+                <section className={styles.launchAgent} aria-labelledby="batch-launch-agent-heading">
+                  <h5 id="batch-launch-agent-heading">Chat with this job description</h5>
+                  <form className={styles.launchAgentForm} onSubmit={(event) => void handleLaunchAgent(event)}>
+                    <label htmlFor={`batch-agent-name-${selectedTask.jd_id}`}>Agent name</label>
+                    <input
+                      id={`batch-agent-name-${selectedTask.jd_id}`}
+                      type="text"
+                      value={agentName}
+                      onChange={(event) => setAgentName(event.currentTarget.value)}
+                      placeholder="Enter an agent name"
+                      maxLength={120}
+                      required
+                      disabled={isLaunchingAgent}
+                    />
+                    <button
+                      type="submit"
+                      className="btn-primary"
+                      disabled={isLaunchingAgent || !agentName.trim()}
+                    >
+                      {isLaunchingAgent ? "Launching agent…" : "Launch the agent"}
+                    </button>
+                  </form>
+                  {launchError && <div className="alert-error" role="alert">{launchError}</div>}
+                </section>
               )}
             </article>
           )}

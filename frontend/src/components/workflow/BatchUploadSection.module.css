@@ -203,6 +203,49 @@
   font-size: 0.84rem;
 }
 
+.launchAgent {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #eaecf0;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.launchAgent h5 {
+  margin: 0 0 12px;
+}
+
+.launchAgentForm {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.launchAgentForm label {
+  flex-basis: 100%;
+  margin-bottom: -6px;
+  color: #344054;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.launchAgentForm input {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #d0d5dd;
+  border-radius: 7px;
+  color: #344054;
+  font: inherit;
+  font-size: 0.86rem;
+}
+
+.launchAgentForm input:focus {
+  border-color: #6366f1;
+  outline: 2px solid #e0e7ff;
+}
+
 .markdown {
   margin-top: 18px;
   border-top: 1px solid #eaecf0;
@@ -261,59 +304,11 @@
   margin-top: 0;
 }
 
-.diffPanel,
-.fieldChanges {
-  margin: 12px 0;
-  padding: 12px;
-  border: 1px solid #a6f4c5;
-  border-radius: 8px;
-  background: #f0fdf4;
-  color: #166534;
-  font-size: 0.83rem;
-}
-
-.diffPanel p {
-  margin: 5px 0 8px;
-  color: #4b5563;
-}
-
-.diffPanel ul {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding-left: 22px;
-}
-
-.diffPanel li {
-  padding: 3px 5px;
-  border-radius: 4px;
+.markdownBody .enrichedMarkdownChange {
+  border-radius: 5px;
   background: #dcfce7;
-  overflow-wrap: anywhere;
-}
-
-.diffPanel code {
-  white-space: pre-wrap;
-  font-size: 0.78rem;
-}
-
-.fieldChange {
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  background: #dcfce7;
-}
-
-.fieldChange > span {
-  font-weight: 700;
-}
-
-.fieldChange p {
-  margin: 3px 0;
+  box-shadow: 0 0 0 3px #dcfce7;
   color: #14532d;
-}
-
-.fieldChange small {
-  color: #166534;
 }
 
 @media (max-width: 760px) {
