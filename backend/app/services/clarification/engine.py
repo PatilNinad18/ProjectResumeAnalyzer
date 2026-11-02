@@ -1167,71 +1167,105 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
     text_lower = all_text.lower()
     title_lower = job_title.lower()
 
-    # 1. AI Chiplet in title vs Preferred in requirements
-    if "chiplet_experience_must_have" not in existing_keys and "chiplet" in text_lower:
-        chiplet_reqs = [r for r in reqs if "chiplet" in r.text.lower()]
+    # 1. Core technology in title vs Preferred in requirements (General for ANY domain)
+    core_tech_keywords = [
+        "chiplet", "kubernetes", "golang", "react", "security", "snowflake",
+        "fpga", "cuda", "ios", "android", "salesforce", "pytorch", "terraform",
+    ]
+    matched_title_tech = next((tech for tech in core_tech_keywords if tech in title_lower or tech in text_lower), None)
+    if matched_title_tech and f"{matched_title_tech}_experience_must_have" not in existing_keys:
+        tech_reqs = [r for r in reqs if matched_title_tech in r.text.lower()]
         only_preferred = False
         stmt = ""
-        if chiplet_reqs:
-            only_preferred = all(r.priority == RequirementPriority.PREFERRED for r in chiplet_reqs)
-            stmt = chiplet_reqs[0].text
-        elif "chiplet" in title_lower:
+        if tech_reqs:
+            only_preferred = all(r.priority == RequirementPriority.PREFERRED for r in tech_reqs)
+            stmt = tech_reqs[0].text
+        elif matched_title_tech in title_lower:
             only_preferred = bool(re.search(
-                r"(preferred|nice.to.have).{0,120}chiplet|chiplet.{0,120}(preferred|nice.to.have)", text_lower
+                rf"(preferred|nice.to.have).{{0,120}}{matched_title_tech}|{matched_title_tech}.{{0,120}}(preferred|nice.to.have)", text_lower
             ))
-            stmt = _find_statement(clean_jd, "chiplet")
+            stmt = _find_statement(clean_jd, matched_title_tech)
         
         if only_preferred and stmt:
-            candidates.append(AmbiguityCandidate(
-                key="chiplet_experience_must_have",
-                category=QuestionCategory.TECHNICAL_SCOPE,
-                kind="detected_ambiguity",
-                source_statements=(stmt,),
-                requirement_id=None,
-                field_target="requirements.chiplet.priority",
-                reason="The JD title focuses on chiplets, but chiplet architecture is listed under preferred qualifications.",
-                blocking=True,
-                custom_topic="Chiplet exp",
-                custom_question="The JD is for an 'AI Chiplet' architect, yet 'Chiplet architecture and HBM' is only under Preferred Skills. Is prior chiplet experience a must-have?",
-                custom_options=(
+            if matched_title_tech == "chiplet":
+                custom_q = "The JD is for an 'AI Chiplet' architect, yet 'Chiplet architecture and HBM' is only under Preferred Skills. Is prior chiplet experience a must-have?"
+                custom_opts = (
                     ("Must-have", "Candidate must have worked on multi-die/chiplet systems (D2D links, partitioning)."),
                     ("Preferred only", "Keep as stated: a strong SoC VP architect without chiplet exposure still qualifies."),
                     ("Chiplet yes, HBM optional", "Chiplet experience is required; HBM/memory-subsystem knowledge is a plus."),
                     ("Type something", "Provide specific chiplet screening guidance."),
-                ),
-            ))
+                )
+                topic = "Chiplet exp"
+            else:
+                custom_q = f"The role title emphasizes '{matched_title_tech.capitalize()}', but it is listed under Preferred Skills. Is prior {matched_title_tech} experience a must-have?"
+                custom_opts = (
+                    ("Must-have", f"Candidate must have direct hands-on production experience with {matched_title_tech}."),
+                    ("Preferred only", f"A strong architect/engineer without direct {matched_title_tech} exposure still qualifies if adjacent skills are strong."),
+                    ("Type something", f"Provide specific {matched_title_tech} qualification guidance."),
+                )
+                topic = f"{matched_title_tech.capitalize()} exp"
 
-    # 2. Hands-on SystemC/TLM vs architecture balance (only when role involves both and is not a clear stub)
-    if "hands_on_architecture_balance" not in existing_keys and "platform infrastructure" in text_lower and ("systemc" in text_lower or "tlm" in text_lower):
-        stmt = (
-            _find_statement(clean_jd, "platform infrastructure")
-            or _find_statement(clean_jd, "systemc")
-            or _find_statement(clean_jd, "tlm")
-        )
-        if stmt:
             candidates.append(AmbiguityCandidate(
-                key="hands_on_architecture_balance",
+                key=f"{matched_title_tech}_experience_must_have",
                 category=QuestionCategory.TECHNICAL_SCOPE,
                 kind="detected_ambiguity",
                 source_statements=(stmt,),
                 requirement_id=None,
-                field_target="role_overview.hands_on_ratio",
-                reason="Role mentions high-level architecture as well as hands-on platform infrastructure coding.",
-                blocking=False,
-                custom_topic="Hands-on %",
-                custom_question="Responsibilities include both architecture and 'develop reusable SystemC/TLM-based platform infrastructure'. How hands-on is this role expected to be?",
-                custom_options=(
-                    ("Heavily hands-on (>50%)", "Writes significant SystemC/TLM code and model infrastructure personally."),
-                    ("Balanced (25-50%)", "Codes key framework pieces and templates; rest is architecture, reviews and guidance."),
-                    ("Mostly architecture (<25%)", "Defines architecture and reviews; engineers do most implementation."),
-                    ("Type something", "Provide custom hands-on ratio expectations."),
-                ),
+                field_target=f"requirements.{matched_title_tech}.priority",
+                reason=f"The role emphasizes {matched_title_tech}, but it is classified as preferred in requirements.",
+                blocking=True,
+                custom_topic=topic,
+                custom_question=custom_q,
+                custom_options=custom_opts,
             ))
 
-    # 3. Customer engagement depth (e.g. studying customer XPU/SoC architectures)
-    if "customer_facing_depth" not in existing_keys and ("customer xpu" in text_lower or "customer soc" in text_lower):
-        stmt = _find_statement(clean_jd, "customer") or _find_statement(clean_jd, "xpu")
+    # 2. Hands-on vs architecture/lead balance (General for ANY architecture or lead role)
+    if "hands_on_architecture_balance" not in existing_keys:
+        is_arch_or_lead = any(w in title_lower for w in ("architect", "lead", "principal", "staff"))
+        has_hands_on_conflict = (
+            ("platform infrastructure" in text_lower and ("systemc" in text_lower or "tlm" in text_lower))
+            or (is_arch_or_lead and any(w in text_lower for w in ("hands-on", "develop reusable", "code implementation", "infrastructure code")))
+        )
+        if has_hands_on_conflict:
+            stmt = (
+                _find_statement(clean_jd, "platform infrastructure")
+                or _find_statement(clean_jd, "systemc")
+                or _find_statement(clean_jd, "tlm")
+                or _find_statement(clean_jd, "hands-on")
+                or _find_statement(clean_jd, "develop")
+            )
+            if stmt:
+                if "systemc" in text_lower or "tlm" in text_lower:
+                    custom_q = "Responsibilities include both architecture and 'develop reusable SystemC/TLM-based platform infrastructure'. How hands-on is this role expected to be?"
+                else:
+                    custom_q = "Responsibilities include both technical architecture/leadership and hands-on implementation. How hands-on is this role expected to be?"
+                candidates.append(AmbiguityCandidate(
+                    key="hands_on_architecture_balance",
+                    category=QuestionCategory.TECHNICAL_SCOPE,
+                    kind="detected_ambiguity",
+                    source_statements=(stmt,),
+                    requirement_id=None,
+                    field_target="role_overview.hands_on_ratio",
+                    reason="Role mentions high-level architecture as well as hands-on platform/code implementation.",
+                    blocking=False,
+                    custom_topic="Hands-on %",
+                    custom_question=custom_q,
+                    custom_options=(
+                        ("Heavily hands-on (>50%)", "Writes significant code and model/platform infrastructure personally."),
+                        ("Balanced (25-50%)", "Codes key framework pieces and templates; rest is architecture, reviews and guidance."),
+                        ("Mostly architecture (<25%)", "Defines architecture and reviews; engineers do most implementation."),
+                        ("Type something", "Provide custom hands-on ratio expectations."),
+                    ),
+                ))
+
+    # 3. Customer engagement depth (General for ANY customer or client facing role)
+    if "customer_facing_depth" not in existing_keys and ("customer xpu" in text_lower or "customer soc" in text_lower or "customer architect" in text_lower or "client engagement" in text_lower):
+        stmt = _find_statement(clean_jd, "customer") or _find_statement(clean_jd, "client") or _find_statement(clean_jd, "xpu")
         if stmt:
+            if "xpu" in text_lower or "soc" in text_lower:
+                custom_q = "The role involves studying customer XPU/SoC architectures. How customer-facing is this position?"
+            else:
+                custom_q = "The role mentions customer/client engagement. How customer-facing is this position expected to be?"
             candidates.append(AmbiguityCandidate(
                 key="customer_facing_depth",
                 category=QuestionCategory.TECHNICAL_SCOPE,
@@ -1239,10 +1273,10 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
                 source_statements=(stmt,),
                 requirement_id=None,
                 field_target="role_overview.customer_facing",
-                reason="The JD refers to studying customer architectures without specifying engagement frequency.",
+                reason="The JD refers to customer/client engagement without specifying interaction frequency.",
                 blocking=False,
                 custom_topic="Customer",
-                custom_question="The role involves studying customer XPU/SoC architectures. How customer-facing is this position?",
+                custom_question=custom_q,
                 custom_options=(
                     ("Direct customer-facing", "Regularly engages customer architects, leads technical meetings, may travel."),
                     ("Occasional interaction", "Joins customer calls for key milestones; requirements mostly come via internal PM/FAE teams."),
