@@ -1023,7 +1023,13 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
                 target_statement=matched_statement,
             )
         except Exception as exc:
-            logger.warning("Could not submit answer for question %s: %s", q_key, exc)
+            logger.warning("Could not submit answer for question %s via submit_answer: %s — attempting direct field patch", q_key, exc)
+            # For synthesized frontend-only keys (team_size, salary_range), apply field patch directly
+            try:
+                from app.services.clarification.updater import _apply_field_patch
+                _apply_field_patch(master, q_key, text_str, answered_by, q_key, QuestionStatus.ANSWERED)
+            except Exception as patch_exc:
+                logger.warning("Direct field patch also failed for %s: %s", q_key, patch_exc)
 
     # Attempt finalization
     try:

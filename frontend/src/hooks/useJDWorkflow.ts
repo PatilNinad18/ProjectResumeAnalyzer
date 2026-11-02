@@ -206,8 +206,15 @@ export function useJDWorkflow({
       currentValue: string;
     }> = [];
 
-    const deriveTopic = (rawTopic: string | undefined, text: string): string => {
-      const low = (text || "").toLowerCase();
+    // Generic/fallback topics that should be replaced by text-based matching
+    const GENERIC_TOPICS = new Set([
+      "Conflicting requirement priority", "Requirement clarification",
+      "Technical requirement scope", "Requirement priority",
+      "Requirement logic", "Requirement",
+    ]);
+
+    const deriveTopicFromText = (questionTextOnly: string): string => {
+      const low = (questionTextOnly || "").toLowerCase();
       if (low.includes("chiplet")) return "Chiplet exp";
       if (low.includes("hands-on") || low.includes("tlm") || low.includes("systemc")) return "Hands-on %";
       if (low.includes("customer") || low.includes("client")) return "Customer";
@@ -216,9 +223,15 @@ export function useJDWorkflow({
       if (low.includes("team") || low.includes("direct report")) return "Team size";
       if (low.includes("year") || low.includes("experience")) return "Experience";
       if (low.includes("protocol") || low.includes("pcie") || low.includes("cxl") || low.includes("ucie")) return "Protocols";
-      if (rawTopic && !rawTopic.toLowerCase().includes("conflicting") && !rawTopic.toLowerCase().includes("clarification") && !rawTopic.toLowerCase().includes("technical requirement")) {
-        return rawTopic;
-      }
+      return "";
+    };
+
+    // Use short_topic directly when it is a meaningful (non-generic) backend-assigned label.
+    // Only fall back to text matching on question_text (NOT rationale) to avoid cross-contamination.
+    const deriveTopic = (rawTopic: string | undefined, _text: string, questionTextOnly?: string): string => {
+      if (rawTopic && !GENERIC_TOPICS.has(rawTopic)) return rawTopic;
+      const fromText = deriveTopicFromText(questionTextOnly || "");
+      if (fromText) return fromText;
       return rawTopic || "Requirement";
     };
 
@@ -242,7 +255,7 @@ export function useJDWorkflow({
           }
         }
 
-        const topic = deriveTopic(q.short_topic, `${q.question_text || ""} ${q.rationale || ""}`);
+        const topic = deriveTopic(q.short_topic, "", q.question_text || "");
 
         items.push({
           key: q.question_key,
