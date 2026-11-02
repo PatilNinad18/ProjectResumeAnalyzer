@@ -25,12 +25,32 @@ export default function ClarificationPanel({
 }: ClarificationPanelProps) {
   return (
     <>
+      {isStep3Done && allClarificationItems.length === 0 && (
+        <div className={`${styles.clarificationPanel} card`} style={{ borderLeft: "4px solid #10b981", padding: "18px 20px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div style={{ background: "#dcfce7", color: "#166534", borderRadius: "50%", width: "36px", height: "36px", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: "1.2rem", flexShrink: 0 }}>
+              ✓
+            </div>
+            <div>
+              <h4 style={{ margin: "0 0 3px 0", fontSize: "1.05rem", color: "#065f46", display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>Step 4: Role Requirements Fully Explicit</span>
+                <span style={{ background: "#dcfce7", color: "#166534", fontSize: "0.75rem", padding: "2px 8px", borderRadius: "12px", fontWeight: 600 }}>
+                  0 Ambiguities Detected
+                </span>
+              </h4>
+              <p style={{ margin: 0, fontSize: "0.85rem", color: "#667085" }}>
+                All role requirements, qualifications, and parameters are clear and unambiguous. Proceed to final specification review and agent creation below.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       {isStep3Done && allClarificationItems.length > 0 && (
                 <div className={`${styles.clarificationPanel} card`} style={{ borderLeft: "4px solid #f59e0b", padding: "20px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "16px", flexWrap: "wrap", gap: "10px" }}>
                     <div>
                       <h3 style={{ margin: "0 0 4px 0", fontSize: "1.15rem", display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span>🔍 Ambiguities & Trade-offs Requiring TA Clarification</span>
+                        <span>Step 4: Resolve Ambiguities & Trade-offs</span>
                         {clarificationsData?.lifecycle_status === "FINALIZED" ? (
                           <span style={{ background: "#dcfce7", color: "#166534", fontSize: "0.75rem", padding: "2px 8px", borderRadius: "12px", fontWeight: 600 }}>
                             ✓ Finalized

@@ -251,7 +251,14 @@ export function useJDWorkflow({
 
   const isStep3Done = (status === "READY" || status === "NEEDS_REVIEW") && markdown !== null;
 
-  const isStep4Done = isStep3Done;
+  // Step 4 is done if initial analysis is done AND (0 ambiguities exist OR all are answered/finalized/v2)
+  const hasUnresolvedQuestions = allClarificationItems.some((i) => !i.isResolved);
+  const isStep4Done = isStep3Done && (
+    allClarificationItems.length === 0 ||
+    clarificationsData?.lifecycle_status === "FINALIZED" ||
+    specVersion > 1 ||
+    !hasUnresolvedQuestions
+  );
 
   const isStep5Done = agents.length > 0;
 
@@ -270,7 +277,7 @@ export function useJDWorkflow({
   );
 
 
-  const currentStep = !isStep1Done ? 1 : !isStep2Done ? 2 : !isStep3Done ? 3 : !isStep5Done ? 4 : 5;
+  const currentStep = !isStep1Done ? 1 : !isStep2Done ? 2 : !isStep3Done ? 3 : !isStep4Done ? 4 : 5;
 
 
   // Step 1 Save Handler

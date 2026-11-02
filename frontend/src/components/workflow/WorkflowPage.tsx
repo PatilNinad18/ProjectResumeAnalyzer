@@ -259,12 +259,11 @@ export default function WorkflowPage({
               {/* Step 2 & 3: Enter / Upload JD & Analyse */}
               <JDInputSection {...sharedProps} batchState={batchState} />
 
-              {/* Step 4: View / Download JD Context */}
-              <SpecificationViewer {...sharedProps} />
-
-                            {/* Ambiguities & Clarifications Requiring TA Input */}
+              {/* Step 4: Resolve Ambiguities & Trade-offs */}
               <ClarificationPanel {...sharedProps} />
-{/* Step 5: Create Agent */}
+
+              {/* Step 5: Final Specification & Launch Agent */}
+              <SpecificationViewer {...sharedProps} />
               <CreateAgentForm {...sharedProps} />
             </div>
   );

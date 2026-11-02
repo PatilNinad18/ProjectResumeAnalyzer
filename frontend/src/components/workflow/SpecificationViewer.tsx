@@ -40,9 +40,9 @@ export default function SpecificationViewer({
                 <div className={`${styles.specificationViewer} card`} ref={step4Ref}>
                   <div className="preview-header">
                     <div>
-                      <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Step 4: Generated JD Context (Specification v{specVersion})</h3>
+                      <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Step 5: Final Specification (v{specVersion})</h3>
                       <span style={{ fontSize: "0.82rem", color: "#667085" }}>
-                        Analysis complete. Crisp Markdown and canonical JSON available below.
+                        {specVersion > 1 ? "Disambiguated specification reflecting confirmed TA clarifications." : "Deterministic baseline specification extracted from job description."}
                       </span>
                     </div>
                     <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
