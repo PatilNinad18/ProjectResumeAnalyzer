@@ -39,6 +39,11 @@ def _migrate_sqlite() -> None:
                     conn.execute(text("ALTER TABLE job_specification_versions ADD COLUMN enrichment_report_json JSON"))
                 if "s3_enriched_markdown_key" not in columns:
                     conn.execute(text("ALTER TABLE job_specification_versions ADD COLUMN s3_enriched_markdown_key VARCHAR"))
+        if "agents" in inspector.get_table_names():
+            agent_cols = {col["name"] for col in inspector.get_columns("agents")}
+            with engine.begin() as conn:
+                if "is_test" not in agent_cols:
+                    conn.execute(text("ALTER TABLE agents ADD COLUMN is_test BOOLEAN DEFAULT 0"))
     except Exception as exc:
         # Ignore or log migration failure (e.g. non-SQLite or already exists)
         pass
@@ -50,3 +55,8 @@ def get_db() -> Session:
         yield db
     finally:
         db.close()
+
+
+# Ensure SQLite tables have latest schema updates even in bare TestClient runs
+_migrate_sqlite()
+

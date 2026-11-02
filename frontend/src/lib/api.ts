@@ -23,6 +23,7 @@ export interface BatchTask {
   title: string;
   filename: string;
   status: BatchTaskStatus;
+  lifecycle_status?: string | null;
   stage: string;
   stage_label: string;
   progress_percent: number;
@@ -638,5 +639,17 @@ export async function deleteAgentApi(
   }>(`/api/agents/${encodeURIComponent(agentId)}?cancel_active=${cancelActive ? "true" : "false"}`, {
     method: "DELETE",
     signal,
+  });
+}
+
+export async function cleanupTestAgentsApi(dryRun: boolean = false): Promise<{
+  dry_run?: boolean;
+  count?: number;
+  deleted_count?: number;
+  deleted_agent_ids?: string[];
+  test_agents: Array<{ id: string; name: string; project_name?: string }>;
+}> {
+  return request(`/api/agents/cleanup-test-agents?dry_run=${dryRun ? "true" : "false"}`, {
+    method: "POST",
   });
 }

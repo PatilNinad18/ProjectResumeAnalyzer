@@ -27,8 +27,10 @@ export function useJDBatch(projectId: string) {
   const [answersByJd, setAnswersByJd] = useState<Record<string, Record<string, string>>>({});
   const [baselineMarkdown, setBaselineMarkdown] = useState<string | null>(null);
   const [enrichedMarkdown, setEnrichedMarkdown] = useState<string | null>(null);
+  const [resolvedMarkdown, setResolvedMarkdown] = useState<string | null>(null);
   const [hasEnrichedMarkdown, setHasEnrichedMarkdown] = useState(false);
-  const [isEnrichedView, setIsEnrichedView] = useState(true);
+  const [hasResolvedMarkdown, setHasResolvedMarkdown] = useState(false);
+  const [specViewMode, setSpecViewMode] = useState<"baseline" | "enriched" | "resolved">("enriched");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
@@ -42,7 +44,21 @@ export function useJDBatch(projectId: string) {
     [batch, selectedTaskId]
   );
   const selectedAnswers = selectedTask ? answersByJd[selectedTask.jd_id] ?? {} : {};
-  const markdown = isEnrichedView ? enrichedMarkdown : baselineMarkdown;
+
+  const markdown = useMemo(() => {
+    if (specViewMode === "resolved" && resolvedMarkdown) return resolvedMarkdown;
+    if (specViewMode === "baseline") return baselineMarkdown || enrichedMarkdown || "";
+    return enrichedMarkdown || baselineMarkdown || resolvedMarkdown || "";
+  }, [specViewMode, resolvedMarkdown, enrichedMarkdown, baselineMarkdown]);
+
+  const isEnrichedView = specViewMode !== "baseline";
+  const setIsEnrichedView = (val: boolean) => {
+    if (val) {
+      setSpecViewMode(hasResolvedMarkdown ? "resolved" : "enriched");
+    } else {
+      setSpecViewMode("baseline");
+    }
+  };
 
   async function submitBatch() {
     if (!files.length || isSubmitting) return;
@@ -52,7 +68,9 @@ export function useJDBatch(projectId: string) {
     setClarifications(null);
     setBaselineMarkdown(null);
     setEnrichedMarkdown(null);
+    setResolvedMarkdown(null);
     setHasEnrichedMarkdown(false);
+    setHasResolvedMarkdown(false);
     setAnswersByJd({});
     setSelectedTaskId(null);
     try {
@@ -99,14 +117,18 @@ export function useJDBatch(projectId: string) {
       setClarifications(null);
       setBaselineMarkdown(null);
       setEnrichedMarkdown(null);
+      setResolvedMarkdown(null);
       setHasEnrichedMarkdown(false);
+      setHasResolvedMarkdown(false);
       return;
     }
     if (selectedTask.status !== "COMPLETED") {
       setClarifications(null);
       setBaselineMarkdown(null);
       setEnrichedMarkdown(null);
+      setResolvedMarkdown(null);
       setHasEnrichedMarkdown(false);
+      setHasResolvedMarkdown(false);
       setIsLoadingTask(false);
       setTaskError(null);
       return;
@@ -119,18 +141,34 @@ export function useJDBatch(projectId: string) {
     setClarifications(null);
     setBaselineMarkdown(null);
     setEnrichedMarkdown(null);
+    setResolvedMarkdown(null);
     setHasEnrichedMarkdown(false);
+    setHasResolvedMarkdown(false);
+
     Promise.all([
       getClarifications(selectedTask.jd_id),
-      getMarkdown(selectedTask.jd_id, false),
-      getMarkdown(selectedTask.jd_id, true),
+      getMarkdown(selectedTask.jd_id, false, 1).catch(() => getMarkdown(selectedTask.jd_id, false)),
+      getMarkdown(selectedTask.jd_id, true, 1).catch(() => getMarkdown(selectedTask.jd_id, true)),
+      getMarkdown(selectedTask.jd_id, undefined).catch(() => null),
     ])
-      .then(([response, baseline, enriched]) => {
+      .then(([response, baseline, enriched, latest]) => {
         if (stopped) return;
         setClarifications(response);
-        setBaselineMarkdown(baseline.markdown);
-        setEnrichedMarkdown(enriched.markdown);
-        setHasEnrichedMarkdown(enriched.is_enriched === true);
+        setBaselineMarkdown(baseline?.markdown ?? null);
+        setEnrichedMarkdown(enriched?.markdown ?? null);
+        setHasEnrichedMarkdown(enriched?.is_enriched === true);
+
+        const isFinal = response.lifecycle_status === "FINALIZED";
+        if (isFinal && latest && latest.specification_version >= 2) {
+          setResolvedMarkdown(latest.markdown);
+          setHasResolvedMarkdown(true);
+          setSpecViewMode("resolved");
+        } else {
+          setResolvedMarkdown(null);
+          setHasResolvedMarkdown(false);
+          setSpecViewMode(enriched?.is_enriched ? "enriched" : "baseline");
+        }
+
         setAnswersByJd((current) => {
           const next = { ...(current[selectedTask.jd_id] ?? {}) };
           for (const question of response.questions) {
@@ -203,7 +241,6 @@ export function useJDBatch(projectId: string) {
 
   async function retryTask(task: BatchTask) {
     if (!batch) return;
-    setError(null);
     try {
       await retryBatchTask(batch.batch_id, task.task_id);
       setBatch(await getJDBatch(batch.batch_id));
@@ -214,7 +251,6 @@ export function useJDBatch(projectId: string) {
 
   async function cancelTask(task: BatchTask) {
     if (!batch) return;
-    setError(null);
     try {
       await cancelBatchTask(batch.batch_id, task.task_id);
       setBatch(await getJDBatch(batch.batch_id));
@@ -236,7 +272,11 @@ export function useJDBatch(projectId: string) {
     markdown,
     baselineMarkdown,
     enrichedMarkdown,
+    resolvedMarkdown,
     hasEnrichedMarkdown,
+    hasResolvedMarkdown,
+    specViewMode,
+    setSpecViewMode,
     isEnrichedView,
     setIsEnrichedView,
     isSubmitting,

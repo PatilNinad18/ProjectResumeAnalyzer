@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   analyzeJD,
+  cleanupTestAgentsApi,
   createAgentApi,
   deleteAgentApi,
   getAgents,
@@ -274,7 +275,34 @@ export function useAgents(options: UseAgentsOptions) {
     }
   }
 
+  const [isCleaningTestAgents, setIsCleaningTestAgents] = useState(false);
+
+  async function handleCleanupTestAgents(dryRun: boolean = false) {
+    setIsCleaningTestAgents(true);
+    try {
+      const result = await cleanupTestAgentsApi(dryRun);
+      if (!dryRun && result.deleted_agent_ids && result.deleted_agent_ids.length > 0) {
+        const deletedSet = new Set(result.deleted_agent_ids);
+        setAgents((previous) => previous.filter((agent) => !deletedSet.has(agent.id)));
+        setChatHistories((previous) => {
+          const next = { ...previous };
+          for (const id of result.deleted_agent_ids!) {
+            delete next[id];
+          }
+          return next;
+        });
+        setDeleteSuccessMsg(`Safely cleaned up ${result.deleted_count ?? result.deleted_agent_ids.length} test agent(s).`);
+        setTimeout(() => setDeleteSuccessMsg(null), 6000);
+      }
+      return result;
+    } finally {
+      setIsCleaningTestAgents(false);
+    }
+  }
+
   return {
+    handleCleanupTestAgents,
+    isCleaningTestAgents,
     agentToDelete,
     setAgentToDelete,
     isDeletingAgent,

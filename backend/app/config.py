@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # OLLAMA_MAX_CONCURRENCY=0 selects a GPU-memory-aware value at startup.
     # Set a positive value to explicitly override the detected limit.
     ollama_max_concurrency: int = int(os.environ.get("OLLAMA_MAX_CONCURRENCY", "0"))
-    jd_processing_concurrency: int = int(os.environ.get("JD_PROCESSING_CONCURRENCY", "4"))
+    jd_processing_concurrency: int = int(os.environ.get("JD_PROCESSING_CONCURRENCY", "1"))
     ollama_slot_timeout_seconds: float = float(os.environ.get("OLLAMA_SLOT_TIMEOUT_SECONDS", "120"))
 
     # LLM API keys (only needed if using cloud providers like gemini/anthropic)

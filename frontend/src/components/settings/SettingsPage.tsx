@@ -23,6 +23,14 @@ export interface SettingsPageProps {
   setEditJdText: React.Dispatch<React.SetStateAction<string>>;
   handleRegenerateAgentContext: () => Promise<void>;
   isRegenerating: boolean;
+  handleCleanupTestAgents?: (dryRun?: boolean) => Promise<{
+    dry_run?: boolean;
+    count?: number;
+    deleted_count?: number;
+    deleted_agent_ids?: string[];
+    test_agents: Array<{ id: string; name: string; project_name?: string }>;
+  }>;
+  isCleaningTestAgents?: boolean;
 }
 
 export default function SettingsPage({
@@ -44,6 +52,8 @@ export default function SettingsPage({
     setEditJdText,
     handleRegenerateAgentContext,
     isRegenerating,
+    handleCleanupTestAgents,
+    isCleaningTestAgents,
 }: SettingsPageProps) {
   const agentListProps = {
     agents,
@@ -53,6 +63,8 @@ export default function SettingsPage({
     setActiveTab,
     setDeleteError,
     setAgentToDelete,
+    handleCleanupTestAgents,
+    isCleaningTestAgents,
   };
   const agentEditorProps = {
     regenSuccessMsg,
@@ -72,32 +84,32 @@ export default function SettingsPage({
   };
   return (
     <div className={styles.settingsPage}>
-              <h2 style={{ marginTop: 0, marginBottom: "20px" }}>Agent Management & Context Regeneration</h2>
+      <h2 style={{ marginTop: 0, marginBottom: "20px" }}>Agent Management & Context Regeneration</h2>
 
-              {deleteSuccessMsg && (
-                <div className="alert-success" style={{ marginBottom: "20px" }}>
-                  ✓ {deleteSuccessMsg}
-                </div>
-              )}
+      {deleteSuccessMsg && (
+        <div className="alert-success" style={{ marginBottom: "20px" }}>
+          ✓ {deleteSuccessMsg}
+        </div>
+      )}
 
-              {agents.length === 0 ? (
-                <div className="card" style={{ textAlign: "center", padding: "40px" }}>
-                  <p style={{ color: "#667085", fontSize: "1rem", margin: "0 0 16px 0" }}>
-                    No agents created yet. Complete the <strong>Linear Setup Workflow</strong> to create your first JD agent.
-                  </p>
-                  <button className="btn-primary" onClick={() => setActiveTab("workflow")}>
-                    Go to Workflow Setup →
-                  </button>
-                </div>
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: "24px" }}>
-                  {/* Left Column: Created Agents List */}
-                  <AgentList {...agentListProps} />
+      {agents.length === 0 ? (
+        <div className="card" style={{ textAlign: "center", padding: "40px" }}>
+          <p style={{ color: "#667085", fontSize: "1rem", margin: "0 0 16px 0" }}>
+            No agents created yet. Complete the <strong>Linear Setup Workflow</strong> to create your first JD agent.
+          </p>
+          <button className="btn-primary" onClick={() => setActiveTab("workflow")}>
+            Go to Workflow Setup →
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: "24px" }}>
+          {/* Left Column: Created Agents List */}
+          <AgentList {...agentListProps} />
 
-                  {/* Right Column: Settings & Context Regeneration Form */}
-                  {selectedSettingAgentId && <AgentEditor {...agentEditorProps} />}
-                </div>
-              )}
-            </div>
+          {/* Right Column: Settings & Context Regeneration Form */}
+          {selectedSettingAgentId && <AgentEditor {...agentEditorProps} />}
+        </div>
+      )}
+    </div>
   );
 }

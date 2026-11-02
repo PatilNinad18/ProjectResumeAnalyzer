@@ -273,3 +273,65 @@ def test_create_agent_invalid_jd_returns_404(client: TestClient):
     )
     assert res.status_code == 404
     assert "not found" in res.json()["detail"].lower()
+
+def test_cleanup_test_agents_metadata_based(client: TestClient):
+    """Safely cleans test agents via explicit metadata; never deletes real agents like 'Security Agent'."""
+    jd_id = _create_test_jd(client, title="Security Lead")
+
+    # 1. Real production agent with display name "Security Agent"
+    real_res = client.post(
+        "/api/agents",
+        json={
+            "name": "Security Agent",
+            "title": "Security Lead",
+            "project_name": "prod-infra",
+            "jdId": jd_id,
+            "is_test": False,
+        },
+    )
+    assert real_res.status_code == 200
+    real_id = real_res.json()["id"]
+
+    # 2. Test agent created with explicit test project_name
+    test_res = client.post(
+        "/api/agents",
+        json={
+            "name": "Automated Test Runner Agent",
+            "title": "Test Lead",
+            "project_name": "test-harness",
+            "jdId": jd_id,
+            "is_test": True,
+        },
+    )
+    assert test_res.status_code == 200
+    test_id = test_res.json()["id"]
+
+    try:
+        # Dry run: check candidate list
+        dry_res = client.post("/api/agents/cleanup-test-agents", params={"dry_run": True})
+        assert dry_res.status_code == 200
+        dry_data = dry_res.json()
+        assert dry_data["dry_run"] is True
+        matched_ids = [a["id"] for a in dry_data["test_agents"]]
+        assert test_id in matched_ids
+        assert real_id not in matched_ids, "Real agent must never be selected by name match!"
+
+        # Actual cleanup
+        clean_res = client.post("/api/agents/cleanup-test-agents", params={"dry_run": False})
+        assert clean_res.status_code == 200
+        clean_data = clean_res.json()
+        assert test_id in clean_data["deleted_agent_ids"]
+        assert real_id not in clean_data["deleted_agent_ids"]
+
+        # Confirm real agent is still active
+        get_real = client.get(f"/api/agents/{real_id}")
+        assert get_real.status_code == 200
+        assert get_real.json()["name"] == "Security Agent"
+
+        # Confirm test agent is deleted
+        get_test = client.get(f"/api/agents/{test_id}")
+        assert get_test.status_code == 404
+    finally:
+        # Clean up real agent
+        client.delete(f"/api/agents/{real_id}?cancel_active=true")
+

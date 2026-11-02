@@ -685,6 +685,7 @@ _CHAT_RULES = (
     "- You NEVER expose internal labels like 'MUST_HAVE', 'PREFERRED', 'INFORMATIONAL', 'CONTEXTUAL', "
     "or 'ta_confirmation_required' in your answers. Translate them to plain English: "
     "'mandatory', 'nice to have', 'role context', etc.\n"
+    "- You seamlessly synthesize TA-confirmed decisions and ambiguity resolutions into natural answers. Never quote raw question IDs/keys or internal schema metadata.\n"
     "- You write in clear, well-structured prose with natural conversational flow — not bare fragments.\n\n"
     "AUTHORITATIVE CONTEXT & STRICT FACTUAL GROUNDING:\n"
     "1. <job_specification_markdown> is your PRIMARY source (it reflects TA-confirmed clarifications). "

@@ -75,6 +75,8 @@ export default function Home() {
     setEditCompany, editTitle, setEditTitle, editJdText, setEditJdText, isRegenerating,
     regenStatus, regenSuccessMsg, isCreatingAgent, createAgentError, handleCreateAgent, handleDeleteAgent,
     handleRegenerateAgentContext,
+    handleCleanupTestAgents,
+    isCleaningTestAgents,
   } = agentManagement;
 
   async function handleLaunchBatchAgent(agentName: string, task: BatchTask, agentMarkdown: string) {
@@ -218,6 +220,8 @@ export default function Home() {
     setEditJdText,
     handleRegenerateAgentContext,
     isRegenerating,
+    handleCleanupTestAgents,
+    isCleaningTestAgents,
   };
 
   const deleteDialogProps = {

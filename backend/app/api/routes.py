@@ -324,6 +324,7 @@ def _batch_task_payload(task: JobDescriptionBatchTask) -> Dict[str, Any]:
         "title": jd.title if jd else task.source_filename,
         "filename": task.source_filename,
         "status": task.status,
+        "lifecycle_status": jd.lifecycle_status.value if (jd and getattr(jd, "lifecycle_status", None)) else None,
         "stage": task.stage,
         "stage_label": task.stage_label,
         "progress_percent": task.progress_percent,
@@ -1713,6 +1714,7 @@ class AgentCreateRequest(BaseModel):
     job_description_id: Optional[str] = None
     jdId: Optional[str] = None
     status: Optional[str] = "ACTIVE"
+    is_test: Optional[bool] = False
 
 
 class AgentUpdateRequest(BaseModel):
@@ -1792,6 +1794,7 @@ def _serialize_agent(agent: Agent, db: Session) -> Dict[str, Any]:
         "updatedAt": updated_str,
         "created_at": created_str,
         "updated_at": updated_str,
+        "is_test": bool(getattr(agent, "is_test", False)),
     }
 
 
@@ -1846,6 +1849,11 @@ def create_agent(request: AgentCreateRequest, db: Session = Depends(get_db)):
         agent = existing
         action = "updated"
     else:
+        is_test_flag = bool(
+            request.is_test
+            or (project_name and str(project_name).lower().startswith("test-"))
+            or (agent_name.lower().startswith("[test]") or agent_name.lower().startswith("test:"))
+        )
         agent = Agent(
             id=agent_id,
             name=agent_name,
@@ -1855,6 +1863,7 @@ def create_agent(request: AgentCreateRequest, db: Session = Depends(get_db)):
             project_name=project_name,
             job_description_id=jd_id,
             status=request.status or "ACTIVE",
+            is_test=is_test_flag,
         )
         db.add(agent)
         action = "created"
@@ -2001,3 +2010,35 @@ def delete_agent(
         "job_description_id": jd_id,
         "cancelled_active_operations": is_active,
     }
+
+
+@router.post("/agents/cleanup-test-agents", summary="Safe cleanup of test agents based on explicit metadata")
+def cleanup_test_agents(dry_run: bool = False, db: Session = Depends(get_db)):
+    """
+    Safely find and clean up test agents identified strictly by explicit metadata
+    (is_test=True or project_name='test-*'). Never deletes agents solely by display name.
+    """
+    test_agents = db.query(Agent).filter(
+        (Agent.is_test == True) | (Agent.project_name.like("test-%"))
+    ).all()
+
+    summaries = [
+        {
+            "id": a.id,
+            "name": a.name,
+            "title": a.title,
+            "project_name": a.project_name,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        }
+        for a in test_agents
+    ]
+    if dry_run:
+        return {"dry_run": True, "count": len(test_agents), "test_agents": summaries}
+
+    deleted_ids = []
+    for a in test_agents:
+        deleted_ids.append(a.id)
+        db.delete(a)
+    db.commit()
+    return {"deleted_count": len(deleted_ids), "deleted_agent_ids": deleted_ids, "test_agents": summaries}
+
