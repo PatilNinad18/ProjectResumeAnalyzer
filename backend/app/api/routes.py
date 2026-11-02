@@ -61,7 +61,7 @@ router = APIRouter(prefix="/api", tags=["jds"])
 storage = get_storage()
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
-TERMINAL_STATUSES = {"READY", "NEEDS_REVIEW", "FAILED"}
+TERMINAL_STATUSES = {"READY", "NEEDS_REVIEW", "FAILED", "CANCELLED"}
 
 # ---------------------------------------------------------------------------
 # Background processing state
@@ -88,11 +88,21 @@ def _any_llm_job_running() -> bool:
 def _run_processing(jd_id: str, jd_version_id: str) -> None:
     """Runs in a worker thread, with its own DB session."""
     from app.db import SessionLocal
-    from app.workers.worker import process_job_description_version
+    from app.workers.worker import process_job_description_version, JobProcessingCancelled
+    from app.core.progress import progress_registry
 
     db = SessionLocal()
     try:
-        process_job_description_version(db, jd_version_id)
+        process_job_description_version(
+            db,
+            jd_version_id,
+            on_stage=lambda st, lbl, pct: progress_registry.update_progress(jd_id, "analysis", st, lbl, pct),
+            is_cancelled=lambda: progress_registry.is_cancelled(jd_id, "analysis"),
+        )
+    except JobProcessingCancelled:
+        logger.info("Background analysis cancelled for jd_id=%s", jd_id)
+        with _state_lock:
+            _errors[jd_id] = "Cancelled by user."
     except Exception as exc:  # noqa: BLE001
         logger.exception("Background analysis failed for jd_id=%s", jd_id)
         with _state_lock:
@@ -214,7 +224,7 @@ def list_jds(project_id: Optional[str] = None, db: Session = Depends(get_db)):
             db.query(JobSpecificationVersion)
             .join(JobDescriptionVersion)
             .filter(JobDescriptionVersion.job_description_id == jd.id)
-            .order_by(JobSpecificationVersion.created_at.desc())
+            .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
             .first()
         )
         latest_job = (
@@ -616,6 +626,7 @@ def _get_analysis_progress(status: str) -> tuple[int, str]:
         "READY": (100, "Analysis complete"),
         "NEEDS_REVIEW": (100, "Analysis complete (ready for review)"),
         "FAILED": (0, "Analysis failed"),
+        "CANCELLED": (0, "Analysis cancelled"),
     }
     return stages.get(status, (20, f"Processing ({status})"))
 
@@ -1453,7 +1464,7 @@ def _get_spec_version_row(jd_id: str, db: Session) -> JobSpecificationVersion:
         .join(JobDescriptionVersion, JobSpecificationVersion.job_description_version_id == JobDescriptionVersion.id)
         .join(JobDescription, JobDescriptionVersion.job_description_id == JobDescription.id)
         .filter(JobDescription.id == jd_id)
-        .order_by(JobSpecificationVersion.created_at.desc())
+        .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
         .first()
     )
     if spec_version:

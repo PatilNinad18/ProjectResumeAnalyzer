@@ -48,8 +48,12 @@ class ParameterExtractor:
         
         # Job title patterns
         self.title_patterns = [
-            re.compile(r'(?:job\s+title|position|role)\s*:?\s*([^\n.,]+)', re.IGNORECASE),
-            re.compile(r'^([A-Z][A-Za-z\s&/]+(?:Engineer|Developer|Manager|Analyst|Designer|Architect))\s*$', re.MULTILINE),
+            # 1. Structured header: Job Title: <Title> or Position: <Title> (colon or dash required)
+            re.compile(r'(?:job\s+title|position)\s*[:\-]\s*([A-Za-z0-9\s/&#\-\+]+?)(?:\r?\n|$)', re.IGNORECASE),
+            # 2. Opening role declaration: e.g. We are seeking an Account Executive with...
+            re.compile(r'(?i)\b(?:we\s+(?:are\s+)?(?:seeking|looking\s+for|hiring)|(?:seeking|looking\s+for|hiring))\s+(?:an?|our)\s+([A-Z][A-Za-z0-9\s/&#\-\+]+?)(?:\s+(?:with|to|who|in|for|responsible|will|\.|\,)|$)', re.IGNORECASE),
+            # 3. Standalone title line with standard job family suffix
+            re.compile(r'^([A-Z][A-Za-z\s&/]+(?:Engineer|Developer|Manager|Analyst|Designer|Architect|Executive|Lead))\s*$', re.MULTILINE),
         ]
         
         # Experience patterns - minimum
@@ -153,8 +157,8 @@ class ParameterExtractor:
             if match:
                 title = match.group(1).strip()
                 
-                # Validate title (not too short, not all caps)
-                if len(title) > 3 and not title.isupper():
+                # Validate title (not too short, not all caps, and not preposition/stop words)
+                if 3 <= len(title) <= 60 and not title.isupper() and not re.match(r'(?i)^(is|based|for|in|located|role|position|candidate|job)\b', title):
                     parameters.append(ExtractedParameter(
                         parameter_name="job_title",
                         value=title,

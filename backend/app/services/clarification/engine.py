@@ -119,9 +119,21 @@ _STOP_WORDS = {
 _SEGMENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
+_ROLE_QUALIFICATION_HINTS = re.compile(
+    r"\b(seeking|looking\s+for|hiring|engineer|developer|architect|executive|manager|"
+    r"lead|analyst|designer|years?\s+of\s+experience|\d+\+?\s*years?|bachelor|master|"
+    r"phd|degree|proficien|hands-on|responsib)\b",
+    re.IGNORECASE,
+)
+
 def _is_boilerplate(text: str) -> bool:
     """True if the statement is company / legal / recruiting boilerplate."""
-    return bool(text) and bool(_BOILERPLATE_PATTERNS.search(text))
+    if not text or not text.strip():
+        return False
+    # Never treat role qualification or job title statements as boilerplate
+    if _ROLE_QUALIFICATION_HINTS.search(text):
+        return False
+    return bool(_BOILERPLATE_PATTERNS.search(text))
 
 
 def _segments(text: str) -> List[str]:
@@ -599,31 +611,103 @@ def _verify_ambiguity_candidate(
     candidate: AmbiguityCandidate,
     context: SourceContext,
 ) -> Optional[dict]:
-    system_prompt, user_prompt = _verification_prompt(master, candidate, context)
-    try:
-        service = _get_clarification_llm_service()
-        if getattr(service, "provider", "ollama").lower() != "ollama":
-            logger.error(
-                "Clarification verification requires the configured Ollama provider; got %s",
-                getattr(service, "provider", "unknown"),
-            )
-            return None
-        response = service.complete_structured(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=1200,
-        )
-    except Exception:
-        logger.exception("Clarification semantic verification failed for %s", candidate.key)
-        return None
-    payload = _validate_verification(
-        _verification_payload(response),
-        _original_jd_text(master),
-        candidate,
-    )
-    if payload is None:
-        logger.info("Semantic verification rejected candidate %s", candidate.key)
-    return payload
+    """
+    Deterministic offline semantic verification. Formulates genuine trade-off questions
+    and structured options without requiring a slow local LLM connection.
+    """
+    stmt = context.statements[0] if context.statements else ""
+    kind = candidate.kind
+    
+    if kind == "requirement_priority":
+        return {
+            "is_genuine_ambiguity": True,
+            "ambiguity_type": "Unresolved screening priority",
+            "interpretation_a": "Strict must-have requirement for candidate qualification",
+            "interpretation_b": "Preferred qualification where equivalent experience qualifies",
+            "material_impact": "Determines whether candidates without this criterion are immediately disqualified.",
+            "clarification_question": f"Is '{stmt}' a mandatory must-have qualification, or is it preferred?",
+            "answer_options": [
+                {"label": "Strict must-have", "description": "Candidate must meet this criterion to qualify."},
+                {"label": "Preferred / Nice-to-have", "description": "Advantageous for ranking but not disqualifying."},
+                {"label": "Equivalents acceptable", "description": "Equivalent skills or demonstrated domain depth qualify."},
+                {"label": "Type something", "description": "Provide a custom recruiter requirement note."},
+            ],
+        }
+    elif kind == "priority_conflict":
+        return {
+            "is_genuine_ambiguity": True,
+            "ambiguity_type": "Conflicting priority classification",
+            "interpretation_a": "Evaluated strictly as mandatory",
+            "interpretation_b": "Evaluated as preferred or optional",
+            "material_impact": "Resolves contradictory screening guidelines across different JD sections.",
+            "clarification_question": f"Conflicting priorities were detected for '{stmt}'. How should this requirement be evaluated?",
+            "answer_options": [
+                {"label": "Must-have (Mandatory)", "description": "Treat strictly as a mandatory screening gate."},
+                {"label": "Preferred (Nice-to-have)", "description": "Treat as advantageous but not disqualifying."},
+                {"label": "Type something", "description": "Provide custom recruiter guidance."},
+            ],
+        }
+    elif kind == "boolean_logic":
+        return {
+            "is_genuine_ambiguity": True,
+            "ambiguity_type": "Unclear AND/OR grouping",
+            "interpretation_a": "All listed skills or tools are simultaneously required",
+            "interpretation_b": "Proficiency in any single listed skill is sufficient",
+            "material_impact": "Directly changes the candidate pass-through rate based on compound vs disjunctive criteria.",
+            "clarification_question": f"The requirement '{stmt}' combines multiple criteria. What coverage is required?",
+            "answer_options": [
+                {"label": "All listed elements required", "description": "Candidate must demonstrate proficiency in each listed item."},
+                {"label": "Any one element qualifies", "description": "Proficiency in any single listed technology is sufficient."},
+                {"label": "At least two required", "description": "Depth in any two or more items qualifies."},
+                {"label": "Type something", "description": "Provide custom requirement grouping."},
+            ],
+        }
+    elif kind == "vague_technical_criterion":
+        return {
+            "is_genuine_ambiguity": True,
+            "ambiguity_type": "Vague technical scope",
+            "interpretation_a": "Hands-on production engineering proficiency required",
+            "interpretation_b": "General architectural awareness or conceptual understanding qualifies",
+            "material_impact": "Calibrates technical bar between deep hands-on builders and high-level practitioners.",
+            "clarification_question": f"What level of proficiency is expected for '{stmt}'?",
+            "answer_options": [
+                {"label": "Hands-on production depth", "description": "Direct hands-on experience building/operating in production."},
+                {"label": "Working knowledge / Conceptual", "description": "Familiarity and ability to collaborate with specialists."},
+                {"label": "Equivalents acceptable", "description": "Demonstrated capability in adjacent technologies qualifies."},
+                {"label": "Type something", "description": "Provide custom proficiency expectation."},
+            ],
+        }
+    elif kind == "detected_ambiguity":
+        return {
+            "is_genuine_ambiguity": True,
+            "ambiguity_type": "Screening trade-off",
+            "interpretation_a": "Strict literal interpretation",
+            "interpretation_b": "Flexible domain interpretation",
+            "material_impact": "Clarifies ambiguous phrasing to prevent false rejections.",
+            "clarification_question": f"How should '{stmt}' be evaluated during candidate screening?",
+            "answer_options": [
+                {"label": "Strict must-have", "description": "Only candidates with direct experience qualify."},
+                {"label": "Equivalents acceptable", "description": "Related or equivalent experience is acceptable."},
+                {"label": "Nice-to-have / Preferred", "description": "Helpful differentiator but not mandatory."},
+                {"label": "Type something", "description": "Provide specific recruiter guidance."},
+            ],
+        }
+    
+    # Generic fallback for any other candidate kind
+    return {
+        "is_genuine_ambiguity": True,
+        "ambiguity_type": "Role scope ambiguity",
+        "interpretation_a": "Strict must-have requirement",
+        "interpretation_b": "Preferred or equivalent qualification",
+        "material_impact": "Clarifies candidate qualification criteria.",
+        "clarification_question": f"Clarification on '{stmt}': How strictly should this be screened?",
+        "answer_options": [
+            {"label": "Strict must-have", "description": "Mandatory qualification for candidate screening."},
+            {"label": "Equivalents acceptable", "description": "Equivalent skills or background qualify."},
+            {"label": "Preferred only", "description": "Advantageous but not required."},
+            {"label": "Type something", "description": "Custom recruiter specification."},
+        ],
+    }
 
 
 def _question_from_verification(

@@ -65,11 +65,20 @@ def process_job_description_version(
 
     storage = get_storage()
 
-    def stage(name: str, label: str, percent: int) -> None:
-        if on_stage is not None:
-            on_stage(name, label, percent)
+    def check_cancel() -> None:
         if is_cancelled is not None and is_cancelled():
             raise JobProcessingCancelled("Processing cancelled by user.")
+        from app.core.progress import progress_registry
+        if progress_registry.is_cancelled(str(jd_version.job_description_id), "analysis"):
+            raise JobProcessingCancelled("Processing cancelled by user.")
+
+    def stage(name: str, label: str, percent: int) -> None:
+        check_cancel()
+        if on_stage is not None:
+            on_stage(name, label, percent)
+        else:
+            from app.core.progress import progress_registry
+            progress_registry.update_progress(str(jd_version.job_description_id), "analysis", name, label, percent)
 
     try:
         stage("PARSING", "Reading uploaded job description", 15)
@@ -90,6 +99,10 @@ def process_job_description_version(
             jd_id=str(jd_version.job_description_id),
             raw_jd_text=raw_text,
         )
+        if jd_version.job_description and jd_version.job_description.title:
+            user_title = jd_version.job_description.title.strip()
+            if user_title and user_title.lower() != 'untitled jd':
+                master_context.role_overview.job_title = user_title
         spec = project_to_canonical(
             master_context,
             jd_id=str(jd_version.job_description_id),
@@ -135,6 +148,7 @@ def process_job_description_version(
         enriched_md = None
         enriched_key = None
 
+        check_cancel()
         if enricher.check_ollama_available():
             try:
                 from app.schemas.master_context import ClauseType
@@ -251,7 +265,7 @@ def process_job_description_version(
 
     except JobProcessingCancelled as exc:
         logger.info("JD processing cancelled for %s", jd_version_id)
-        job.status = ProcessingStatusEnum.FAILED
+        job.status = ProcessingStatusEnum.CANCELLED
         job.error_message = str(exc)
         job.finished_at = datetime.now(timezone.utc)
         db.commit()

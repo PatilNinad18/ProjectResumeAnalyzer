@@ -192,7 +192,7 @@ class JDBatchQueue:
                     JobSpecificationVersion.job_description_version_id
                     == task.job_description_version_id
                 )
-                .order_by(JobSpecificationVersion.created_at.desc())
+                .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
                 .first()
             )
             if specification is None:
@@ -265,8 +265,22 @@ class JDBatchQueue:
 
             self._finish_from_worker(task_id, batch_id, jd_id, version_id)
         except Exception as exc:
-            logger.exception("JD batch task %s failed", task_id)
-            self._mark_failed(task_id, str(exc) or exc.__class__.__name__)
+            from app.workers.worker import JobProcessingCancelled
+            if isinstance(exc, JobProcessingCancelled) or self._is_cancelled(task_id):
+                logger.info("JD batch task %s cancelled cooperatively at safe checkpoint", task_id)
+                with SessionLocal() as db:
+                    task = db.get(JobDescriptionBatchTask, task_id)
+                    if task:
+                        task.status = "CANCELLED"
+                        task.stage = "CANCELLED"
+                        task.stage_label = "Cancelled by user"
+                        task.error_message = "Cancelled by user."
+                        task.finished_at = _now()
+                        self._refresh_batch_status(db, task.batch_id)
+                        db.commit()
+            else:
+                logger.exception("JD batch task %s failed", task_id)
+                self._mark_failed(task_id, str(exc) or exc.__class__.__name__)
         finally:
             with self._lock:
                 self._submitted.discard(task_id)
@@ -320,7 +334,7 @@ class JDBatchQueue:
             specification = (
                 db.query(JobSpecificationVersion)
                 .filter(JobSpecificationVersion.job_description_version_id == version_id)
-                .order_by(JobSpecificationVersion.created_at.desc())
+                .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
                 .first()
             )
             if specification is None:

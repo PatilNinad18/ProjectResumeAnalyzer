@@ -56,6 +56,7 @@ class ProcessingStatusEnum(str, enum.Enum):
     GENERATING = "GENERATING"
     READY = "READY"
     NEEDS_REVIEW = "NEEDS_REVIEW"
+    CANCELLED = "CANCELLED"
     FAILED = "FAILED"
 
 
