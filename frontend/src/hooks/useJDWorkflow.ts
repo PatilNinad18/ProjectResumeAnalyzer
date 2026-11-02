@@ -206,6 +206,22 @@ export function useJDWorkflow({
       currentValue: string;
     }> = [];
 
+    const deriveTopic = (rawTopic: string | undefined, text: string): string => {
+      const low = (text || "").toLowerCase();
+      if (low.includes("chiplet")) return "Chiplet exp";
+      if (low.includes("hands-on") || low.includes("tlm") || low.includes("systemc")) return "Hands-on %";
+      if (low.includes("customer") || low.includes("client")) return "Customer";
+      if (low.includes("location") || low.includes("hybrid") || low.includes("bangalore") || low.includes("hyderabad")) return "Location";
+      if (low.includes("salary") || low.includes("compensation")) return "Salary";
+      if (low.includes("team") || low.includes("direct report")) return "Team size";
+      if (low.includes("year") || low.includes("experience")) return "Experience";
+      if (low.includes("protocol") || low.includes("pcie") || low.includes("cxl") || low.includes("ucie")) return "Protocols";
+      if (rawTopic && !rawTopic.toLowerCase().includes("conflicting") && !rawTopic.toLowerCase().includes("clarification") && !rawTopic.toLowerCase().includes("technical requirement")) {
+        return rawTopic;
+      }
+      return rawTopic || "Requirement";
+    };
+
     if (clarificationsData?.questions && clarificationsData.questions.length > 0) {
       for (const q of clarificationsData.questions) {
         const currentVal = clarificationAnswers[q.question_key] !== undefined
@@ -226,9 +242,11 @@ export function useJDWorkflow({
           }
         }
 
+        const topic = deriveTopic(q.short_topic, `${q.question_text || ""} ${q.rationale || ""}`);
+
         items.push({
           key: q.question_key,
-          topic: q.short_topic || q.category.replace(/_/g, " "),
+          topic: topic,
           questionText: q.question_text,
           rationale: q.rationale,
           category: q.category,
@@ -238,6 +256,111 @@ export function useJDWorkflow({
           currentValue: currentVal,
         });
       }
+    }
+
+    // 2. Synthesize questions for missing_information (e.g. team_size, salary_range) if not already present
+    if (clarificationsData?.missing_information && clarificationsData.missing_information.length > 0) {
+      for (const mi of clarificationsData.missing_information) {
+        const fieldName = (mi.field || mi.parameter_name || "").toString().trim();
+        if (!fieldName) continue;
+        const lowField = fieldName.toLowerCase();
+
+        let key = `missing_${lowField.replace(/[^a-z0-9]+/g, "_")}`;
+        let topic = fieldName;
+        let questionText = `What is the expectation for ${fieldName}?`;
+        let structured: Array<{ label: string; description: string }> = [];
+
+        if (lowField.includes("salary") || lowField.includes("compensation")) {
+          key = "compensation_salary_range";
+          topic = "Salary";
+          questionText = "Is a salary range or compensation band available for this role?";
+          structured = [
+            { label: "Competitive / Market standard", description: "Calibrated to prevailing competitive market compensation benchmarks." },
+            { label: "Yes, I can provide it", description: "Provide a specific compensation band or hourly rate." },
+            { label: "Not disclosed", description: "Confidential or discussed during interview rounds." },
+          ];
+        } else if (lowField.includes("team") || lowField.includes("size")) {
+          key = "org_metadata_team_size";
+          topic = "Team size";
+          questionText = "What is the expected team size or reporting structure for this role?";
+          structured = [
+            { label: "1–5 people", description: "Small, tight-knit founding engineering team or pod." },
+            { label: "6–15 people", description: "Mid-sized dedicated product engineering team." },
+            { label: "16–50 people", description: "Broad engineering organization." },
+            { label: "50+ people", description: "Large enterprise engineering division." },
+            { label: "Not specified / Flexible", description: "Keep team size flexible for screening." },
+          ];
+        } else if (lowField.includes("location") || lowField.includes("hybrid") || lowField.includes("remote")) {
+          key = "location_hybrid_arrangement";
+          topic = "Location";
+          questionText = `Location is listed as '${fieldName}'. What does the hybrid arrangement look like?`;
+          structured = [
+            { label: "Hybrid (2–3 days in office)", description: "Regular weekly in-office collaboration." },
+            { label: "On-site full-time", description: "100% on-site required." },
+            { label: "Flexible / mostly remote", description: "Remote work permitted with office visits as needed." },
+          ];
+        } else {
+          structured = [
+            { label: "Disclosing now", description: `Provide clarification for ${fieldName}.` },
+            { label: "Not required / Unspecified", description: "Do not evaluate or disqualify on this criterion." },
+          ];
+        }
+
+        if (items.some((item) => item.key === key || item.topic.toLowerCase() === topic.toLowerCase())) {
+          continue;
+        }
+
+        const currentVal = clarificationAnswers[key] !== undefined
+          ? clarificationAnswers[key]
+          : "";
+
+        items.push({
+          key: key,
+          topic: topic,
+          questionText: questionText,
+          rationale: mi.why_it_matters || mi.reason || (mi.suggested_action ? `Action: ${mi.suggested_action}` : undefined),
+          category: "ORG_METADATA",
+          priority: "RECOMMENDED",
+          structuredOptions: structured,
+          isResolved: Boolean(currentVal && currentVal.trim()),
+          currentValue: currentVal,
+        });
+      }
+    }
+
+    // 3. Synthesize questions for raw ambiguities if not already present
+    if (clarificationsData?.ambiguities && clarificationsData.ambiguities.length > 0) {
+      clarificationsData.ambiguities.forEach((amb, idx) => {
+        const stmt = (amb.statement || "").trim();
+        if (!stmt) return;
+        const ambKey = `amb_${idx}`;
+        const why = amb.why_ambiguous || "";
+
+        if (items.some((it) => it.key === ambKey || it.questionText.includes(stmt.slice(0, 30)))) {
+          return;
+        }
+
+        const topic = deriveTopic(undefined, `${stmt} ${why}`);
+        const currentVal = clarificationAnswers[ambKey] !== undefined
+          ? clarificationAnswers[ambKey]
+          : "";
+
+        items.push({
+          key: ambKey,
+          topic: topic,
+          questionText: `How should '${stmt}' be evaluated during candidate screening?`,
+          rationale: why ? `Issue: ${why}` : undefined,
+          category: "TECHNICAL_SCOPE",
+          priority: "RECOMMENDED",
+          structuredOptions: [
+            { label: "Strict must-have", description: "Mandatory qualification for candidate screening." },
+            { label: "Equivalents acceptable", description: "Demonstrated domain capability or adjacent skills qualify." },
+            { label: "Preferred only", description: "Advantageous but not disqualifying." },
+          ],
+          isResolved: Boolean(currentVal && currentVal.trim()),
+          currentValue: currentVal,
+        });
+      });
     }
 
     return items;

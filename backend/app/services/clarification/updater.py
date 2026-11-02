@@ -635,45 +635,25 @@ def _apply_field_patch(
 
 
     # --- job_context fields ---
-
-    if field_target == "job_context.team_size":
-
+    if field_target in ("job_context.team_size", "team_size") or question_key in ("org_metadata_team_size", "missing_team_size", "team_size"):
         if status == QuestionStatus.EXPLICITLY_UNSPECIFIED or (
-
             answer_text and answer_text.lower() in ("not specified", "explicitly unspecified")
-
         ):
-
             master.job_context.team_size_explicitly_unspecified = True
-
         elif answer_text:
-
             master.job_context.team_size = answer_text
-
         return
 
-
-
-    if field_target == "job_context.salary_range":
-
+    if field_target in ("job_context.salary_range", "salary_range") or question_key in ("compensation_salary_range", "missing_salary_range", "salary_range"):
         ans_clean = (answer_text or "").strip()
-
         ans_lower = ans_clean.lower()
-
         if status == QuestionStatus.EXPLICITLY_UNSPECIFIED or any(
-
             p in ans_lower for p in ["not disclosed", "competitive", "market rate", "market range", "unspecified", "not specified"]
-
         ):
-
             master.job_context.salary_explicitly_unspecified = True
-
             master.job_context.salary_range = ans_clean if ans_clean else "Competitive / market rate"
-
         elif ans_clean:
-
             master.job_context.salary_range = ans_clean
-
         return
 
 

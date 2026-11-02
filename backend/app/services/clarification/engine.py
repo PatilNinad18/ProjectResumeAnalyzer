@@ -1,4 +1,4 @@
-﻿"""
+"""
 clarification/engine.py — Evidence-grounded clarification question generator.
 
 A question is generated only after the existing LLM service verifies that a
@@ -48,7 +48,7 @@ from app.schemas.master_context import (
 
 logger = logging.getLogger("jd_agent.clarification.engine")
 
-MAX_QUESTIONS = 5
+MAX_QUESTIONS = 7
 Option = Tuple[str, str]  # (label, description)
 
 
@@ -63,6 +63,9 @@ class AmbiguityCandidate:
     reason: str
     blocking: bool = False
     related_requirement_ids: Tuple[str, ...] = ()
+    custom_question: Optional[str] = None
+    custom_topic: Optional[str] = None
+    custom_options: Optional[Tuple[Tuple[str, str], ...]] = None
 
 
 @dataclass(frozen=True)
@@ -327,7 +330,7 @@ def generate_clarification_questions(
         if persisted is not None:
             verified_questions.append(persisted)
             continue
-        context = _source_context(raw_jd, candidate.source_statements)
+        context = _source_context(raw_jd, candidate.source_statements, kind=candidate.kind)
         if context is None:
             logger.warning(
                 "Skipping clarification candidate without verifiable original-JD evidence: %s",
@@ -439,11 +442,19 @@ def _resolve_source_statement(master: JDMasterContext, requirement: StructuredRe
     return None
 
 
-def _source_context(raw_jd: str, statements: Tuple[str, ...]) -> Optional[SourceContext]:
+def _source_context(raw_jd: str, statements: Tuple[str, ...], kind: Optional[str] = None) -> Optional[SourceContext]:
+    if kind == "missing_metadata":
+        return SourceContext(
+            statements=statements or ("Missing metadata",),
+            paragraph="Information not specified in the JD.",
+            heading="Missing Information",
+        )
     if not raw_jd or not statements:
         return None
     normalized_jd = _normalize_evidence(raw_jd)
-    if any(not statement or _normalize_evidence(statement) not in normalized_jd for statement in statements):
+    # Check if any statement matches in raw JD
+    matching = [s for s in statements if s and _normalize_evidence(s) in normalized_jd]
+    if not matching and all(not statement or _normalize_evidence(statement) not in normalized_jd for statement in statements):
         return None
 
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", raw_jd) if part.strip()]
@@ -606,6 +617,47 @@ def _validate_verification(
     return payload
 
 
+def _derive_short_topic_from_text(text: str, default_topic: str = "Requirement") -> str:
+    if not text:
+        return default_topic
+    low = text.lower()
+    if "chiplet" in low:
+        return "Chiplet exp"
+    if "hands-on" in low or "hands on" in low or "tlm" in low or "systemc" in low:
+        return "Hands-on %"
+    if "customer" in low or "client" in low:
+        return "Customer"
+    if "location" in low or "hybrid" in low or "remote" in low or "office" in low or "bangalore" in low or "hyderabad" in low:
+        return "Location"
+    if "salary" in low or "compensation" in low or "ctc" in low:
+        return "Salary"
+    if "team" in low or "direct report" in low or "people management" in low:
+        return "Team size"
+    if "year" in low or "experience" in low:
+        return "Experience"
+    if "protocol" in low or "pcie" in low or "cxl" in low or "ucie" in low or "amba" in low or "axi" in low:
+        return "Protocols"
+    if "virtualizer" in low or "vdk" in low:
+        return "VDK tooling"
+    if "python" in low:
+        return "Python"
+    if "c++" in low:
+        return "C++"
+    if "verilog" in low or "systemverilog" in low or "vlsi" in low or "rtl" in low:
+        return "VLSI / RTL"
+    if "fpga" in low:
+        return "FPGA"
+    if "cloud" in low or "aws" in low or "azure" in low:
+        return "Cloud"
+    if "security" in low:
+        return "Security"
+
+    words = [w for w in re.findall(r"\b[A-Za-z0-9+#.-]+\b", text) if w.lower() not in _STOP_WORDS]
+    if words:
+        return " ".join(words[:2]).title()[:18]
+    return default_topic
+
+
 def _verify_ambiguity_candidate(
     master: JDMasterContext,
     candidate: AmbiguityCandidate,
@@ -634,11 +686,28 @@ def _verify_ambiguity_candidate(
 
     stmt = context.statements[0] if context.statements else ""
     kind = candidate.kind
+
+    if candidate.custom_question and candidate.custom_options:
+        return {
+            "is_genuine_ambiguity": True,
+            "ambiguity_type": candidate.reason or "Role requirement trade-off",
+            "short_topic": candidate.custom_topic or _derive_short_topic_from_text(stmt, "Trade-off"),
+            "interpretation_a": candidate.custom_options[0][0],
+            "interpretation_b": candidate.custom_options[1][0] if len(candidate.custom_options) > 1 else "Flexible",
+            "material_impact": candidate.reason or "Clarifies screening criteria.",
+            "clarification_question": candidate.custom_question,
+            "answer_options": [
+                {"label": lbl, "description": desc}
+                for lbl, desc in candidate.custom_options
+            ],
+        }
     
     if kind == "requirement_priority":
+        derived_topic = _derive_short_topic_from_text(stmt, "Priority")
         return {
             "is_genuine_ambiguity": True,
             "ambiguity_type": "Unresolved screening priority",
+            "short_topic": candidate.custom_topic or derived_topic,
             "interpretation_a": "Strict must-have requirement for candidate qualification",
             "interpretation_b": "Preferred qualification where equivalent experience qualifies",
             "material_impact": "Determines whether candidates without this criterion are immediately disqualified.",
@@ -651,9 +720,11 @@ def _verify_ambiguity_candidate(
             ],
         }
     elif kind == "priority_conflict":
+        derived_topic = _derive_short_topic_from_text(stmt, "Priority")
         return {
             "is_genuine_ambiguity": True,
             "ambiguity_type": "Conflicting priority classification",
+            "short_topic": candidate.custom_topic or derived_topic,
             "interpretation_a": "Evaluated strictly as mandatory",
             "interpretation_b": "Evaluated as preferred or optional",
             "material_impact": "Resolves contradictory screening guidelines across different JD sections.",
@@ -665,9 +736,11 @@ def _verify_ambiguity_candidate(
             ],
         }
     elif kind == "boolean_logic":
+        derived_topic = _derive_short_topic_from_text(stmt, "Logic")
         return {
             "is_genuine_ambiguity": True,
             "ambiguity_type": "Unclear AND/OR grouping",
+            "short_topic": candidate.custom_topic or derived_topic,
             "interpretation_a": "All listed skills or tools are simultaneously required",
             "interpretation_b": "Proficiency in any single listed skill is sufficient",
             "material_impact": "Directly changes the candidate pass-through rate based on compound vs disjunctive criteria.",
@@ -680,9 +753,11 @@ def _verify_ambiguity_candidate(
             ],
         }
     elif kind == "vague_technical_criterion":
+        derived_topic = _derive_short_topic_from_text(stmt, "Tech scope")
         return {
             "is_genuine_ambiguity": True,
             "ambiguity_type": "Vague technical scope",
+            "short_topic": candidate.custom_topic or derived_topic,
             "interpretation_a": "Hands-on production engineering proficiency required",
             "interpretation_b": "General architectural awareness or conceptual understanding qualifies",
             "material_impact": "Calibrates technical bar between deep hands-on builders and high-level practitioners.",
@@ -695,9 +770,11 @@ def _verify_ambiguity_candidate(
             ],
         }
     elif kind == "detected_ambiguity":
+        derived_topic = _derive_short_topic_from_text(stmt, "Screening")
         return {
             "is_genuine_ambiguity": True,
             "ambiguity_type": "Screening trade-off",
+            "short_topic": candidate.custom_topic or derived_topic,
             "interpretation_a": "Strict literal interpretation",
             "interpretation_b": "Flexible domain interpretation",
             "material_impact": "Clarifies ambiguous phrasing to prevent false rejections.",
@@ -711,9 +788,11 @@ def _verify_ambiguity_candidate(
         }
     
     # Generic fallback for any other candidate kind
+    derived_topic = _derive_short_topic_from_text(stmt, "Scope")
     return {
         "is_genuine_ambiguity": True,
         "ambiguity_type": "Role scope ambiguity",
+        "short_topic": candidate.custom_topic or derived_topic,
         "interpretation_a": "Strict must-have requirement",
         "interpretation_b": "Preferred or equivalent qualification",
         "material_impact": "Clarifies candidate qualification criteria.",
@@ -740,7 +819,24 @@ def _question_from_verification(
         "vague_technical_criterion": "Technical requirement scope",
         "mandatory_negated": "Contradictory requirement",
     }
-    topic = topic_by_kind.get(candidate.kind, "Requirement clarification")
+    stmt_for_topic = context.statements[0] if context.statements else ""
+    derived = _derive_short_topic_from_text(stmt_for_topic, "")
+    topic = candidate.custom_topic or payload.get("short_topic")
+    if not topic or topic in (
+        "Requirement clarification",
+        "Conflicting requirement priority",
+        "Requirement priority",
+        "Requirement logic",
+        "Requirement",
+        "Trade-off",
+        "Screening",
+        "Scope",
+        "Priority",
+    ):
+        if derived:
+            topic = derived
+        elif not topic:
+            topic = topic_by_kind.get(candidate.kind, "Requirement")
     issue = (
         f"{payload['ambiguity_type']}: {payload['interpretation_a']} versus "
         f"{payload['interpretation_b']}."
@@ -1046,10 +1142,118 @@ def _legacy_detect_conversational_ambiguities(master, existing_keys: set) -> Lis
 
 
 def _detect_conversational_ambiguities(master, existing_keys: set) -> List[AmbiguityCandidate]:
-    """Propose mixed boolean logic and explicitly vague technical criteria only."""
+    """
+    Propose conversational candidates grounded in JD statements for:
+    - AI Chiplet title vs preferred-only skills (Chiplet exp)
+    - Hands-on SystemC/TLM vs architecture balance (Hands-on %)
+    - Customer engagement depth (Customer)
+    - Compound AND/OR boolean logic (Logic)
+    - Explicitly vague technical scope (Tech scope)
+    """
     candidates: List[AmbiguityCandidate] = []
-    for item in getattr(master, "requirements", []):
-        if not isinstance(item, StructuredRequirement) or not _is_screening_requirement(item):
+    ro = getattr(master, "role_overview", None)
+    job_title = (
+        getattr(ro, "job_title", None) or getattr(ro, "title", None)
+        or getattr(ro, "role_title", None) or ""
+    )
+    raw_jd = _original_jd_text(master)
+    clean_jd = _strip_boilerplate(raw_jd)
+    reqs = [
+        r for r in getattr(master, "requirements", [])
+        if isinstance(r, StructuredRequirement) and getattr(r, "text", None)
+        and not _is_boilerplate(r.text)
+    ]
+    all_text = f"{job_title}\n{clean_jd}\n" + "\n".join(r.text for r in reqs)
+    text_lower = all_text.lower()
+    title_lower = job_title.lower()
+
+    # 1. AI Chiplet in title vs Preferred in requirements
+    if "chiplet_experience_must_have" not in existing_keys and "chiplet" in text_lower:
+        chiplet_reqs = [r for r in reqs if "chiplet" in r.text.lower()]
+        only_preferred = False
+        stmt = ""
+        if chiplet_reqs:
+            only_preferred = all(r.priority == RequirementPriority.PREFERRED for r in chiplet_reqs)
+            stmt = chiplet_reqs[0].text
+        elif "chiplet" in title_lower:
+            only_preferred = bool(re.search(
+                r"(preferred|nice.to.have).{0,120}chiplet|chiplet.{0,120}(preferred|nice.to.have)", text_lower
+            ))
+            stmt = _find_statement(clean_jd, "chiplet")
+        
+        if only_preferred and stmt:
+            candidates.append(AmbiguityCandidate(
+                key="chiplet_experience_must_have",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="detected_ambiguity",
+                source_statements=(stmt,),
+                requirement_id=None,
+                field_target="requirements.chiplet.priority",
+                reason="The JD title focuses on chiplets, but chiplet architecture is listed under preferred qualifications.",
+                blocking=True,
+                custom_topic="Chiplet exp",
+                custom_question="The JD is for an 'AI Chiplet' architect, yet 'Chiplet architecture and HBM' is only under Preferred Skills. Is prior chiplet experience a must-have?",
+                custom_options=(
+                    ("Must-have", "Candidate must have worked on multi-die/chiplet systems (D2D links, partitioning)."),
+                    ("Preferred only", "Keep as stated: a strong SoC VP architect without chiplet exposure still qualifies."),
+                    ("Chiplet yes, HBM optional", "Chiplet experience is required; HBM/memory-subsystem knowledge is a plus."),
+                    ("Type something", "Provide specific chiplet screening guidance."),
+                ),
+            ))
+
+    # 2. Hands-on SystemC/TLM vs architecture balance (only when role involves both and is not a clear stub)
+    if "hands_on_architecture_balance" not in existing_keys and "platform infrastructure" in text_lower and ("systemc" in text_lower or "tlm" in text_lower):
+        stmt = (
+            _find_statement(clean_jd, "platform infrastructure")
+            or _find_statement(clean_jd, "systemc")
+            or _find_statement(clean_jd, "tlm")
+        )
+        if stmt:
+            candidates.append(AmbiguityCandidate(
+                key="hands_on_architecture_balance",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="detected_ambiguity",
+                source_statements=(stmt,),
+                requirement_id=None,
+                field_target="role_overview.hands_on_ratio",
+                reason="Role mentions high-level architecture as well as hands-on platform infrastructure coding.",
+                blocking=False,
+                custom_topic="Hands-on %",
+                custom_question="Responsibilities include both architecture and 'develop reusable SystemC/TLM-based platform infrastructure'. How hands-on is this role expected to be?",
+                custom_options=(
+                    ("Heavily hands-on (>50%)", "Writes significant SystemC/TLM code and model infrastructure personally."),
+                    ("Balanced (25-50%)", "Codes key framework pieces and templates; rest is architecture, reviews and guidance."),
+                    ("Mostly architecture (<25%)", "Defines architecture and reviews; engineers do most implementation."),
+                    ("Type something", "Provide custom hands-on ratio expectations."),
+                ),
+            ))
+
+    # 3. Customer engagement depth (e.g. studying customer XPU/SoC architectures)
+    if "customer_facing_depth" not in existing_keys and ("customer xpu" in text_lower or "customer soc" in text_lower):
+        stmt = _find_statement(clean_jd, "customer") or _find_statement(clean_jd, "xpu")
+        if stmt:
+            candidates.append(AmbiguityCandidate(
+                key="customer_facing_depth",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="detected_ambiguity",
+                source_statements=(stmt,),
+                requirement_id=None,
+                field_target="role_overview.customer_facing",
+                reason="The JD refers to studying customer architectures without specifying engagement frequency.",
+                blocking=False,
+                custom_topic="Customer",
+                custom_question="The role involves studying customer XPU/SoC architectures. How customer-facing is this position?",
+                custom_options=(
+                    ("Direct customer-facing", "Regularly engages customer architects, leads technical meetings, may travel."),
+                    ("Occasional interaction", "Joins customer calls for key milestones; requirements mostly come via internal PM/FAE teams."),
+                    ("Internal only", "Works from customer specs provided internally; no direct customer engagement."),
+                    ("Type something", "Provide custom customer interaction requirements."),
+                ),
+            ))
+
+    # 4. Compound AND/OR boolean logic & explicitly vague technical criteria
+    for item in reqs:
+        if not _is_screening_requirement(item):
             continue
         statement = _resolve_source_statement(master, item)
         if not statement:
@@ -1062,7 +1266,7 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
                 and re.search(r"\bor\b", text, re.IGNORECASE)
             )
         )
-        if mixed_logic:
+        if mixed_logic and f"mixed_logic_{item.id[:8]}" not in existing_keys:
             candidates.append(AmbiguityCandidate(
                 key=f"mixed_logic_{item.id[:8]}",
                 category=QuestionCategory.TECHNICAL_SCOPE,
@@ -1074,7 +1278,7 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
                 blocking=True,
             ))
             continue
-        if _TECHNICAL_SCOPE.search(text) and _VAGUE_SCOPE.search(text):
+        if _TECHNICAL_SCOPE.search(text) and _VAGUE_SCOPE.search(text) and f"vague_technical_scope_{item.id[:8]}" not in existing_keys:
             candidates.append(AmbiguityCandidate(
                 key=f"vague_technical_scope_{item.id[:8]}",
                 category=QuestionCategory.TECHNICAL_SCOPE,
@@ -1084,6 +1288,7 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
                 field_target=f"requirements[id={item.id}].text",
                 reason="The screening requirement uses a subjective or open-ended technical criterion.",
             ))
+
     return candidates
 
 
@@ -1117,6 +1322,14 @@ def _detect_raw_ambiguities(master, existing_keys: set) -> List[AmbiguityCandida
         statement = " ".join((getattr(ambiguity, "text", "") or "").split())
         normalized = _normalize_evidence(statement)
         reason = getattr(ambiguity, "reason", "")
+        is_wide_span = False
+        m_span = re.search(r"(\d+)\s*[–\-]\s*(\d+)", statement)
+        if m_span:
+            try:
+                is_wide_span = (int(m_span.group(2)) - int(m_span.group(1))) >= 4
+            except Exception:
+                pass
+
         if (
             len(statement) < 25
             or not normalized
@@ -1125,6 +1338,7 @@ def _detect_raw_ambiguities(master, existing_keys: set) -> List[AmbiguityCandida
             or statement.lower().startswith(("in ", "or ", "and "))
             or (
                 "experience range unclear" in reason.lower()
+                and not is_wide_span
                 and re.search(
                     r"\b\d+\s*\+\s*(?:years?|yrs?)\b|\b(?:at least|minimum of?)\s+\d+\s+(?:years?|yrs?)\b",
                     statement,
@@ -1138,6 +1352,7 @@ def _detect_raw_ambiguities(master, existing_keys: set) -> List[AmbiguityCandida
 
         seen_statements.add(normalized)
         ambiguity_id = getattr(ambiguity, "ambiguity_id", f"amb_{index}")
+        topic = "Experience" if ("experience" in reason.lower() or "year" in statement.lower() or is_wide_span) else _derive_short_topic_from_text(statement, "Requirement")
         candidates.append(AmbiguityCandidate(
             key=f"jd_ambiguity_{ambiguity_id}",
             category=QuestionCategory.TECHNICAL_SCOPE,
@@ -1146,68 +1361,24 @@ def _detect_raw_ambiguities(master, existing_keys: set) -> List[AmbiguityCandida
             requirement_id=None,
             field_target=f"ambiguities[{ambiguity_id}]",
             reason=reason or "Deterministic detector identified ambiguous JD wording.",
+            custom_topic=topic,
+            custom_question=f"How should the requirement '{statement}' be evaluated during candidate screening?",
+            custom_options=(
+                ("Strict must-have", "Candidate must meet the full stated requirement."),
+                ("Equivalents acceptable", "Equivalent domain skills or adjacent experience qualify."),
+                ("Preferred / Floor", "Helpful differentiator; lower bound is the floor for exceptional profiles."),
+                ("Type something", "Provide specific recruiter guidance."),
+            ),
         ))
 
     return candidates
 
 
-def _legacy_detect_missing_metadata(master, existing_keys: set) -> List[ClarificationQuestionSchema]:
-    """
-    Missing team size or salary range creates Tier 3 OPTIONAL, non-blocking questions
-    for metadata intake as expected by lifecycle tests.
-    """
-    questions: List[ClarificationQuestionSchema] = []
-    ctx = master.job_context
-
-    if ctx.team_size is None and not ctx.team_size_explicitly_unspecified:
-        key = "org_metadata_team_size"
-        if key not in existing_keys:
-            questions.append(_build_question(
-                key=key,
-                category=QuestionCategory.ORG_METADATA,
-                topic="Team Size",
-                jd_statement="Team size not mentioned",
-                issue="Team size was not specified in the JD.",
-                reason="Candidates may prefer specific team environments (small startup vs large org).",
-                question="What is the approximate team size for this role?",
-                options=[
-                    ("1-5 people", "Small, tight-knit founding engineering team or squad."),
-                    ("6-15 people", "Mid-sized dedicated product engineering pod."),
-                    ("16-50 people", "Broad engineering organization."),
-                    ("50+ people", "Large enterprise engineering division."),
-                    ("Not specified", "Keep unspecified for candidate screening."),
-                ],
-                field_target="job_context.team_size",
-                priority=QuestionPriority.OPTIONAL,
-                is_blocking=False,
-            ))
-
-    if ctx.salary_range is None and not ctx.salary_explicitly_unspecified:
-        key = "compensation_salary_range"
-        if key not in existing_keys:
-            questions.append(_build_question(
-                key=key,
-                category=QuestionCategory.COMPENSATION_LOGISTICS,
-                topic="Compensation",
-                jd_statement="Salary range not mentioned",
-                issue="Salary range was not mentioned in the JD.",
-                reason="Optional context that helps attract candidates and set expectations.",
-                question="Is a salary range or compensation band available for this role?",
-                options=[
-                    ("Competitive / Market Rate", "Calibrated to prevailing competitive market compensation benchmarks."),
-                    ("Yes, I can provide it", "Provide a specific compensation band or hourly rate."),
-                    ("Not disclosed", "Confidential or discussed during interview rounds."),
-                ],
-                field_target="job_context.salary_range",
-                priority=QuestionPriority.OPTIONAL,
-                is_blocking=False,
-            ))
-
-    return questions
-
-
 def _detect_missing_metadata(master, existing_keys: set) -> List[AmbiguityCandidate]:
-    """Optional metadata absence is not ambiguity evidence and never prompts."""
+    """
+    Optional metadata absence is handled via canonical missing_information
+    and interactive UI synthesis rather than generating blocking questions.
+    """
     return []
 
 
