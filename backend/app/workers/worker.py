@@ -59,7 +59,7 @@ def process_job_description_version(
         logger.error("JobDescriptionVersion %s not found", jd_version_id)
         return
 
-    job = ProcessingJob(job_description_version_id=jd_version_id, status=ProcessingStatusEnum.PARSING)
+    job = ProcessingJob(job_description_version_id=jd_version_id, status=ProcessingStatusEnum.PARSING, started_at=datetime.now(timezone.utc))
     db.add(job)
     db.commit()
 

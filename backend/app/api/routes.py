@@ -231,7 +231,7 @@ def list_jds(project_id: Optional[str] = None, db: Session = Depends(get_db)):
             db.query(ProcessingJob)
             .join(JobDescriptionVersion)
             .filter(JobDescriptionVersion.job_description_id == jd.id)
-            .order_by(ProcessingJob.created_at.desc())
+            .order_by(ProcessingJob.started_at.desc(), ProcessingJob.created_at.desc())
             .first()
         )
         status_val = _status_str(latest_job) if latest_job else "UPLOADED"
@@ -637,7 +637,7 @@ def get_analysis(jd_id: str, db: Session = Depends(get_db)):
         db.query(ProcessingJob)
         .join(JobDescriptionVersion)
         .filter(JobDescriptionVersion.job_description_id == jd_id)
-        .order_by(ProcessingJob.created_at.desc())
+        .order_by(ProcessingJob.started_at.desc(), ProcessingJob.created_at.desc())
         .first()
     )
 

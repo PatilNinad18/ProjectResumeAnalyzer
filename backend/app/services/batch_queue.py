@@ -313,7 +313,7 @@ class JDBatchQueue:
             processing_job = (
                 db.query(ProcessingJob)
                 .filter(ProcessingJob.job_description_version_id == version_id)
-                .order_by(ProcessingJob.created_at.desc())
+                .order_by(ProcessingJob.started_at.desc(), ProcessingJob.created_at.desc())
                 .first()
             )
             if processing_job is None or processing_job.status not in {

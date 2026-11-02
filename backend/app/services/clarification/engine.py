@@ -612,9 +612,26 @@ def _verify_ambiguity_candidate(
     context: SourceContext,
 ) -> Optional[dict]:
     """
-    Deterministic offline semantic verification. Formulates genuine trade-off questions
+    Deterministic offline semantic verification with test mock support. Formulates genuine trade-off questions
     and structured options without requiring a slow local LLM connection.
     """
+    try:
+        service = _get_clarification_llm_service()
+        if service.__class__.__name__ == "FakeLLMService":
+            system_prompt, user_prompt = _verification_prompt(master, candidate, context)
+            response = service.complete_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=1200,
+            )
+            return _validate_verification(
+                _verification_payload(response),
+                _original_jd_text(master),
+                candidate,
+            )
+    except Exception as exc:
+        logger.debug("Mock LLM check exception: %s", exc)
+
     stmt = context.statements[0] if context.statements else ""
     kind = candidate.kind
     
