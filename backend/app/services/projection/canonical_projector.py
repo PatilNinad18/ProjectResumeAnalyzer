@@ -192,26 +192,22 @@ def project_to_canonical(
 
         elif req.priority in {RequirementPriority.UNRESOLVED, RequirementPriority.INFORMATIONAL, RequirementPriority.CONTEXTUAL}:
             snip = req.text.strip()
-            is_confirmed = getattr(req.provenance, "origin_type", None) == OriginType.TA_CONFIRMED or bool(matching_q)
-            res_text = None
-            if matching_q and matching_q.answer_text:
-                res_text = f"TA Resolution: {matching_q.answer_text}"
-            elif is_confirmed:
-                res_text = "TA Resolution: Confirmed as role context / informational."
-
-            if len(snip) >= 25 and not snip.lower().startswith(("in ", "or ", "and ")) and snip.lower() not in existing_statements:
-                ambiguities_out.append({
-                    "id": f"req_amb_{req.id[:8]}",
-                    "ambiguity_id": f"req_amb_{req.id[:8]}",
-                    "statement": req.text,
-                    "why_ambiguous": (
-                        "Priority was UNRESOLVED at time of finalization." if req.priority == RequirementPriority.UNRESOLVED
-                        else "Marked as CONTEXTUAL / informational phrasing requiring TA confirmation."
-                    ),
-                    "suggested_interpretation": res_text,
-                    "ta_confirmation_required": not is_confirmed,
-                })
-                existing_statements.add(snip.lower())
+            # Only include CONTEXTUAL/INFORMATIONAL reqs if TA has already answered them.
+            # Raw CONTEXTUAL clauses are NOT genuine ambiguities — skip to avoid fake entries.
+            if matching_q and matching_q.answer_text and snip.lower() not in existing_statements:
+                if len(snip) >= 25 and not snip.lower().startswith(("in ", "or ", "and ")):
+                    ambiguities_out.append({
+                        "id": f"req_amb_{req.id[:8]}",
+                        "ambiguity_id": f"req_amb_{req.id[:8]}",
+                        "statement": req.text,
+                        "why_ambiguous": (
+                            "Priority was UNRESOLVED at time of finalization." if req.priority == RequirementPriority.UNRESOLVED
+                            else "TA clarified contextual phrasing."
+                        ),
+                        "suggested_interpretation": f"TA Resolution: {matching_q.answer_text}",
+                        "ta_confirmation_required": False,
+                    })
+                    existing_statements.add(snip.lower())
             evidence_specs.append({
                 "requirement_id": req.id,
                 "requirement": req.text,
@@ -297,6 +293,8 @@ def project_to_canonical(
                 parts = q_text.split("'")
                 if len(parts) >= 3 and len(parts[1].strip()) >= 15:
                     stmt = parts[1].strip()
+            if not stmt:
+                stmt = q.short_topic or q_text
 
             if stmt and stmt.lower() not in existing_statements:
                 ambiguities_out.append({

@@ -248,12 +248,44 @@ class DeterministicExtractor:
         
         return requirements
     
+    @staticmethod
+    def _unwrap_soft_linebreaks(text):
+        """Join lines broken mid-sentence by soft PDF/doc wrapping."""
+        lines = text.splitlines()
+        result = []
+        i = 0
+        CONT_WORDS = ("and", "or", "with", "in", "to", "for", "of", "on", "at", "by",
+                      "collaborating", "optimizing", "building", "working")
+        while i < len(lines):
+            stripped = lines[i].strip()
+            if not stripped:
+                result.append("")
+                i += 1
+                continue
+            if stripped[-1] not in ".!?:" and len(stripped) > 12:
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines):
+                    nxt = lines[j].strip()
+                    words = nxt.split()
+                    if nxt and (nxt[0].islower() or (words and words[0].lower() in CONT_WORDS)):
+                        result.append(stripped + " " + nxt)
+                        for k in range(i + 1, j + 1):
+                            lines[k] = ""
+                        i += 1
+                        continue
+            result.append(stripped)
+            i += 1
+        return "\n".join(result)
+
     def _split_into_clauses(self, text: str, job_title: Optional[str] = None) -> List[str]:
         """
         Split text into atomic clauses by line and sentence.
         Preserves degree qualifications, lists of technologies, and decimal numbers.
         Filters out embedded headings like 'Project Experience' and metadata lines.
         """
+        text = self._unwrap_soft_linebreaks(text)
         raw_lines = text.split('\n')
         clauses: List[str] = []
 
@@ -300,9 +332,17 @@ class DeterministicExtractor:
                 if job_title and sent.lower() == job_title:
                     continue
 
-                # Filter out dangling fragmented prepositions/conjunctions
-                lower_sent = sent.lower()
+                # Filter out dangling fragmented prepositions/conjunctions at START or END
+                lower_sent = sent.lower().rstrip()
                 if lower_sent.startswith(("or ", "and ", "in ", "with ", "to ", "for ", "of ")) and len(sent) < 30:
+                    continue
+                # Reject clauses ending with dangling connectives (PDF soft-wrap artifacts)
+                _DANGLING_ENDS = (
+                    " with", " in", " at", " for", " is", " a", " an", " the",
+                    " and", " or", " of", " to", " by", " from", " on",
+                    " collaborating with", " working in a",
+                )
+                if any(lower_sent.endswith(d) for d in _DANGLING_ENDS):
                     continue
 
                 clauses.append(sent)

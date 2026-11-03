@@ -99,10 +99,22 @@ def process_job_description_version(
             jd_id=str(jd_version.job_description_id),
             raw_jd_text=raw_text,
         )
-        if jd_version.job_description and jd_version.job_description.title:
-            user_title = jd_version.job_description.title.strip()
-            if user_title and user_title.lower() != 'untitled jd':
-                master_context.role_overview.job_title = user_title
+        # Phase 1 fix: extracted title from JD text takes priority over the stored filename-based title.
+        # Only fall back to stored title if extraction produced nothing useful.
+        import re as _re
+        extracted_title = (master_context.role_overview.job_title or "").strip()
+        if not extracted_title:
+            # Nothing was extracted — try using the stored title as fallback
+            stored_title = (jd_version.job_description.title if jd_version.job_description else "") or ""
+            stored_title = stored_title.strip()
+            if stored_title and stored_title.lower() not in ("untitled jd", ""):
+                # Reject strings that look like filenames (leading digit + space/underscore)
+                if not _re.match(r'^\d+[\s_]', stored_title):
+                    master_context.role_overview.job_title = stored_title
+        elif jd_version.job_description:
+            # We extracted a good title — save it back to DB so the UI title and batch task title are correct
+            jd_version.job_description.title = extracted_title
+            db.add(jd_version.job_description)
         spec = project_to_canonical(
             master_context,
             jd_id=str(jd_version.job_description_id),
@@ -112,19 +124,10 @@ def process_job_description_version(
         spec.metadata.prompt_version = "deterministic_v1"
         spec.metadata.model_version = "deterministic_ekg"
 
-        # Generate clarification questions on master context
+        # Generate clarification questions on master context.
+        # Team size and salary are included so they flow as Ambiguity questions when absent from JD.
         from app.services.clarification.engine import generate_clarification_questions
-        job_context = master_context.job_context
-        team_size_unspecified = job_context.team_size_explicitly_unspecified
-        salary_unspecified = job_context.salary_explicitly_unspecified
-        try:
-            # Optional metadata and generic disclaimers are not clarification tasks.
-            job_context.team_size_explicitly_unspecified = True
-            job_context.salary_explicitly_unspecified = True
-            master_context = generate_clarification_questions(master_context, actor="worker_baseline")
-        finally:
-            job_context.team_size_explicitly_unspecified = team_size_unspecified
-            job_context.salary_explicitly_unspecified = salary_unspecified
+        master_context = generate_clarification_questions(master_context, actor="worker_baseline")
 
         if not master_context.clarification_history:
             from app.services.clarification.updater import attempt_finalization

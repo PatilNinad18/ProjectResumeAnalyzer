@@ -642,6 +642,29 @@ def _apply_field_patch(
             master.job_context.team_size_explicitly_unspecified = True
         elif answer_text:
             master.job_context.team_size = answer_text
+
+        # Record in clarification_history so it appears under Resolved Clarifications in Markdown
+        existing_q = next((q for q in master.clarification_history if q.question_key == question_key or q.short_topic == "Team size"), None)
+        if existing_q:
+            existing_q.status = QuestionStatus.ANSWERED
+            existing_q.answer_text = answer_text
+            existing_q.answered_by = answered_by
+            existing_q.answered_at = datetime.now(timezone.utc)
+        elif answer_text:
+            master.clarification_history.append(ClarificationQuestionSchema(
+                question_key=question_key,
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                priority=QuestionPriority.RECOMMENDED,
+                is_blocking=False,
+                field_target="job_context.team_size",
+                short_topic="Team size",
+                question_text="What is the expected team size for this role?",
+                rationale="TA confirmed team size.",
+                status=QuestionStatus.ANSWERED,
+                answer_text=answer_text,
+                answered_by=answered_by,
+                answered_at=datetime.now(timezone.utc),
+            ))
         return
 
     if field_target in ("job_context.salary_range", "salary_range") or question_key in ("compensation_salary_range", "missing_salary_range", "salary_range"):
@@ -654,6 +677,30 @@ def _apply_field_patch(
             master.job_context.salary_range = ans_clean if ans_clean else "Competitive / market rate"
         elif ans_clean:
             master.job_context.salary_range = ans_clean
+
+        # Record in clarification_history so it appears under Resolved Clarifications in Markdown
+        eff_answer = master.job_context.salary_range or ans_clean
+        existing_q = next((q for q in master.clarification_history if q.question_key == question_key or q.short_topic == "Salary"), None)
+        if existing_q:
+            existing_q.status = QuestionStatus.ANSWERED
+            existing_q.answer_text = eff_answer
+            existing_q.answered_by = answered_by
+            existing_q.answered_at = datetime.now(timezone.utc)
+        elif eff_answer:
+            master.clarification_history.append(ClarificationQuestionSchema(
+                question_key=question_key,
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                priority=QuestionPriority.RECOMMENDED,
+                is_blocking=False,
+                field_target="job_context.salary_range",
+                short_topic="Salary",
+                question_text="What is the target salary or compensation range for this role?",
+                rationale="TA confirmed salary range.",
+                status=QuestionStatus.ANSWERED,
+                answer_text=eff_answer,
+                answered_by=answered_by,
+                answered_at=datetime.now(timezone.utc),
+            ))
         return
 
 

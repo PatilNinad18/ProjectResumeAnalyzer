@@ -559,11 +559,14 @@ def test_answering_contextual_ambiguity_moves_to_resolved_in_markdown():
     )
     master.requirements.append(req)
 
-    # 1. Project before answering — must be in unresolved ambiguities
+    # 1. Project before answering — CONTEXTUAL items should NOT appear in the Ambiguities section
+    #    (they are not genuine ambiguities; they only appear once TA has answered them)
     spec_before = project_to_canonical(master, jd_id="test_contextual_amb", specification_version=1)
     md_before = render_markdown(spec_before)
-    assert "**Ambiguities Requiring TA Clarification**" in md_before
-    assert stmt_text in md_before
+    # Must not appear as an unresolved ambiguity requiring TA clarification
+    assert "**Ambiguities Requiring TA Clarification**" not in md_before, (
+        "CONTEXTUAL fragments must not appear in the Ambiguities Requiring TA Clarification section"
+    )
     assert "**Resolved Clarifications (TA Confirmed)**" not in md_before
 
     # 2. Answer via submit_answer with target_statement

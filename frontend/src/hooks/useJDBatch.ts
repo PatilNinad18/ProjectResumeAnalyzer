@@ -158,8 +158,8 @@ export function useJDBatch(projectId: string) {
         setEnrichedMarkdown(enriched?.markdown ?? null);
         setHasEnrichedMarkdown(enriched?.is_enriched === true);
 
-        const isFinal = response.lifecycle_status === "FINALIZED";
-        if (isFinal && latest && latest.specification_version >= 2) {
+        const hasResolved = Boolean(latest && latest.specification_version >= 2);
+        if (hasResolved && latest) {
           setResolvedMarkdown(latest.markdown);
           setHasResolvedMarkdown(true);
           setSpecViewMode("resolved");
@@ -208,16 +208,13 @@ export function useJDBatch(projectId: string) {
 
   async function resolveSelectedTask() {
     if (!batch || !selectedTask || !clarifications || resolveLock.current) return;
-    const unansweredQuestions = clarifications.questions.filter(
-      (question) => !(selectedAnswers[question.question_key] ?? "").trim()
-    );
     const unansweredAmbiguities = clarifications.ambiguities
       .map((ambiguity, index) => ({ ambiguity, index }))
       .filter(({ ambiguity, index }) =>
         ambiguity.ta_confirmation_required !== false &&
         !(selectedAnswers[`amb_${index}`] ?? "").trim()
       );
-    if (unansweredQuestions.length || unansweredAmbiguities.length) {
+    if (unansweredAmbiguities.length) {
       setTaskError("Answer each ambiguity for this JD before generating its final Markdown.");
       return;
     }

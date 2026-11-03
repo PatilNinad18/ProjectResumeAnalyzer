@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useMemo, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import { API_BASE, type BatchTask, type ClarificationsResponse, type CanonicalAmbiguityItem } from "@/lib/api";
 import type { useJDBatch } from "@/hooks/useJDBatch";
@@ -40,6 +40,69 @@ function distinctAmbiguities(data: ClarificationsResponse) {
     });
 }
 
+function synthesizeMissingInfoQuestions(data: ClarificationsResponse | null): ClarificationsResponse["questions"] {
+  if (!data?.missing_information?.length) return [];
+  const synthesized: ClarificationsResponse["questions"] = [];
+  const existingKeys = new Set(data.questions.map((q) => q.question_key));
+
+  for (const mi of data.missing_information) {
+    const raw = (mi.field || mi.parameter_name || mi.name || "").toString().trim();
+    if (!raw) continue;
+    const low = raw.toLowerCase();
+    let key = `missing_${low.replace(/[^a-z0-9]+/g, "_")}`;
+    let questionText = `What is the expectation for ${raw.replace(/_/g, " ")}?`;
+    let structured: Array<{ label: string; description: string }> = [];
+
+    if (low.includes("salary") || low.includes("compensation")) {
+      key = "compensation_salary_range";
+      questionText = "Is a salary range or compensation band available for this role?";
+      structured = [
+        { label: "Competitive / Market standard", description: "Calibrated to prevailing competitive market compensation benchmarks." },
+        { label: "Yes, I can provide it", description: "Provide a specific compensation band or hourly rate." },
+        { label: "Not disclosed", description: "Confidential or discussed during interview rounds." },
+      ];
+    } else if (low.includes("team") || low.includes("size")) {
+      key = "org_metadata_team_size";
+      questionText = "What is the expected team size or reporting structure for this role?";
+      structured = [
+        { label: "1–5 people", description: "Small, tight-knit founding engineering team or pod." },
+        { label: "6–15 people", description: "Mid-sized dedicated product engineering team." },
+        { label: "16–50 people", description: "Broad engineering organization." },
+        { label: "50+ people", description: "Large enterprise engineering division." },
+        { label: "Not specified / Flexible", description: "Keep team size flexible for screening." },
+      ];
+    } else if (low.includes("location") || low.includes("hybrid") || low.includes("remote")) {
+      key = "location_hybrid_arrangement";
+      questionText = `Location is listed as '${raw}'. What does the hybrid arrangement look like?`;
+      structured = [
+        { label: "Hybrid (2–3 days in office)", description: "Regular weekly in-office collaboration." },
+        { label: "On-site full-time", description: "100% on-site required." },
+        { label: "Flexible / mostly remote", description: "Remote work permitted with office visits as needed." },
+      ];
+    } else {
+      structured = [
+        { label: "Disclosing now", description: `Provide clarification for ${raw}.` },
+        { label: "Not required / Unspecified", description: "Do not evaluate or disqualify on this criterion." },
+      ];
+    }
+
+    if (!existingKeys.has(key)) {
+      synthesized.push({
+        question_key: key,
+        question_text: questionText,
+        category: "MISSING_METADATA",
+        priority: "OPTIONAL",
+        field_target: `job_context.${low.includes("team") ? "team_size" : low.includes("salary") ? "salary_range" : key}`,
+        status: "UNANSWERED",
+        short_topic: low.includes("team") ? "Team size" : low.includes("salary") ? "Salary" : raw,
+        structured_options: structured,
+      });
+      existingKeys.add(key);
+    }
+  }
+  return synthesized;
+}
+
 function missingInfoLabel(item: Record<string, unknown>, index: number) {
   const name = item.parameter_name ?? item.field ?? item.name;
   return typeof name === "string" && name.trim()
@@ -74,7 +137,33 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
     cancelTask,
   } = state;
   const pendingAmbiguities = clarifications ? distinctAmbiguities(clarifications) : [];
-  const actionableQuestions = clarifications?.questions ?? [];
+  const synthesizedMissing = clarifications ? synthesizeMissingInfoQuestions(clarifications) : [];
+  // Combine technical ambiguity questions from Ollama/engine and missing metadata (team size, salary)
+  // Deduplicate by question_key and short_topic
+  const actionableQuestions = useMemo(() => {
+    if (!clarifications) return [];
+    const questions = clarifications.questions ?? [];
+    const missing = synthesizeMissingInfoQuestions(clarifications);
+
+    const genuineQuestions = questions.filter((q) => {
+      const low = (q.short_topic || q.question_text || "").toLowerCase();
+      return !low.includes("compliance disclaimer") && !low.includes("equal opportunity");
+    });
+
+    const seenKeys = new Set<string>();
+    const seenTopics = new Set<string>();
+    const result: typeof questions = [];
+
+    for (const q of [...genuineQuestions, ...missing]) {
+      const topicLow = (q.short_topic || q.question_text).toLowerCase();
+      if (!seenKeys.has(q.question_key) && !seenTopics.has(topicLow)) {
+        seenKeys.add(q.question_key);
+        seenTopics.add(topicLow);
+        result.push(q);
+      }
+    }
+    return result;
+  }, [clarifications]);
   const hasOpenAmbiguities = Boolean(
     actionableQuestions.some((question) =>
       question.status !== "ANSWERED" &&
@@ -295,30 +384,57 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
                   <h5>
                     {hasOpenAmbiguities
                       ? `Ambiguities for ${selectedTask.filename}`
-                      : (actionableQuestions.length || pendingAmbiguities.length || clarifications.missing_information.length)
+                      : (actionableQuestions.length || pendingAmbiguities.length)
                         ? "Ambiguities reviewed"
                         : "No ambiguities found for this JD"}
                   </h5>
 
                   {actionableQuestions.map((question) => (
                     <div className={styles.question} key={question.question_key}>
-                      <label htmlFor={`batch-${selectedTask.jd_id}-${question.question_key}`}>
-                        {question.question_text}
-                      </label>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+                        {question.short_topic && (
+                          <span style={{
+                            display: "inline-block",
+                            padding: "2px 8px",
+                            fontSize: "0.72rem",
+                            fontWeight: 700,
+                            borderRadius: "4px",
+                            backgroundColor: "rgba(59, 130, 246, 0.12)",
+                            color: "var(--accent-text, #2563eb)",
+                            letterSpacing: "0.03em",
+                            border: "1px solid rgba(59, 130, 246, 0.25)",
+                          }}>
+                            {question.short_topic}
+                          </span>
+                        )}
+                        <label htmlFor={`batch-${selectedTask.jd_id}-${question.question_key}`} style={{ fontWeight: 600, margin: 0 }}>
+                          {question.question_text}
+                        </label>
+                      </div>
                       {question.structured_options?.length ? (
                         <div className={styles.options}>
-                          {question.structured_options.map((option) => (
-                            <button
-                              type="button"
-                              key={option.label}
-                              className={styles.option}
-                              aria-pressed={selectedAnswers[question.question_key] === option.label}
-                              onClick={() => setAnswer(question.question_key, option.label)}
-                            >
-                              <strong>{option.label}</strong>
-                              {option.description && <span>{option.description}</span>}
-                            </button>
-                          ))}
+                          {question.structured_options.map((option) => {
+                            const isSelected =
+                              selectedAnswers[question.question_key] === option.label ||
+                              selectedAnswers[question.question_key]?.startsWith(`${option.label}:`);
+                            return (
+                              <button
+                                type="button"
+                                key={option.label}
+                                className={styles.option}
+                                aria-pressed={isSelected}
+                                onClick={() => {
+                                  const val = option.description
+                                    ? `${option.label}: ${option.description}`
+                                    : option.label;
+                                  setAnswer(question.question_key, val);
+                                }}
+                              >
+                                <strong>{option.label}</strong>
+                                {option.description && <span>{option.description}</span>}
+                              </button>
+                            );
+                          })}
                         </div>
                       ) : null}
                       <textarea
@@ -352,19 +468,7 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
                     </div>
                   ))}
 
-                  {clarifications.missing_information.length > 0 && (
-                    <div className={styles.missingInfo}>
-                      <strong>Missing information (not assumed)</strong>
-                      <ul>
-                        {clarifications.missing_information.map((item, index) => (
-                          <li key={`${missingInfoLabel(item, index)}-${index}`}>
-                            <strong>{missingInfoLabel(item, index)}:</strong>{" "}
-                            {String(item.why_it_matters ?? item.reason ?? item.recommended_action ?? "Not specified in the JD.")}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+
 
                   {hasClarificationItems && (
                     <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>

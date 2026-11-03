@@ -555,6 +555,8 @@ class ExtractionResult(_Base):
                 job_context.company_context = val
             elif "team_size" in name:
                 job_context.team_size = val
+            elif "salary" in name:
+                job_context.salary_range = val
 
         # Map requirements and disjunction groups
         master_reqs: List[Union[StructuredRequirement, DisjunctionGroup]] = []

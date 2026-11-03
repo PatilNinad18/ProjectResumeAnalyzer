@@ -1143,12 +1143,10 @@ def _legacy_detect_conversational_ambiguities(master, existing_keys: set) -> Lis
 
 def _detect_conversational_ambiguities(master, existing_keys: set) -> List[AmbiguityCandidate]:
     """
-    Propose conversational candidates grounded in JD statements for:
-    - AI Chiplet title vs preferred-only skills (Chiplet exp)
-    - Hands-on SystemC/TLM vs architecture balance (Hands-on %)
-    - Customer engagement depth (Customer)
-    - Compound AND/OR boolean logic (Logic)
-    - Explicitly vague technical scope (Tech scope)
+    Propose conversational candidates grounded in JD statements via:
+    1. Dynamic Ollama Ambiguity Discovery (Claude-style recruiter persona)
+    2. Guaranteed deterministic team-size & salary validation and inclusion
+    3. Deterministic domain-generalized fallback detectors when Ollama is unavailable
     """
     candidates: List[AmbiguityCandidate] = []
     ro = getattr(master, "role_overview", None)
@@ -1166,6 +1164,47 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
     all_text = f"{job_title}\n{clean_jd}\n" + "\n".join(r.text for r in reqs)
     text_lower = all_text.lower()
     title_lower = job_title.lower()
+
+    # 0. Dynamic LLM Ambiguity Discovery via Ollama (Claude-style)
+    try:
+        from app.services.clarification.ollama_ambiguity_service import get_ollama_ambiguity_service
+        ollama_service = get_ollama_ambiguity_service()
+        llm_items = ollama_service.discover_ambiguities(raw_jd, job_title)
+        for idx, item in enumerate(llm_items):
+            topic = item.get("topic", f"Ambiguity {idx+1}")
+            q_text = item.get("question", "")
+            ft = item.get("field_target") or f"requirements.ambiguity_{idx+1}"
+            quote = item.get("evidence_quote") or "Information not specified in JD"
+            opts = tuple(
+                (opt["label"].strip(), opt["description"].strip())
+                for opt in item.get("options", [])
+                if isinstance(opt, dict) and "label" in opt and "description" in opt
+            )
+            if not any("type something" in lbl.lower() for lbl, _ in opts):
+                opts = opts + (("Type something", "Provide custom recruiter instructions."),)
+
+            slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")
+            key = f"llm_amb_{slug}" if f"llm_amb_{slug}" not in existing_keys else f"llm_amb_{slug}_{idx}"
+            is_metadata = "job_context." in ft or "team" in slug or "salary" in slug or "compensation" in slug
+            candidates.append(AmbiguityCandidate(
+                key=key,
+                category=QuestionCategory.ORG_METADATA if is_metadata else QuestionCategory.TECHNICAL_SCOPE,
+                kind="missing_metadata" if is_metadata else "detected_ambiguity",
+                source_statements=(quote,),
+                requirement_id=None,
+                field_target=ft,
+                reason="Discovered by recruiter ambiguity analysis.",
+                blocking=False,
+                custom_topic=topic,
+                custom_question=q_text,
+                custom_options=opts,
+            ))
+    except Exception as exc:
+        logger.debug("Ollama ambiguity discovery skipped: %s", exc)
+
+    # If Ollama produced valid ambiguity questions, return them directly
+    if candidates:
+        return candidates
 
     # 1. Core technology in title vs Preferred in requirements (General for ANY domain)
     core_tech_keywords = [
@@ -1321,6 +1360,118 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
                 requirement_id=item.id,
                 field_target=f"requirements[id={item.id}].text",
                 reason="The screening requirement uses a subjective or open-ended technical criterion.",
+            ))
+
+    # 5. Backend engineering: Framework strictness & versatility
+    is_backend = any(w in title_lower for w in ("backend", "server", "api engineer", "fastapi", "python engineer", "django")) or (
+        "backend" in text_lower and any(w in text_lower for w in ("fastapi", "django", "flask", "node", "express", "go", "golang"))
+    )
+    if is_backend and "backend_framework_strictness" not in existing_keys:
+        stmt = _find_statement(clean_jd, "fastapi") or _find_statement(clean_jd, "python") or _find_statement(clean_jd, "backend")
+        if stmt:
+            if "fastapi" in text_lower:
+                custom_q = "The JD specifies FastAPI experience. Is production FastAPI experience strictly required, or are equivalent modern frameworks (Django, Flask, Go, Node.js) acceptable?"
+                custom_opts = (
+                    ("FastAPI strictly required", "Must have direct hands-on production experience with FastAPI & asynchronous Python."),
+                    ("Equivalent backend frameworks qualify", "Candidates with strong production experience in Django, Flask, Go, or Node.js qualify."),
+                    ("FastAPI preferred", "Strong Python fundamentals are required; FastAPI can be learned quickly on the job."),
+                    ("Type something", "Provide specific backend framework screening guidance."),
+                )
+            else:
+                custom_q = "Is the primary backend stack strictly required as stated, or are candidates with equivalent distributed systems/backend experience acceptable?"
+                custom_opts = (
+                    ("Primary stack strictly required", "Must have direct production depth with the primary framework/language listed."),
+                    ("Adjacent frameworks qualify", "Demonstrated capability in equivalent modern backend architectures qualifies."),
+                    ("Type something", "Provide custom stack flexibility instructions."),
+                )
+            candidates.append(AmbiguityCandidate(
+                key="backend_framework_strictness",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="detected_ambiguity",
+                source_statements=(stmt,),
+                requirement_id=None,
+                field_target="requirements.backend.framework_flexibility",
+                reason="Specifies backend technologies without clarifying whether adjacent modern framework experience qualifies.",
+                blocking=False,
+                custom_topic="Framework strictness",
+                custom_question=custom_q,
+                custom_options=custom_opts,
+            ))
+
+    # 6. Database & Performance Optimization Depth
+    if is_backend and "database_optimization_depth" not in existing_keys and any(w in text_lower for w in ("database", "sql", "postgres", "mysql", "performance", "query", "optimize")):
+        stmt = _find_statement(clean_jd, "database") or _find_statement(clean_jd, "optimizing") or _find_statement(clean_jd, "performance")
+        if stmt:
+            candidates.append(AmbiguityCandidate(
+                key="database_optimization_depth",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="detected_ambiguity",
+                source_statements=(stmt,),
+                requirement_id=None,
+                field_target="requirements.database.depth",
+                reason="The JD highlights database performance without clarifying required depth versus application logic.",
+                blocking=False,
+                custom_topic="Database depth",
+                custom_question="How deep should database performance expertise be (e.g., query profiling, index optimization, connection pooling) versus general API application development?",
+                custom_options=(
+                    ("Deep database tuning", "Hands-on expertise profiling slow queries, indexing strategies, and connection pooling in production."),
+                    ("Standard application ORM", "Competent with SQLAlchemy/Pydantic, standard migrations, and relational CRUD schemas."),
+                    ("High concurrency / distributed", "Specialized in distributed caching (Redis), read replicas, and horizontal partitioning."),
+                    ("Type something", "Provide custom database expectation guidance."),
+                ),
+            ))
+
+    # 7. Startup Pace & Travel Requirements
+    if "startup_travel_model" not in existing_keys and (
+        ("travel" in text_lower and any(w in text_lower for w in ("occasionally", "occasional", "required", "may need to", "willing to travel")))
+        or ("startup" in text_lower and "travel" in text_lower)
+    ):
+        stmt = _find_statement(clean_jd, "travel") or _find_statement(clean_jd, "startup")
+        if stmt:
+            candidates.append(AmbiguityCandidate(
+                key="startup_travel_model",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="detected_ambiguity",
+                source_statements=(stmt,),
+                requirement_id=None,
+                field_target="role_overview.travel_model",
+                reason="Mentions startup pace and occasional travel without specifying frequency or attendance expectations.",
+                blocking=False,
+                custom_topic="Travel & Onsite",
+                custom_question="The role mentions a fast-paced environment with occasional travel. What is the expected travel frequency and attendance expectation?",
+                custom_options=(
+                    ("Minimal / As needed (<10%)", "Occasional travel for quarterly team meetups or critical milestones only."),
+                    ("Moderate travel (10-25%)", "Regular monthly or bi-weekly travel required for client/engineering syncs."),
+                    ("In-office priority", "Primary commitment is regular in-office presence with minimal travel outside home office."),
+                    ("Type something", "Provide custom travel and work mode policy."),
+                ),
+            ))
+
+    # 8. Experience tenure ambiguity: general unscoped "5+ years of experience"
+    exp_match = re.search(r"(\d+)\+\s*years?\s+of\s+experience", text_lower)
+    if exp_match and "experience_scope_split" not in existing_keys:
+        # Only trigger if it is general role tenure rather than explicitly scoped to a skill
+        is_scoped = bool(re.search(r"(\d+)\+\s*years?\s+of\s+experience\s+(?:in|with)\s+[a-z]", text_lower))
+        years_num = exp_match.group(1)
+        stmt = _find_statement(clean_jd, f"{years_num}+ years of experience") or _find_statement(clean_jd, f"{years_num}+ years")
+        if not is_scoped and stmt:
+            candidates.append(AmbiguityCandidate(
+                key="experience_scope_split",
+                category=QuestionCategory.TECHNICAL_SCOPE,
+                kind="detected_ambiguity",
+                source_statements=(stmt,),
+                requirement_id=None,
+                field_target="requirements.experience.scope",
+                reason=f"Specifies '{years_num}+ years of experience' without clarifying whether all years must be in this specific role or total career tenure.",
+                blocking=False,
+                custom_topic="Experience depth",
+                custom_question=f"The JD specifies '{years_num}+ years of experience'. Does this require {years_num}+ years dedicated strictly to this role domain, or total software engineering tenure?",
+                custom_options=(
+                    (f"{years_num}+ years strictly in domain", f"Candidate must have full {years_num}+ years dedicated to this specific tech stack/role in production."),
+                    (f"{years_num}+ years total engineering", f"Total engineering career is {years_num}+ years; 2-3 years in this specific stack qualifies."),
+                    ("Competency over tenure", f"Tenure is guidance; candidates with fewer years but demonstrated architecture depth qualify."),
+                    ("Type something", "Provide custom experience evaluation instructions."),
+                ),
             ))
 
     return candidates

@@ -49,11 +49,11 @@ class ParameterExtractor:
         # Job title patterns
         self.title_patterns = [
             # 1. Structured header: Job Title: <Title> or Position: <Title> (colon or dash required)
-            re.compile(r'(?:job\s+title|position)\s*[:\-]\s*([A-Za-z0-9\s/&#\-\+]+?)(?:\r?\n|$)', re.IGNORECASE),
-            # 2. Opening role declaration: e.g. We are seeking an Account Executive with...
-            re.compile(r'(?i)\b(?:we\s+(?:are\s+)?(?:seeking|looking\s+for|hiring)|(?:seeking|looking\s+for|hiring))\s+(?:an?|our)\s+([A-Z][A-Za-z0-9\s/&#\-\+]+?)(?:\s+(?:with|to|who|in|for|responsible|will|\.|\,)|$)', re.IGNORECASE),
-            # 3. Standalone title line with standard job family suffix
-            re.compile(r'^([A-Z][A-Za-z\s&/]+(?:Engineer|Developer|Manager|Analyst|Designer|Architect|Executive|Lead))\s*$', re.MULTILINE),
+            re.compile(r'(?:job\s+title|position|role|opening|vacancy)\s*[:\-]\s*([A-Za-z][A-Za-z0-9\s/&#\-\+]+?)(?:\r?\n|$)', re.IGNORECASE),
+            # 2. Opening role declaration: "We are looking for a Senior Backend Engineer with ..."
+            re.compile(r'(?i)\b(?:we\s+(?:are\s+)?(?:seeking|looking\s+for|hiring)|(?:seeking|looking\s+for|hiring))\s+(?:an?\s+)?(?:experienced\s+|talented\s+|skilled\s+)?([A-Z][A-Za-z0-9\s/&#\-\+]+?)(?:\s+(?:with|to|who|in|for|responsible|will|\.|,)|$)'),
+            # 3. Standalone title line with standard job family suffix (multiline)
+            re.compile(r'^([A-Z][A-Za-z\s&/]+(?:Engineer|Developer|Manager|Analyst|Designer|Architect|Executive|Lead|Scientist|Specialist|Consultant|Director|Officer))\s*$', re.MULTILINE),
         ]
         
         # Experience patterns - minimum
@@ -117,6 +117,21 @@ class ParameterExtractor:
             re.compile(r"\b(Master'?s?|MS|MA|M\.S\.|M\.A\.)\s+(?:degree\s+)?(?:in\s+)?([^.,\n]+)?", re.IGNORECASE),
             re.compile(r"\b(PhD|Ph\.D\.|Doctorate)\s+(?:degree\s+)?(?:in\s+)?([^.,\n]+)?", re.IGNORECASE),
         ]
+        
+        # Team size patterns
+        self.team_size_patterns = [
+            re.compile(r'(?:team\s+size|reporting\s+team|team\s+scale)\s*[:\-]\s*(\d+(?:\s*[-–—to]\s*\d+)?\s*(?:people|engineers|members|developers|reporters|professionals)?)\b', re.IGNORECASE),
+            re.compile(r'\b(?:team\s+of|manage(?:s|ing)?\s+(?:a\s+team\s+of\s+)?|lead(?:s|ing)?\s+(?:a\s+team\s+of\s+)?)\s*(\d+(?:\s*[-–—to]\s*\d+)?\s*(?:engineers|developers|people|members|direct\s+reports))\b', re.IGNORECASE),
+            re.compile(r'\b(\d+(?:\s*[-–—to]\s*\d+)?)\s*(?:direct\s+reports)\b', re.IGNORECASE),
+        ]
+
+        # Salary patterns
+        self.salary_patterns = [
+            re.compile(r'(?:salary(?:\s+range)?|compensation(?:\s+band)?|ctc|package|remuneration)\s*[:\-]\s*([^\n\r;]+)', re.IGNORECASE),
+            re.compile(r'((?:[\$€£₹]|INR|USD)\s*\d+[\d,]*(?:\.\d+)?\s*(?:k|K|L|LPA|lakhs?|lac)?(?:\s*[-–—to]\s*(?:[\$€£₹]|INR|USD)?\s*\d+[\d,]*(?:\.\d+)?\s*(?:k|K|L|LPA|lakhs?|lac)?)?(?:\s*(?:per\s+(?:annum|year|month|hour)|p\.?a\.?|/\s*yr))?)', re.IGNORECASE),
+            re.compile(r'\b(\d+(?:\.\d+)?\s*[-–—to]\s*\d+(?:\.\d+)?\s*(?:LPA|lacs?|lakhs?))\b', re.IGNORECASE),
+            re.compile(r'\b(\d+k\s*[-–—to]\s*\d+k(?:\s*USD)?)\b', re.IGNORECASE),
+        ]
     
     def extract_all_parameters(
         self,
@@ -144,6 +159,8 @@ class ParameterExtractor:
         parameters.extend(self.extract_travel(jd_text))
         parameters.extend(self.extract_relocation(jd_text))
         parameters.extend(self.extract_education(jd_text))
+        parameters.extend(self.extract_team_size(jd_text))
+        parameters.extend(self.extract_salary(jd_text))
         
         logger.info("[ParameterExtractor] Extracted %d parameters", len(parameters))
         return parameters
@@ -158,7 +175,10 @@ class ParameterExtractor:
                 title = match.group(1).strip()
                 
                 # Validate title (not too short, not all caps, and not preposition/stop words)
-                if 3 <= len(title) <= 60 and not title.isupper() and not re.match(r'(?i)^(is|based|for|in|located|role|position|candidate|job)\b', title):
+                # Reject filename-style strings, too-short, all-caps, or stop words
+                if (3 <= len(title) <= 70 and not title.isupper()
+                        and not re.match(r'(?i)^(is|based|for|in|located|role|position|candidate|job)\b', title)
+                        and not re.match(r'^\d+[\s_]', title)):
                     parameters.append(ExtractedParameter(
                         parameter_name="job_title",
                         value=title,
@@ -469,6 +489,58 @@ class ParameterExtractor:
             return "PhD"
         
         return degree
+
+
+
+    def extract_team_size(self, jd_text: str) -> List[ExtractedParameter]:
+        """Extract explicit team size values from JD text."""
+        parameters: List[ExtractedParameter] = []
+        for pattern in self.team_size_patterns:
+            match = pattern.search(jd_text)
+            if match:
+                val = match.group(1).strip()
+                if val:
+                    parameters.append(ExtractedParameter(
+                        parameter_name="team_size",
+                        value=val,
+                        category="context",
+                        is_explicit=True,
+                        source=SourceReference(text=match.group(0), section="metadata")
+                    ))
+                    break
+        return parameters
+
+    def extract_salary(self, jd_text: str) -> List[ExtractedParameter]:
+        """Extract explicit salary or compensation values from JD text."""
+        parameters: List[ExtractedParameter] = []
+        for pattern in self.salary_patterns:
+            match = pattern.search(jd_text)
+            if match:
+                val = match.group(1).strip()
+                if len(val) >= 2 and any(c.isdigit() for c in val):
+                    parameters.append(ExtractedParameter(
+                        parameter_name="salary_range",
+                        value=val,
+                        category="context",
+                        is_explicit=True,
+                        source=SourceReference(text=match.group(0), section="metadata")
+                    ))
+                    break
+        return parameters
+
+
+def detect_team_size_value(text: str) -> Optional[str]:
+    """Helper to detect if team size is explicitly stated in text."""
+    extractor = ParameterExtractor()
+    params = extractor.extract_team_size(text)
+    return str(params[0].value) if params else None
+
+
+def detect_salary_range_value(text: str) -> Optional[str]:
+    """Helper to detect if salary range is explicitly stated in text."""
+    extractor = ParameterExtractor()
+    params = extractor.extract_salary(text)
+    return str(params[0].value) if params else None
 
 
 def create_parameter_extractor() -> ParameterExtractor:

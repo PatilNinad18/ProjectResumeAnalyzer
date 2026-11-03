@@ -317,14 +317,23 @@ def upload_jd(
 
 
 def _batch_task_payload(task: JobDescriptionBatchTask) -> Dict[str, Any]:
-    jd = task.job_description
+    jd = getattr(task, "job_description", None)
+    lifecycle = None
+    jd_ver = getattr(task, "jd_version", None)
+    if jd_ver and getattr(jd_ver, "specification_versions", None):
+        sorted_specs = sorted(jd_ver.specification_versions, key=lambda s: getattr(s, "specification_version", 0))
+        if sorted_specs and getattr(sorted_specs[-1], "lifecycle_status", None):
+            lifecycle = sorted_specs[-1].lifecycle_status.value
+    elif jd and getattr(jd, "lifecycle_status", None):
+        lifecycle = jd.lifecycle_status.value
+
     return {
         "task_id": task.id,
         "jd_id": task.job_description_id,
         "title": jd.title if jd else task.source_filename,
         "filename": task.source_filename,
         "status": task.status,
-        "lifecycle_status": jd.lifecycle_status.value if (jd and getattr(jd, "lifecycle_status", None)) else None,
+        "lifecycle_status": lifecycle,
         "stage": task.stage,
         "stage_label": task.stage_label,
         "progress_percent": task.progress_percent,
