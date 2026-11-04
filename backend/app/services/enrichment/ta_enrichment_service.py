@@ -294,6 +294,9 @@ class GroundedEnrichmentService:
 
     def check_ollama_available(self, timeout: float = 3.0, force_refresh: bool = False) -> bool:
         """Check if local Ollama daemon is reachable and the configured model is installed."""
+        if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST") or os.getenv("LLM_PROVIDER") == "mock":
+            return False
+
         if self.llm_caller is not None:
             return True
 

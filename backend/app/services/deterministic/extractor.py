@@ -249,33 +249,46 @@ class DeterministicExtractor:
         return requirements
     
     @staticmethod
-    def _unwrap_soft_linebreaks(text):
-        """Join lines broken mid-sentence by soft PDF/doc wrapping."""
+    def _unwrap_soft_linebreaks(text: str) -> str:
+        """
+        Join lines broken mid-sentence by soft PDF/doc line breaks.
+        Continues joining across arbitrary multiple wrapped lines until
+        a sentence terminates with terminal punctuation or a blank line is hit.
+        """
         lines = text.splitlines()
         result = []
         i = 0
-        CONT_WORDS = ("and", "or", "with", "in", "to", "for", "of", "on", "at", "by",
-                      "collaborating", "optimizing", "building", "working")
+        CONT_WORDS = {
+            "and", "or", "with", "in", "to", "for", "of", "on", "at", "by",
+            "collaborating", "optimizing", "building", "working", "designing",
+            "developing", "leading", "managing", "supporting",
+        }
         while i < len(lines):
-            stripped = lines[i].strip()
-            if not stripped:
+            line = lines[i].strip()
+            if not line:
                 result.append("")
                 i += 1
                 continue
-            if stripped[-1] not in ".!?:" and len(stripped) > 12:
-                j = i + 1
-                while j < len(lines) and not lines[j].strip():
-                    j += 1
-                if j < len(lines):
-                    nxt = lines[j].strip()
-                    words = nxt.split()
-                    if nxt and (nxt[0].islower() or (words and words[0].lower() in CONT_WORDS)):
-                        result.append(stripped + " " + nxt)
-                        for k in range(i + 1, j + 1):
-                            lines[k] = ""
-                        i += 1
-                        continue
-            result.append(stripped)
+            accum = line
+            while i + 1 < len(lines):
+                nxt = lines[i + 1].strip()
+                if not nxt:
+                    break
+                words = nxt.split()
+                accum_ends_punct = accum[-1] in ".!?:"
+                nxt_starts_lower = nxt[0].islower()
+                nxt_starts_cont = bool(words and words[0].lower() in CONT_WORDS)
+                accum_ends_comma_or_cont = (
+                    accum[-1] in ",;" or
+                    any(accum.lower().endswith(w) for w in (" with", " and", " or", " in", " for", " to", " of", " on", " at", " by"))
+                )
+
+                if not accum_ends_punct and (nxt_starts_lower or nxt_starts_cont or accum_ends_comma_or_cont):
+                    accum = accum + " " + nxt
+                    i += 1
+                else:
+                    break
+            result.append(accum)
             i += 1
         return "\n".join(result)
 

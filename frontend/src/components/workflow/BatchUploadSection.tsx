@@ -128,6 +128,11 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
     hasResolvedMarkdown,
     specViewMode,
     setSpecViewMode,
+    markdownDiff,
+    setMarkdownDiff,
+    showDiffHighlights,
+    setShowDiffHighlights,
+    diffChangedCount,
     isResolving,
     isLoadingTask,
     error,
@@ -136,6 +141,11 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
     retryTask,
     cancelTask,
   } = state;
+  const isDiffActive = Boolean(
+    markdownDiff &&
+    diffChangedCount > 0 &&
+    specViewMode === "resolved"
+  );
   const pendingAmbiguities = clarifications ? distinctAmbiguities(clarifications) : [];
   const synthesizedMissing = clarifications ? synthesizeMissingInfoQuestions(clarifications) : [];
   // Combine technical ambiguity questions from Ollama/engine and missing metadata (team size, salary)
@@ -353,6 +363,29 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
                               Resolved (v2)
                             </button>
                           )}
+                          {isDiffActive && (
+                            <button
+                              type="button"
+                              onClick={() => setShowDiffHighlights(!showDiffHighlights)}
+                              style={{
+                                fontSize: "0.78rem",
+                                padding: "4px 12px",
+                                borderRadius: "20px",
+                                border: `1px solid ${showDiffHighlights ? "#10b981" : "#d1d5db"}`,
+                                background: showDiffHighlights ? "#ecfdf5" : "#f9fafb",
+                                color: showDiffHighlights ? "#065f46" : "#6b7280",
+                                cursor: "pointer",
+                                fontWeight: 600,
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "5px",
+                                marginLeft: "8px",
+                              }}
+                            >
+                              <span>{showDiffHighlights ? "✦" : "○"}</span>
+                              Highlight Changes ({diffChangedCount})
+                            </button>
+                          )}
                         </div>
                       </div>
                       <button
@@ -374,8 +407,112 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
                     {!hasEnrichedMarkdown && specViewMode === "enriched" && (
                       <p className={styles.statusMessage}>Enrichment is unavailable; showing the deterministic baseline specification.</p>
                     )}
+                    {/* What Changed Banner (shown after ambiguity resolution with diffs) */}
+                    {isDiffActive && (
+                      <div
+                        style={{
+                          background: "linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%)",
+                          border: "1px solid #a7f3d0",
+                          borderRadius: "10px",
+                          padding: "14px 18px",
+                          margin: "12px 0 16px 0",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "12px",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                          <span style={{ fontSize: "1.25rem" }}>✨</span>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: "0.95rem", color: "#065f46" }}>
+                              Specification v2 Generated with Your Clarifications
+                            </div>
+                            <div style={{ fontSize: "0.82rem", color: "#047857", marginTop: "2px" }}>
+                              {diffChangedCount} line{diffChangedCount !== 1 ? "s" : ""} updated — highlighted below in green
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                          <button
+                            type="button"
+                            onClick={() => setShowDiffHighlights(!showDiffHighlights)}
+                            style={{
+                              fontSize: "0.78rem",
+                              padding: "4px 12px",
+                              borderRadius: "20px",
+                              border: "1px solid #10b981",
+                              background: showDiffHighlights ? "#10b981" : "#fff",
+                              color: showDiffHighlights ? "#fff" : "#065f46",
+                              cursor: "pointer",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {showDiffHighlights ? "✦ Highlights ON" : "○ Highlights OFF"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setMarkdownDiff(null)}
+                            style={{
+                              fontSize: "0.78rem",
+                              padding: "4px 10px",
+                              borderRadius: "20px",
+                              border: "1px solid #d1d5db",
+                              background: "#fff",
+                              color: "#6b7280",
+                              cursor: "pointer",
+                            }}
+                          >
+                            ✕ Dismiss
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     <div className={styles.markdownBody}>
-                      <ReactMarkdown>{markdown}</ReactMarkdown>
+                      {isDiffActive && showDiffHighlights && markdownDiff ? (
+                        <div style={{ lineHeight: 1.7 }}>
+                          {markdownDiff.map((seg, idx) => (
+                            <div
+                              key={idx}
+                              style={
+                                seg.changed
+                                  ? {
+                                      background: "rgba(16, 185, 129, 0.10)",
+                                      borderLeft: "3px solid #10b981",
+                                      paddingLeft: "10px",
+                                      marginLeft: "-10px",
+                                      borderRadius: "0 4px 4px 0",
+                                      position: "relative",
+                                    }
+                                  : {}
+                              }
+                            >
+                              {seg.changed && (
+                                <span
+                                  style={{
+                                    position: "absolute",
+                                    right: "8px",
+                                    top: "2px",
+                                    fontSize: "0.65rem",
+                                    fontWeight: 700,
+                                    color: "#059669",
+                                    background: "#d1fae5",
+                                    padding: "1px 5px",
+                                    borderRadius: "3px",
+                                    letterSpacing: "0.02em",
+                                  }}
+                                >
+                                  ✦ UPDATED
+                                </span>
+                              )}
+                              <ReactMarkdown>{seg.text || " "}</ReactMarkdown>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <ReactMarkdown>{markdown}</ReactMarkdown>
+                      )}
                     </div>
                   </section>
                 )}

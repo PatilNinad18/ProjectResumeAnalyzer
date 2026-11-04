@@ -16,6 +16,27 @@ import {
   type JDBatch,
 } from "@/lib/api";
 
+export function computeMarkdownDiff(
+  oldMd: string,
+  newMd: string
+): { segments: Array<{ text: string; changed: boolean }>; changedCount: number } {
+  if (!oldMd || !newMd) {
+    return {
+      segments: (newMd || "").split("\n").map((line) => ({ text: line, changed: false })),
+      changedCount: 0,
+    };
+  }
+  const oldSet = new Set(oldMd.split("\n").map((line) => line.trim()));
+  const segments = newMd.split("\n").map((line) => ({
+    text: line,
+    changed: line.trim().length > 0 && !oldSet.has(line.trim()),
+  }));
+  return {
+    segments,
+    changedCount: segments.filter((s) => s.changed).length,
+  };
+}
+
 const isBatchActive = (batch: JDBatch) =>
   batch.tasks.some((task) => task.status === "QUEUED" || task.status === "PROCESSING");
 
@@ -31,6 +52,9 @@ export function useJDBatch(projectId: string) {
   const [hasEnrichedMarkdown, setHasEnrichedMarkdown] = useState(false);
   const [hasResolvedMarkdown, setHasResolvedMarkdown] = useState(false);
   const [specViewMode, setSpecViewMode] = useState<"baseline" | "enriched" | "resolved">("enriched");
+  const [markdownDiff, setMarkdownDiff] = useState<Array<{ text: string; changed: boolean }> | null>(null);
+  const [showDiffHighlights, setShowDiffHighlights] = useState<boolean>(true);
+  const [diffChangedCount, setDiffChangedCount] = useState<number>(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
@@ -73,6 +97,9 @@ export function useJDBatch(projectId: string) {
     setHasResolvedMarkdown(false);
     setAnswersByJd({});
     setSelectedTaskId(null);
+    setMarkdownDiff(null);
+    setShowDiffHighlights(false);
+    setDiffChangedCount(0);
     try {
       const created = await createJDBatch(projectId, files);
       setBatch(created);
@@ -163,9 +190,23 @@ export function useJDBatch(projectId: string) {
           setResolvedMarkdown(latest.markdown);
           setHasResolvedMarkdown(true);
           setSpecViewMode("resolved");
+          const baseToCompare = baseline?.markdown || enriched?.markdown || "";
+          if (baseToCompare && latest.markdown) {
+            const { segments, changedCount } = computeMarkdownDiff(baseToCompare, latest.markdown);
+            setMarkdownDiff(segments);
+            setDiffChangedCount(changedCount);
+            setShowDiffHighlights(changedCount > 0);
+          } else {
+            setMarkdownDiff(null);
+            setDiffChangedCount(0);
+            setShowDiffHighlights(false);
+          }
         } else {
           setResolvedMarkdown(null);
           setHasResolvedMarkdown(false);
+          setMarkdownDiff(null);
+          setDiffChangedCount(0);
+          setShowDiffHighlights(false);
           setSpecViewMode(enriched?.is_enriched ? "enriched" : "baseline");
         }
 
@@ -208,16 +249,6 @@ export function useJDBatch(projectId: string) {
 
   async function resolveSelectedTask() {
     if (!batch || !selectedTask || !clarifications || resolveLock.current) return;
-    const unansweredAmbiguities = clarifications.ambiguities
-      .map((ambiguity, index) => ({ ambiguity, index }))
-      .filter(({ ambiguity, index }) =>
-        ambiguity.ta_confirmation_required !== false &&
-        !(selectedAnswers[`amb_${index}`] ?? "").trim()
-      );
-    if (unansweredAmbiguities.length) {
-      setTaskError("Answer each ambiguity for this JD before generating its final Markdown.");
-      return;
-    }
     resolveLock.current = true;
     setIsResolving(true);
     setTaskError(null);
@@ -274,6 +305,11 @@ export function useJDBatch(projectId: string) {
     hasResolvedMarkdown,
     specViewMode,
     setSpecViewMode,
+    markdownDiff,
+    setMarkdownDiff,
+    showDiffHighlights,
+    setShowDiffHighlights,
+    diffChangedCount,
     isEnrichedView,
     setIsEnrichedView,
     isSubmitting,
