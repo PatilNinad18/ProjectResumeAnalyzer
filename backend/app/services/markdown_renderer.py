@@ -24,6 +24,7 @@ JSON / Pydantic object.
 """
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 from typing import Any, Optional, Union
 
 from app.schemas.canonical import JobEvaluationSpecification
@@ -71,6 +72,35 @@ def _derive_tailored_evaluation_focus(req_text: str) -> str:
 
     # Default: dynamically incorporate the specific requirement text!
     return f"Screen candidate resume for verifiable hands-on execution and deliverables in '{cleaned}', assessing practical depth and production track record."
+
+
+def _highlight_enriched_differences(baseline: str, enriched: str) -> str:
+    baseline_lines = baseline.splitlines()
+    enriched_lines = enriched.splitlines()
+    matcher = SequenceMatcher(a=baseline_lines, b=enriched_lines, autojunk=False)
+
+    for tag, _baseline_start, _baseline_end, enriched_start, enriched_end in matcher.get_opcodes():
+        if tag not in {"insert", "replace"}:
+            continue
+        for index in range(enriched_start, enriched_end):
+            line = enriched_lines[index]
+            if not line.strip():
+                continue
+            if line.startswith(">"):
+                enriched_lines[index] = f"> 🟩 {line[1:].lstrip()}"
+            else:
+                enriched_lines[index] = f"> 🟩 {line}"
+
+    separated_lines: list[str] = []
+    previous_was_highlighted = False
+    for line in enriched_lines:
+        is_highlighted = line.startswith("> 🟩 ")
+        if is_highlighted and previous_was_highlighted:
+            separated_lines.append(">")
+        separated_lines.append(line)
+        previous_was_highlighted = is_highlighted
+
+    return "\n".join(separated_lines)
 
 
 def render_markdown(
@@ -379,4 +409,7 @@ def render_markdown(
         )
     md.append("")
 
-    return "\n".join(md)
+    rendered = "\n".join(md)
+    if enrichment_report is not None:
+        return _highlight_enriched_differences(render_markdown(spec), rendered)
+    return rendered

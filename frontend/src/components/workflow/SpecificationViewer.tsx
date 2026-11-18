@@ -1,6 +1,6 @@
-import ReactMarkdown from "react-markdown";
 import type { RequirementDiffItem } from "@/lib/api";
 import type { WorkflowPageProps } from "./WorkflowPage";
+import SpecificationMarkdown from "./SpecificationMarkdown";
 import styles from "./SpecificationViewer.module.css";
 
 type SpecificationViewerProps = Pick<WorkflowPageProps, "isStep3Done" | "markdown" | "step4Ref" | "specVersion" | "contextTab" | "setContextTab" | "isEnrichedView" | "fetchComparison" | "comparisonBaseContext" | "comparisonTargetContext" | "isDiffActive" | "setShowDiffHighlights" | "showDiffHighlights" | "diffChangedCount" | "handleToggleEnrichment" | "downloadFile" | "jsonData" | "setComparisonBaseContext" | "setComparisonTargetContext" | "comparisonData" | "isLoadingComparison" | "comparisonFilter" | "setComparisonFilter" | "comparisonViewMode" | "setComparisonViewMode" | "setMarkdownDiff" | "markdownDiff">;
@@ -615,12 +615,12 @@ export default function SpecificationViewer({
                                       ✦ UPDATED
                                     </span>
                                   )}
-                                  <ReactMarkdown>{seg.text || " "}</ReactMarkdown>
+                                  <SpecificationMarkdown markdown={seg.text || " "} />
                                 </div>
                               ))}
                             </div>
                           ) : (
-                            <ReactMarkdown>{markdown}</ReactMarkdown>
+                            <SpecificationMarkdown markdown={markdown} />
                           )}
                         </>
                       ) : (

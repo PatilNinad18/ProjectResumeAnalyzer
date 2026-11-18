@@ -1,0 +1,12 @@
+.diffHighlight {
+  margin: 0.65em 0;
+  padding: 0.2em 0.9em;
+  color: #166534;
+  background: #dcfce7;
+  border-left: 4px solid #22c55e;
+  border-radius: 0 5px 5px 0;
+}
+
+.diffHighlight p {
+  margin: 0.45em 0;
+}
