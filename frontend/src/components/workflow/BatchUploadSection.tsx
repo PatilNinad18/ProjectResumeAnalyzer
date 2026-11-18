@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type FormEvent } from "react";
-import ReactMarkdown from "react-markdown";
 import { API_BASE, type BatchTask, type ClarificationsResponse, type CanonicalAmbiguityItem } from "@/lib/api";
 import type { useJDBatch } from "@/hooks/useJDBatch";
+import SpecificationMarkdown from "./SpecificationMarkdown";
 import styles from "./BatchUploadSection.module.css";
 
 type BatchHook = ReturnType<typeof useJDBatch>;
@@ -375,7 +375,7 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
                       <p className={styles.statusMessage}>Enrichment is unavailable; showing the deterministic baseline specification.</p>
                     )}
                     <div className={styles.markdownBody}>
-                      <ReactMarkdown>{markdown}</ReactMarkdown>
+                      <SpecificationMarkdown markdown={markdown} />
                     </div>
                   </section>
                 )}

@@ -1,5 +1,37 @@
 .jdInputSection { display: block; }
 
+/* ── Single / Multi JD mode toggle ───────────────────────────────── */
+.modeToggle {
+  display: flex;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.modeBtn {
+  padding: 4px 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-soft, #475467);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.modeBtn:hover {
+  background: var(--surface-muted, #f1f3f8);
+}
+
+.modeBtnActive {
+  background: var(--primary, #5b5ce2);
+  color: #fff;
+}
+
+.modeBtnActive:hover {
+  background: var(--primary-strong, #4b4dcc);
+}
+
 .batchSelection {
   margin-top: 10px;
   padding: 11px 12px;

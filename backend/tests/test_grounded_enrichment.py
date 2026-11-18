@@ -256,6 +256,7 @@ def test_markdown_rendering_with_enrichment_and_roundtrip():
 
     # 1. Baseline rendering without enrichment
     baseline_md = render_markdown(spec)
+    assert "🟩" not in baseline_md
     assert "[AI Guidance — Evaluator Aid]" not in baseline_md
     assert "## 2. Requirements" in baseline_md
     assert "Distributed systems in Go" in baseline_md
@@ -279,7 +280,11 @@ def test_markdown_rendering_with_enrichment_and_roundtrip():
     )
 
     enriched_md = render_markdown(spec, enrichment_report=enrichment_report)
-    assert "[AI Guidance — Evaluator Aid]" in enriched_md
+    assert "> 🟩 **[AI Guidance — Evaluator Aid]**" in enriched_md
+    assert (
+        "> 🟩 **[AI Guidance — Evaluator Aid]**\n>\n"
+        "> 🟩 - **Concept Summary:** Go provides goroutines and channels"
+    ) in enriched_md
     assert "Go provides goroutines and channels" in enriched_md
     assert "How did you diagnose race conditions" in enriched_md
 
