@@ -1,0 +1,101 @@
+.screeningPage {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 24px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* Page header */
+.pageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pageHeaderLeft { display: flex; flex-direction: column; gap: 4px; }
+.pageTitle {
+  font-size: 1.55rem;
+  font-weight: 700;
+  color: var(--text, #111827);
+  margin: 0;
+  letter-spacing: -0.3px;
+}
+.pageSubtitle {
+  font-size: 0.85rem;
+  color: var(--text-muted, #6b7280);
+  font-weight: 500;
+}
+.pageHeaderRight { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pollingBadge {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 4px 10px;
+  border-radius: 20px;
+  animation: pulse 1.5s infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.countBadge {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #374151;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  padding: 4px 10px;
+  border-radius: 20px;
+}
+
+/* Error */
+.errorBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 10px 16px;
+  border-radius: 10px;
+}
+.errorClose {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #991b1b;
+  font-size: 1rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* Empty state */
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  gap: 16px;
+  text-align: center;
+  padding: 40px 24px;
+}
+.emptyIcon { font-size: 3rem; }
+.emptyTitle {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--text, #111827);
+  margin: 0;
+}
+.emptyDesc {
+  font-size: 0.95rem;
+  color: var(--text-muted, #6b7280);
+  max-width: 420px;
+  line-height: 1.6;
+  margin: 0;
+}

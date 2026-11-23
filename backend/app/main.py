@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as jds_router
+from app.api.screening_routes import router as screening_router
 from app.db import init_db
 
 app = FastAPI(
@@ -20,6 +21,7 @@ app.add_middleware(
 )
 
 app.include_router(jds_router)
+app.include_router(screening_router)
 
 
 @app.on_event("startup")
@@ -28,6 +30,8 @@ def on_startup() -> None:
     init_db()
     from app.services.batch_queue import jd_batch_queue
     jd_batch_queue.start()
+    from app.workers.screening_worker import screening_queue
+    screening_queue.start()
 
 
 @app.get("/health")

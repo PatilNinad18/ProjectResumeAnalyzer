@@ -5,6 +5,8 @@ from sqlalchemy.orm import sessionmaker, Session
 
 from app.config import get_settings
 from app.models.db_models import Base
+# Import screening models so their tables are registered with Base.metadata
+import app.models.screening_models  # noqa: F401
 
 settings = get_settings()
 

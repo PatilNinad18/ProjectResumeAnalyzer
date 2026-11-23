@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type FormEvent } from "react";
 import { API_BASE, type BatchTask, type ClarificationsResponse, type CanonicalAmbiguityItem } from "@/lib/api";
 import type { useJDBatch } from "@/hooks/useJDBatch";
+import ReactMarkdown from "react-markdown";
 import SpecificationMarkdown from "./SpecificationMarkdown";
 import styles from "./BatchUploadSection.module.css";
 
@@ -470,7 +471,49 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
                       </div>
                     )}
                     <div className={styles.markdownBody}>
-                      <ReactMarkdown>{markdown}</ReactMarkdown>
+                      {isDiffActive && showDiffHighlights && markdownDiff ? (
+                        <div style={{ lineHeight: 1.7 }}>
+                          {markdownDiff.map((seg, idx) => (
+                            <div
+                              key={idx}
+                              style={
+                                seg.changed
+                                  ? {
+                                      background: "rgba(16, 185, 129, 0.10)",
+                                      borderLeft: "3px solid #10b981",
+                                      paddingLeft: "10px",
+                                      marginLeft: "-10px",
+                                      borderRadius: "0 4px 4px 0",
+                                      position: "relative",
+                                    }
+                                  : {}
+                              }
+                            >
+                              {seg.changed && (
+                                <span
+                                  style={{
+                                    position: "absolute",
+                                    right: "8px",
+                                    top: "2px",
+                                    fontSize: "0.65rem",
+                                    fontWeight: 700,
+                                    color: "#059669",
+                                    background: "#d1fae5",
+                                    padding: "1px 5px",
+                                    borderRadius: "3px",
+                                    letterSpacing: "0.02em",
+                                  }}
+                                >
+                                  ✦ UPDATED
+                                </span>
+                              )}
+                              <SpecificationMarkdown markdown={seg.text || " "} />
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <SpecificationMarkdown markdown={markdown} />
+                      )}
                     </div>
                   </section>
                 )}

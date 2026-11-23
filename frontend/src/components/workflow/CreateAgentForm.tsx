@@ -11,7 +11,9 @@ type CreateAgentFormProps = Pick<
   | "isCreatingAgent"
   | "createAgentError"
   | "handleCreateAgent"
->;
+> & {
+  onNavigateToScreening?: () => void;
+};
 
 export default function CreateAgentForm({
   isStep3Done,
@@ -22,6 +24,7 @@ export default function CreateAgentForm({
   isCreatingAgent,
   createAgentError,
   handleCreateAgent,
+  onNavigateToScreening,
 }: CreateAgentFormProps) {
   return (
     <>
@@ -35,11 +38,11 @@ export default function CreateAgentForm({
           {createdAgentSuccess && <div className="alert-success">✓ {createdAgentSuccess}</div>}
           {createAgentError && <div className="alert-error">{createAgentError}</div>}
 
-          <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+          <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
             <input
               type="text"
               className="input-text"
-              style={{ flex: 1 }}
+              style={{ flex: 1, minWidth: "220px" }}
               placeholder="Agent Name (e.g. Senior Backend Screener)"
               value={agentNameInput}
               onChange={(e) => setAgentNameInput(e.target.value)}
@@ -47,6 +50,25 @@ export default function CreateAgentForm({
             <button className="btn-primary" onClick={handleCreateAgent} disabled={isCreatingAgent}>
               {isCreatingAgent ? "Launching..." : "✨ Launch the agent"}
             </button>
+            {onNavigateToScreening && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={onNavigateToScreening}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  background: "#f0fdf4",
+                  borderColor: "#bbf7d0",
+                  color: "#166534",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                🚀 Screen Resumes with this Spec
+              </button>
+            )}
           </div>
         </div>
       ) : isStep3Done ? (

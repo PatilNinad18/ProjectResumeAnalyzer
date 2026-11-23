@@ -71,3 +71,5 @@ outputs/**/*.json
 samples/
 sample/
 sample_jds/
+
+data/

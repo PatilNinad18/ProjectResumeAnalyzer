@@ -653,3 +653,6 @@ export async function cleanupTestAgentsApi(dryRun: boolean = false): Promise<{
     method: "POST",
   });
 }
+
+// Re-export all screening agent types and API methods
+export * from "./screening_api";

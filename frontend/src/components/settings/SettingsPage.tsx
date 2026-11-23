@@ -7,7 +7,7 @@ import AgentEditor from "./AgentEditor";
 export interface SettingsPageProps {
   deleteSuccessMsg: string | null;
   agents: CreatedAgent[];
-  setActiveTab: React.Dispatch<React.SetStateAction<"workflow" | "chat" | "settings">>;
+  setActiveTab: React.Dispatch<React.SetStateAction<"workflow" | "screening" | "chat" | "settings">>;
   selectedSettingAgentId: string | null;
   setSelectedSettingAgentId: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedAgentId: React.Dispatch<React.SetStateAction<string>>;

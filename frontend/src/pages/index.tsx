@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useState } from "react";
 import AppHeader from "@/components/layout/AppHeader";
@@ -7,6 +7,7 @@ import WorkflowPage from "@/components/workflow/WorkflowPage";
 import ChatPage from "@/components/chat/ChatPage";
 import SettingsPage from "@/components/settings/SettingsPage";
 import AgentDeleteDialog from "@/components/settings/AgentDeleteDialog";
+import ScreeningPage from "@/components/screening/ScreeningPage";
 import { useChat } from "@/hooks/useChat";
 import { useJDWorkflow } from "@/hooks/useJDWorkflow";
 import { useJDBatch } from "@/hooks/useJDBatch";
@@ -16,7 +17,7 @@ import type { CompanyDetails, CreatedAgent, BatchTask } from "@/lib/api";
 
 export default function Home() {
   // Navigation
-  const [activeTab, setActiveTab] = useState<"workflow" | "chat" | "settings">("workflow");
+  const [activeTab, setActiveTab] = useState<"workflow" | "screening" | "chat" | "settings">("workflow");
 
   const [agents, setAgents] = useState<CreatedAgent[]>([]);
   const [agentNameInput, setAgentNameInput] = useState("");
@@ -182,6 +183,7 @@ export default function Home() {
     isCreatingAgent,
     createAgentError,
     handleCreateAgent,
+    onNavigateToScreening: () => setActiveTab("screening"),
   };
 
   const chatPageProps = {
@@ -257,6 +259,12 @@ export default function Home() {
           {/* TAB 3: AGENT SETTINGS & CONTEXT REGENERATION                              */}
           {/* ========================================================================= */}
           {activeTab === "settings" && <SettingsPage {...settingsPageProps} />}
+          {activeTab === "screening" && (
+            <ScreeningPage
+              jdId={jdId ?? undefined}
+              jdTitle={jobTitle ?? undefined}
+            />
+          )}
           {/* Delete Confirmation Modal */}
           <AgentDeleteDialog {...deleteDialogProps} />
         </main>

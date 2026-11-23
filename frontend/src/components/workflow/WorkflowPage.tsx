@@ -89,6 +89,7 @@ export interface WorkflowPageProps {
   isCreatingAgent: boolean;
   createAgentError: string | null;
   handleCreateAgent: () => Promise<void>;
+  onNavigateToScreening?: () => void;
 }
 
 export default function WorkflowPage({
@@ -169,8 +170,10 @@ export default function WorkflowPage({
     isCreatingAgent,
     createAgentError,
     handleCreateAgent,
+    onNavigateToScreening,
 }: WorkflowPageProps) {
   const sharedProps = {
+    onNavigateToScreening,
     handleLaunchBatchAgent,
     isStep1Done,
     isStep2Done,

@@ -12,7 +12,7 @@ interface ChatPageProps {
   markdown: string | null;
   agents: CreatedAgent[];
   handleClearChatHistory: () => void;
-  setActiveTab: React.Dispatch<React.SetStateAction<"workflow" | "chat" | "settings">>;
+  setActiveTab: React.Dispatch<React.SetStateAction<"workflow" | "screening" | "chat" | "settings">>;
   hasReadyContext: boolean;
   currentChatMessages: { id: string; sender: "user" | "assistant"; text: string; }[];
   isChatLoading: boolean;

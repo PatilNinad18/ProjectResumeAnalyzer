@@ -14,7 +14,7 @@ import {
 import type { CompanyDetails, CreatedAgent, ProcessingStatus } from "@/lib/api";
 import { statusConfig } from "@/lib/ui";
 
-type Tab = "workflow" | "chat" | "settings";
+type Tab = "workflow" | "screening" | "chat" | "settings";
 type ChatHistories = Record<string, Array<{ id: string; sender: "user" | "assistant"; text: string }>>;
 
 interface UseAgentsOptions {
