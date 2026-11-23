@@ -12,33 +12,63 @@
 
 ## 📌 Executive Overview
 
-**ProjectResumeAnalyzer** is an intelligent, privacy-first recruiting intelligence agent. It ingests complex, unstructured Job Descriptions (JDs) and transforms them into strict, canonical **Candidate Evaluation Specifications** ready for automated applicant screening and evaluation.
+**ProjectResumeAnalyzer** is an intelligent, privacy-first recruiting intelligence platform. It provides a complete, end-to-end evaluation pipeline across two tightly integrated stages:
 
-Unlike conventional AI tools that blindly feed raw text to cloud APIs, ProjectResumeAnalyzer employs a **dual-pipeline, evidence-grounded architecture**:
-- **Zero Hallucination Risk:** Critical constraints (salary, location, must-have skills, visa requirements) are extracted deterministically from explicit source text.
+1. **Stage 1 — Job Description Understanding Agent:** Ingests complex, unstructured JDs (PDF, DOCX, TXT) and transforms them into strict, canonical **Job Evaluation Specifications (Spec v2)** through deterministic extraction, local Hybrid RAG, and optional Ollama LLM enrichment.
+2. **Stage 2 — Resume Screening Agent:** Ingests batches of candidate resumes and conducts **grounded, evidence-backed evaluation** against the finalized Job Specification—extracting verbatim quotes, calculating verified job/internship tenure, ranking candidates by match tier, and synthesizing tailored interview questions.
+
+Unlike conventional AI tools that blindly feed raw text to cloud APIs or hallucinate qualifications, ProjectResumeAnalyzer employs a **dual-pipeline, evidence-grounded architecture**:
+- **Zero Hallucination Risk:** Critical constraints (salary, location, must-have skills, tenure) and evaluation verdicts are strictly grounded in explicit source text with verbatim quotes.
 - **Privacy & Offline Independence:** Operates completely on your local machine using local RAG and optional Ollama inference—zero hiring data ever leaves your workstation.
+- **Standardized & Fair Scoring:** Dynamic weight normalization with zero-criteria safety and clear evidence statuses (`MET`, `PARTIALLY_MET`, `NOT_EVIDENCED`).
 
 ---
 
 ## ⚡ How It Works (At a Glance)
 
 ```text
- Raw Job Description          Hybrid Intelligence Engine              Standardized Outputs
- (PDF, DOCX, TXT)
-┌────────────────────┐       ┌────────────────────────────────┐       ┌────────────────────────┐
-│ • Responsibilities │ ───▶ │ 1. Deterministic Extraction   │ ───▶ │  job_specification.md   │
-│ • Requirements     │       │    (EKG + Heuristics + Rules)  │       │  (Human-Readable Spec) │
-│ • Constraints      │       │ 2. Local Hybrid RAG (BM25+TF)  │       ├────────────────────────┤
-│ • Ambiguities      │       │ 3. Offline LLM Enrichment      │       │  job_specification.json│
-└────────────────────┘       │    (Optional Ollama / Qwen3)   │       │  (Canonical Schema)    │
-                             └────────────────────────────────┘       └────────────────────────┘
+ STAGE 1: JD UNDERSTANDING AGENT              STAGE 2: RESUME SCREENING AGENT
+ 
+ Raw Job Description                         Candidate Resumes (Batch)
+ (PDF, DOCX, TXT)                            (PDF, DOCX, TXT)
+        │                                           │
+        ▼                                           ▼
+ ┌───────────────────────────────┐           ┌───────────────────────────────┐
+ │ • Deterministic EKG Parser    │           │ • Deterministic Profiler      │
+ │ • Local Hybrid RAG (BM25+TF)  │           │   (Contact, Skills, Education)│
+ │ • Offline LLM Enrichment      │           │ • Verified Tenure Calculation │
+ └──────────────┬────────────────┘           │   (Jobs/Internships Only)     │
+                │                            └──────────────┬────────────────┘
+                ▼                                           │
+  Canonical Specification v2                                │
+  (JSON Schema + Structured Markdown)                       │
+                │                                           │
+                └───────────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                      ┌───────────────────────────────┐
+                      │ Grounded Screening Evaluator  │
+                      │ • Verbatim Quote Extraction   │
+                      │ • Dynamic Weighted Scoring    │
+                      │ • Strict Must-Have Guardrails │
+                      │ • Interview Questions & Gaps  │
+                      └──────────────┬────────────────┘
+                                     │
+                                     ▼
+                      ┌───────────────────────────────┐
+                      │ Ranked Leaderboard & Drawer   │
+                      │ 🟢 Strong  🟡 Potential  🔴 No │
+                      └───────────────────────────────┘
 ```
 
 | Phase | What Happens | Key Benefit |
 |---|---|---|
-| **1. Parse & Match** | Cleans text, segments sections, and matches domain terms against an Entity Knowledge Graph (EKG). | High-speed, 100% deterministic baseline requiring zero GPU or cloud API. |
-| **2. Contextualize** | Injects domain-specific evaluation standards via built-in BM25 + TF-IDF Reciprocal Rank Fusion (RRF). | Grounded interpretation without semantic drift or invented requirements. |
-| **3. Enrich & Standardize** | *(Optional)* Uses local Qwen3 4B to generate 3-tier evidence rules (Strong / Moderate / Weak). | Produces synchronized JSON schemas and structured Markdown for downstream candidate evaluation. |
+| **1. Parse & Match (JD)** | Cleans text, segments sections, and matches domain terms against an Entity Knowledge Graph (EKG). | High-speed, 100% deterministic baseline requiring zero GPU or cloud API. |
+| **2. Contextualize (JD)** | Injects domain-specific evaluation standards via built-in BM25 + TF-IDF Reciprocal Rank Fusion (RRF). | Grounded interpretation without semantic drift or invented requirements. |
+| **3. Enrich & Standardize (JD)** | *(Optional)* Uses local Qwen3 4B to generate 3-tier evidence rules (Strong / Moderate / Weak). | Produces synchronized Spec v2 JSON schema and structured Markdown. |
+| **4. Profile & Extract (Resumes)** | Extracts candidate contact info, technical skills, education, and verified job/internship tenure. | Prevents academic degrees from inflating career experience (freshers evaluate to 0.0y). |
+| **5. Grounded Evaluation (Screening)** | Evaluates candidate text against Spec v2 criteria; extracts verbatim quotes for every verdict. | 100% grounded scoring (`MET`, `PARTIALLY_MET`, `NOT_EVIDENCED`) with zero hallucination. |
+| **6. Rank & Synthesize** | Computes weighted match score, assigns match tier, flags anomalies, and generates interview questions. | Recruiter-ready leaderboard with deep-dive evidence drawer. |
 
 ---
 
@@ -657,50 +687,170 @@ Users can switch between analyzed JDs without mixing their contexts.
 
 ---
 
-## 14. API
+## 14. Resume Screening Agent (Grounded Candidate Evaluation)
 
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/jds` | List JDs |
-| POST | `/api/jds` | Create/upload JD |
-| GET | `/api/jds/{jd_id}` | Get JD metadata |
-| POST | `/api/jds/{jd_id}/analyze` | Run JD analysis |
-| GET | `/api/jds/{jd_id}/analysis` | Get analysis status/result |
-| GET | `/api/jds/{jd_id}/markdown` | Get generated Markdown |
-| GET | `/api/jds/{jd_id}/json` | Get canonical JSON |
-| POST | `/api/jds/{jd_id}/markdown-to-json` | Parse edited Markdown |
-| POST | `/api/jds/{jd_id}/json-to-markdown` | Render Markdown |
-| GET | `/api/jds/{jd_id}/versions` | Get specification versions |
-| POST | `/api/jds/{jd_id}/chat` | Chat with a specific JD |
-| POST | `/api/chat` | Chat with supplied Markdown context |
+The **Resume Screening Agent** executes Stage 2 of the recruiting intelligence pipeline. Once a Job Description has been finalized into a **Job Evaluation Specification (Spec v2)**, candidate resumes can be uploaded in bulk to undergo automated, evidence-grounded evaluation.
+
+```text
+Candidate Resumes (PDF / DOCX / TXT)
+                │
+                ▼
+┌──────────────────────────────────────────────┐
+│ 1. Deterministic Resume Profiler             │
+│    • Contact details (email, phone, links)   │
+│    • Skills & education parsing              │
+│    • Work history filtering (jobs/interns)   │
+│    • Strict tenure calculation (0.0y freshers│
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│ 2. Grounded Screening Evaluator              │
+│    • Evaluates against Spec v2 canonical JSON│
+│    • Verbatim quote extraction from resume   │
+│    • Standardized verdicts:                  │
+│      MET | PARTIALLY_MET | NOT_EVIDENCED     │
+│    • Dynamic weight normalization (70/30)    │
+│    • Hard must-have guardrails               │
+│    • Tailored interview question synthesis   │
+│    • Anomaly & gap detection                 │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│ 3. Asynchronous Worker & DB State Recovery   │
+│    • Background worker with SQLite isolation │
+│    • Auto-recovery of queued tasks on reboot │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│ 4. Interactive Screening Dashboard           │
+│    • Ranked candidate leaderboard            │
+│    • Tier filters (Strong, Potential, Not Fit│
+│    • Verbatim evidence deep-dive drawer      │
+│    • One-click candidate deletion & retry    │
+└──────────────────────────────────────────────┘
+```
+
+### Key Screening Capabilities
+
+1. **Deterministic Profiling & Verified Tenure:**
+   - Evaluates candidate text to extract names, emails, phone numbers, and professional links (LinkedIn, GitHub).
+   - Distinguishes actual employment history from academic degrees and extracurricular projects.
+   - **Fresher Protection:** Degree dates (e.g. "B.Tech 2021–2025") are strictly filtered out so freshers evaluate accurately to `0.0y` rather than falsely inflating tenure. Internships are captured and measured accurately.
+
+2. **100% Grounded Evidence (Zero Hallucination):**
+   - Every evaluated requirement must be corroborated by a verbatim citation directly from the resume text.
+   - If an item is not found, it is marked `NOT_EVIDENCED` rather than penalizing or inventing experience.
+
+3. **Standardized Evaluation Statuses:**
+   - `MET` (1.0 weight): Strong, direct evidence found in candidate's experience or projects.
+   - `PARTIALLY_MET` (0.5 weight): Indirect or related evidence (e.g. academic coursework, hobby project).
+   - `NOT_EVIDENCED` (0.0 weight): No evidence present in the submitted document.
+
+4. **Dynamic Weighted Scoring:**
+   - Must-have requirements carry 70% weight; preferred requirements carry 30% weight.
+   - **Zero-Criteria Safety:** Automatically shifts weight dynamically if a JD specifies zero must-haves or zero preferred skills, eliminating division-by-zero risks.
+
+5. **Hard Tier Guardrails:**
+   - **Strong Match (`STRONG_MATCH`):** Overall score $\ge 75\%$ AND all must-have criteria are `MET` or `PARTIALLY_MET`.
+   - **Potential Match (`POTENTIAL_MATCH`):** Overall score between $50\%$ and $74\%$.  
+     *Guardrail:* Any candidate with an unevidenced must-have requirement is automatically capped at `POTENTIAL_MATCH` regardless of high score on preferred skills.
+   - **Not a Fit (`NOT_A_FIT`):** Overall score $< 50\%$.
+
+6. **Automated Interview Question Synthesis:**
+   - Dynamically crafts technical and behavioral interview questions targeted specifically at the candidate's `PARTIALLY_MET` and `NOT_EVIDENCED` criteria.
+
+7. **Asynchronous Background Processing:**
+   - Resumes process in the background without blocking the UI.
+   - Worker features active database state recovery to gracefully resume interrupted or queued tasks upon server restarts.
 
 ---
 
-## 15. Repository Structure
+## 15. API
+
+### Job Description Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/jds` | List all JDs |
+| POST | `/api/jds` | Create/upload a new JD |
+| GET | `/api/jds/{jd_id}` | Get JD metadata |
+| POST | `/api/jds/{jd_id}/analyze` | Run JD analysis pipeline |
+| GET | `/api/jds/{jd_id}/analysis` | Get JD analysis status and results |
+| GET | `/api/jds/{jd_id}/markdown` | Get generated Job Specification Markdown |
+| GET | `/api/jds/{jd_id}/json` | Get canonical Spec v2 JSON |
+| POST | `/api/jds/{jd_id}/markdown-to-json` | Parse edited Markdown back to canonical schema |
+| POST | `/api/jds/{jd_id}/json-to-markdown` | Render canonical schema to Markdown |
+| GET | `/api/jds/{jd_id}/versions` | Get specification audit versions |
+| POST | `/api/jds/{jd_id}/chat` | Chat with a specific JD using RAG + LLM |
+| POST | `/api/chat` | Chat with supplied Markdown context |
+
+### Resume Screening Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/jds/{jd_id}/resumes` | Upload candidate resume files (PDF, DOCX, TXT) |
+| POST | `/api/jds/{jd_id}/screen` | Trigger asynchronous grounded screening for resumes |
+| GET | `/api/jds/{jd_id}/resumes` | List candidates with scores, tiers, and statuses |
+| GET | `/api/jds/{jd_id}/resumes/{resume_id}` | Get full candidate evaluation report & verbatim quotes |
+| DELETE | `/api/jds/{jd_id}/resumes/{resume_id}` | Delete a candidate resume and its evaluation records |
+
+---
+
+## 16. Repository Structure
 
 ```text
 ProjectResumeAnalyzer/
 ├── backend/
 │   ├── app/
-│   │   ├── schemas/
-│   │   │   ├── canonical.py
-│   │   │   └── rag_schemas.py
-│   │   ├── services/
-│   │   │   ├── agent.py
-│   │   │   ├── prompt.py
-│   │   │   ├── llm_service.py
-│   │   │   ├── markdown_renderer.py
-│   │   │   ├── json_serializer.py
-│   │   │   ├── markdown_to_json.py
-│   │   │   ├── validation.py
-│   │   │   └── rag/
-│   │   ├── models/
-│   │   ├── workers/
 │   │   ├── api/
-│   │   └── main.py
+│   │   │   ├── routes.py                 # Core JD REST routes
+│   │   │   └── screening_routes.py       # Candidate resume screening REST routes
+│   │   ├── models/
+│   │   │   ├── db_models.py              # JD database tables
+│   │   │   └── screening_models.py       # Candidate resume & evaluation tables
+│   │   ├── schemas/
+│   │   │   ├── canonical.py              # Spec v2 canonical schemas
+│   │   │   ├── rag_schemas.py            # RAG domain schemas
+│   │   │   └── screening.py              # Candidate screening Pydantic models
+│   │   ├── services/
+│   │   │   ├── agent.py                  # JD understanding coordinator
+│   │   │   ├── llm_service.py            # Provider abstraction (Ollama/Gemini/Claude)
+│   │   │   ├── markdown_renderer.py      # Spec v2 Markdown generation
+│   │   │   ├── rag/                      # BM25 + TF-IDF Hybrid RAG
+│   │   │   └── resume/                   # Resume Screening Services
+│   │   │       ├── profiler.py           # Deterministic contact & tenure parser
+│   │   │       └── evaluator.py          # Grounded candidate evaluation engine
+│   │   ├── workers/
+│   │   │   ├── worker.py                 # JD analysis background worker
+│   │   │   └── screening_worker.py       # Resume screening queue & worker
+│   │   ├── db.py                         # SQLAlchemy database initialization
+│   │   └── main.py                       # FastAPI application entrypoint
 │   └── tests/
+│       ├── test_pipeline.py              # Deterministic JD extraction tests
+│       ├── test_rag.py                   # Hybrid RAG retrieval tests
+│       ├── test_clarification_lifecycle.py
+│       └── test_resume_screening.py      # Grounded screening & profiler tests
 ├── frontend/
 │   ├── src/
+│   │   ├── components/
+│   │   │   ├── workflow/                 # JD upload, clarification, & spec review
+│   │   │   ├── screening/                # Candidate screening UI
+│   │   │   │   ├── ScreeningPage.tsx     # Screening coordinator
+│   │   │   │   ├── ResumeUploadZone.tsx  # Multi-file drag & drop upload
+│   │   │   │   ├── CandidateLeaderboard.tsx # Ranked candidate table
+│   │   │   │   └── CandidateDetailDrawer.tsx # Verbatim quote deep-dive drawer
+│   │   │   ├── chat/                     # Interactive JD chat assistant
+│   │   │   └── layout/                   # Top navigation tabs & headers
+│   │   ├── hooks/
+│   │   │   ├── useAgents.ts              # JD analysis workflow state
+│   │   │   └── useCandidateScreening.ts  # Screening state, polling & filters
+│   │   ├── lib/
+│   │   │   ├── api.ts                    # JD API client
+│   │   │   └── screening_api.ts          # Screening API client
+│   │   └── pages/                        # Next.js pages
 │   └── package.json
 └── samples/
     ├── job_specification.md
@@ -709,13 +859,19 @@ ProjectResumeAnalyzer/
 
 ---
 
-## 16. Testing
+## 17. Testing
 
 Run all backend tests:
 
 ```bash
 cd backend
 python -m pytest -v
+```
+
+Resume screening tests:
+
+```bash
+python -m pytest tests/test_resume_screening.py -v
 ```
 
 RAG tests:
@@ -728,6 +884,12 @@ Pipeline tests:
 
 ```bash
 python -m pytest tests/test_pipeline.py -v
+```
+
+Clarification lifecycle tests:
+
+```bash
+python -m pytest tests/test_clarification_lifecycle.py tests/test_batch_clarifications.py -v
 ```
 
 Before committing JD pipeline changes, verify:
@@ -743,7 +905,7 @@ Before committing JD pipeline changes, verify:
 
 ---
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 ### Ollama is not running
 
@@ -833,51 +995,52 @@ Inspect the Pydantic validation error first. Do not increase the output limit au
 
 ---
 
-## 18. Offline Data Flow
+## 19. Offline Data Flow
 
 ```text
-             CLIENT MACHINE
-                  |
-                  v
-             Raw JD
-                  |
-                  v
-          Local FastAPI Backend
-             /          \
-            /            \
-      Local RAG         Ollama
-    (Deterministic)    Qwen3 4B
-            \            /
-             \          /
-                  v
-        Canonical Pydantic Spec
-             /          \
-            v             v
-     Markdown             JSON
-            \             /
-             \           /
-                JD Chat
+                     LOCAL MACHINE (100% PRIVATE)
+                     
+       Job Description (PDF/DOCX/TXT)      Candidate Resumes (PDF/DOCX/TXT)
+                     │                                    │
+                     ▼                                    ▼
+           Deterministic EKG + RAG               Resume Profiler Engine
+           (Optional Ollama Enrich)              (Verified Tenure & Skills)
+                     │                                    │
+                     ▼                                    │
+           Canonical Spec v2 ─────────────────────────────┘
+          (JSON + Structured MD)
+                     │
+                     ▼
+           Grounded Screening Evaluator
+           • Verbatim Quote Extraction
+           • 70/30 Weighted Scoring & Guardrails
+           • Tailored Interview Question Synthesis
+                     │
+                     ▼
+           Interactive Next.js Web UI
+           • JD Editor & Spec Inspector
+           • Candidate Leaderboard & Deep Dive Drawer
+           • Real-time Screening Polling
 ```
 
-No external LLM API is required in Ollama mode.
+No external LLM API or cloud service is required. All hiring data and resume texts remain on your local machine.
 
 ---
 
-## 19. Key Design Principles
+## 20. Key Design Principles
 
-- **JD is authoritative:** The model must not invent requirements absent from the JD.
-- **RAG is supporting knowledge:** Retrieved knowledge cannot override explicit JD facts.
-- **Canonical schema is the source of truth:** JSON and Markdown are generated from the same validated object.
-- **Offline-first inference:** Ollama + Qwen3 4B keeps LLM inference local.
-- **Multi-JD isolation:** Each JD has independent analysis and chat context.
-- **Traceability:** Requirements retain source information where supported by the schema.
-- **Fail-safe RAG:** RAG failures should not prevent core JD extraction.
-- **Validation before output:** LLM output is validated against the canonical Pydantic schema.
-- **Rules for the mechanical, LLM for the semantic:** Deterministic code handles deduplication and formatting; the LLM handles understanding and extraction.
+- **JD & Resumes are authoritative:** The system never invents facts absent from the raw documents.
+- **Verbatim Grounding:** Every candidate criterion match must cite an exact quote directly from the candidate's resume.
+- **Fair & Standardized Statuses:** `MET`, `PARTIALLY_MET`, and `NOT_EVIDENCED` are applied consistently. Missing skills are treated as unevidenced rather than assumed failures.
+- **Fresher Protection:** Work history parsing distinguishes degrees and courses from actual job and internship tenures.
+- **Canonical schema is the source of truth:** Downstream screening strictly compares against the validated Spec v2 canonical schema.
+- **Offline-first & Privacy-first:** Complete core evaluation runs locally without internet connectivity or data leakage.
+- **Multi-JD isolation:** Each JD maintains its own independent analysis, specifications, and candidate pools.
+- **Fail-safe resilience:** Division-by-zero protection for zero-criteria JDs and automatic database recovery for queued screening tasks upon restart.
 
 ---
 
-## 20. Quick Reference
+## 21. Quick Reference
 
 ### Summary of Commands
 
@@ -887,6 +1050,8 @@ No external LLM API is required in Ollama mode.
 | **Start Application** | `run.bat` | Terminal 1: `cd backend && python -m uvicorn app.main:app --reload --port 8000`<br>Terminal 2: `cd frontend && npm run dev` |
 | **Stop Application** | `stop.bat` | Press `Ctrl+C` in both terminal windows |
 | **Optional LLM Setup** | `ollama run qwen3:4b` | `ollama serve` & `ollama pull qwen3:4b` |
+| **Run All Tests** | `pytest` | `cd backend && python -m pytest -v` |
+| **Run Screening Tests** | `pytest screening` | `cd backend && python -m pytest tests/test_resume_screening.py -v` |
 
 ### Key URLs
 
