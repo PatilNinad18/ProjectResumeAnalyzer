@@ -148,7 +148,7 @@ def test_evaluator_scoring_edge_case_zero_preferred():
     score, tier, breakdown = _compute_score(must_evals, [], 0.0, 0.0)
     # Average of must-haves is (1.0 + 0.5) / 2 = 0.75 -> 75%
     assert score == 75
-    assert tier == "POTENTIAL_MATCH"
+    assert tier == "STRONG_MATCH"   # 75 >= STRONG_MATCH_THRESHOLD(75), 0 NOT_EVIDENCED
     assert breakdown["active_weight_total"] == 0.70
 
 

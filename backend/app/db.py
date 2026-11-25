@@ -46,6 +46,46 @@ def _migrate_sqlite() -> None:
             with engine.begin() as conn:
                 if "is_test" not in agent_cols:
                     conn.execute(text("ALTER TABLE agents ADD COLUMN is_test BOOLEAN DEFAULT 0"))
+
+        if "candidate_resumes" in inspector.get_table_names():
+            resume_cols = {col["name"] for col in inspector.get_columns("candidate_resumes")}
+            with engine.begin() as conn:
+                if "file_hash" not in resume_cols:
+                    conn.execute(text("ALTER TABLE candidate_resumes ADD COLUMN file_hash VARCHAR(64)"))
+                if "parse_quality_check" not in resume_cols:
+                    conn.execute(text("ALTER TABLE candidate_resumes ADD COLUMN parse_quality_check JSON"))
+
+        if "candidate_evaluations" in inspector.get_table_names():
+            eval_cols = {col["name"] for col in inspector.get_columns("candidate_evaluations")}
+            with engine.begin() as conn:
+                if "spec_outdated" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN spec_outdated BOOLEAN DEFAULT 0"))
+                if "evaluator_engine" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN evaluator_engine VARCHAR(64) DEFAULT 'deterministic_v1'"))
+                if "model_name" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN model_name VARCHAR(128)"))
+                if "model_version" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN model_version VARCHAR(64)"))
+                if "prompt_version" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN prompt_version VARCHAR(32) DEFAULT 'eval_v2.1'"))
+                if "temperature" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN temperature FLOAT DEFAULT 0.0"))
+                if "seed" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN seed INTEGER DEFAULT 42"))
+                if "quote_verification_pass" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN quote_verification_pass BOOLEAN"))
+                if "timeline_observations" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN timeline_observations JSON"))
+                if "recruiter_override_tier" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN recruiter_override_tier VARCHAR(32)"))
+                if "recruiter_override_score" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN recruiter_override_score INTEGER"))
+                if "override_reason" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN override_reason TEXT"))
+                if "overridden_by" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN overridden_by VARCHAR(255)"))
+                if "overridden_at" not in eval_cols:
+                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN overridden_at DATETIME"))
     except Exception as exc:
         # Ignore or log migration failure (e.g. non-SQLite or already exists)
         pass

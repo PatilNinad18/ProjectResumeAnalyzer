@@ -87,7 +87,7 @@ export function useCandidateScreening(): UseCandidateScreeningReturn {
       // Stop polling when all candidates are in a terminal state
       setCandidates((prev) => {
         const allDone = prev.length > 0 && prev.every(
-          (c) => c.status === "COMPLETED" || c.status === "FAILED"
+          (c) => c.status === "COMPLETED" || c.status === "FAILED" || c.status === "PARSE_FAILED"
         );
         if (allDone && pollTimerRef.current) {
           clearInterval(pollTimerRef.current);
