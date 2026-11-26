@@ -1,6 +1,6 @@
 """
-Resume Profiler (Phase 2)
-=========================
+Resume Profiler (Phase 2 — v2.1)
+==================================
 Extracts structured candidate profile information from plain-text resume content.
 Works entirely with deterministic regex — no Ollama calls, no external dependencies.
 
@@ -9,11 +9,17 @@ Extracted fields:
   - email
   - phone
   - work_history (list of WorkEntry with company, title, start/end dates)
-  - total_experience_years (sum of deduped date ranges)
+  - total_experience_years (sum of deduped, interval-unioned job+internship date ranges)
   - skills (flat list of tech keywords)
   - education (list of EducationEntry)
   - current_or_last_title
   - companies (list of company name strings)
+
+v2.1 changes:
+  - Interval union for overlapping jobs (concurrent roles don't double-count years)
+  - Explicit handling of "Present" / "Current" → today's date
+  - parse_quality_check integrated via evaluator.check_parse_quality()
+  - file_hash (SHA-256) helper for duplicate detection
 
 Design constraints:
   - Must be deterministic and fast (< 100ms per resume).
@@ -23,9 +29,19 @@ Design constraints:
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Public helpers (callable by screening_routes / worker)
+# ---------------------------------------------------------------------------
+
+def compute_file_hash(raw_bytes: bytes) -> str:
+    """Return the SHA-256 hex digest of raw file bytes for deduplication."""
+    return hashlib.sha256(raw_bytes).hexdigest()
+
 
 # ---------------------------------------------------------------------------
 # Regex patterns

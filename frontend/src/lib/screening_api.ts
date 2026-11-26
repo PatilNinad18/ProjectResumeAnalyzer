@@ -7,7 +7,11 @@ export const API_BASE_SCREENING = (process.env.NEXT_PUBLIC_API_URL || "http://12
 // Types
 // ---------------------------------------------------------------------------
 
+<<<<<<< HEAD
 export type ScreeningStatus = "QUEUED" | "ANALYZING" | "COMPLETED" | "FAILED" | "PARSE_FAILED" | "NEEDS_REVIEW";
+=======
+export type ScreeningStatus = "QUEUED" | "ANALYZING" | "COMPLETED" | "FAILED" | "PARSE_FAILED";
+>>>>>>> smartleaven_work/main
 export type EvaluationStatus = "MET" | "PARTIALLY_MET" | "NOT_EVIDENCED";
 export type MatchTier = "STRONG_MATCH" | "POTENTIAL_MATCH" | "NOT_A_FIT";
 
@@ -69,23 +73,42 @@ export interface CandidateProfile {
   current_or_last_title: string | null;
 }
 
+export interface EvaluatorProvenance {
+  evaluator_engine: string;
+  model_name: string | null;
+  model_version: string | null;
+  prompt_version: string;
+  temperature: number;
+  seed: number;
+}
+
 export interface CandidateEvaluationDetail {
   candidate_resume_id: string;
   job_description_id: string;
   spec_version_id: string | null;
   specification_version: number;
+  spec_outdated?: boolean;
   status: ScreeningStatus;
   review_reason: string | null;
   overall_score: number | null;
   match_tier: MatchTier | null;
+  effective_tier?: MatchTier | null;
+  provenance?: EvaluatorProvenance | null;
+  quote_verification_pass?: boolean | null;
   candidate_profile: CandidateProfile | null;
   must_haves_summary: RequirementSummary | null;
   preferred_summary: RequirementSummary | null;
   score_breakdown: ScoreBreakdown | null;
   detailed_evaluations: RequirementEvaluation[];
   validation_checkpoints: ValidationCheckpoint[];
-  red_flags: string[];
+  timeline_observations?: string[];
+  red_flags?: string[];
   tailored_interview_questions: string[];
+  recruiter_override_tier?: MatchTier | null;
+  recruiter_override_score?: number | null;
+  override_reason?: string | null;
+  overridden_by?: string | null;
+  overridden_at?: string | null;
   created_at: string | null;
   completed_at: string | null;
 }
@@ -99,13 +122,19 @@ export interface ScreeningLeaderboardItem {
   total_experience_years: number | null;
   overall_score: number | null;
   match_tier: MatchTier | null;
+  effective_tier?: MatchTier | null;
   must_haves_met: number;
   must_haves_partially_met: number;
   must_haves_total: number;
   not_evidenced_count: number;
   validation_checkpoints_count: number;
   status: ScreeningStatus;
+<<<<<<< HEAD
   review_reason: string | null;
+=======
+  parse_failed?: boolean;
+  spec_outdated?: boolean;
+>>>>>>> smartleaven_work/main
   created_at: string | null;
 }
 

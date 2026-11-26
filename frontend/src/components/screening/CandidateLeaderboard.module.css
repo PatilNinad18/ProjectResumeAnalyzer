@@ -154,3 +154,40 @@
   color: #9ca3af;
   font-size: 0.875rem;
 }
+
+/* Blind screening */
+.blindToggleBtn {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  color: #4b5563;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.blindToggleBtn:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+.blindToggleActive {
+  background: #ede9fe;
+  border-color: #c4b5fd;
+  color: #6d28d9;
+}
+.blindTag {
+  font-weight: 600;
+  color: #4b5563;
+  background: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.blindSub {
+  font-size: 0.72rem;
+  color: #9ca3af;
+  font-style: italic;
+}

@@ -9,9 +9,9 @@ interface CandidateDetailDrawerProps {
 }
 
 const TIER_META: Record<MatchTier, { label: string; cls: string; icon: string }> = {
-  STRONG_MATCH:    { label: "Strong Match",    cls: styles.tierStrong,    icon: "🟢" },
+  STRONG_MATCH: { label: "Strong Match", cls: styles.tierStrong, icon: "🟢" },
   POTENTIAL_MATCH: { label: "Potential Match", cls: styles.tierPotential, icon: "🟡" },
-  NOT_A_FIT:       { label: "Not a Fit",       cls: styles.tierNotFit,    icon: "🔴" },
+  NOT_A_FIT: { label: "Not a Fit", cls: styles.tierNotFit, icon: "🔴" },
 };
 
 function EvalStatusBadge({ status }: { status: string }) {
@@ -92,7 +92,7 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
               {candidate.overall_score !== null && <div className={styles.scoreBig}>
                 <span className={styles.scoreNum} style={{
                   color: (candidate.overall_score ?? 0) >= 80 ? "#16a34a"
-                       : (candidate.overall_score ?? 0) >= 60 ? "#d97706" : "#dc2626"
+                    : (candidate.overall_score ?? 0) >= 60 ? "#d97706" : "#dc2626"
                 }}>
                   {candidate.overall_score}%
                 </span>
@@ -186,12 +186,12 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
               </div>
             )}
 
-            {/* Red flags */}
-            {candidate.red_flags.length > 0 && (
+            {/* Timeline Observations */}
+            {((candidate.timeline_observations && candidate.timeline_observations.length > 0) || (candidate.red_flags && candidate.red_flags.length > 0)) && (
               <div className={styles.section}>
-                <span className={styles.sectionTitle}>🚩 Resume Red Flags</span>
+                <span className={styles.sectionTitle}>⏱️ Timeline Observations (Neutral Notes)</span>
                 <ul className={styles.redFlagList}>
-                  {candidate.red_flags.map((flag, i) => (
+                  {(candidate.timeline_observations || candidate.red_flags || []).map((flag, i) => (
                     <li key={i} className={styles.redFlagItem}>{flag}</li>
                   ))}
                 </ul>
@@ -207,6 +207,19 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
                     <li key={i} className={styles.iqItem}>{q}</li>
                   ))}
                 </ol>
+              </div>
+            )}
+
+            {/* Audit & Evaluator Provenance */}
+            {candidate.provenance && (
+              <div style={{ marginTop: "1rem", padding: "0.75rem", background: "#f8fafc", borderRadius: "6px", fontSize: "0.75rem", color: "#64748b", border: "1px solid #e2e8f0" }}>
+                <div>🔍 Engine: <strong>{candidate.provenance.evaluator_engine}</strong> | Prompt: <strong>{candidate.provenance.prompt_version}</strong> | Temp: <strong>{candidate.provenance.temperature}</strong> | Seed: <strong>{candidate.provenance.seed}</strong></div>
+                <div style={{ marginTop: "0.25rem" }}>🔒 Verbatim Quote Integrity: <strong style={{ color: candidate.quote_verification_pass !== false ? "#16a34a" : "#dc2626" }}>{candidate.quote_verification_pass !== false ? "✓ All Quotes Verified in Resume" : "⚠️ Unverified Quotes Detected"}</strong></div>
+                {candidate.recruiter_override_tier && (
+                  <div style={{ marginTop: "0.4rem", color: "#b45309", borderTop: "1px dashed #cbd5e1", paddingTop: "0.4rem" }}>
+                    ⭐ Recruiter Override: <strong>{candidate.recruiter_override_tier}</strong> ({candidate.recruiter_override_score}%) by <em>{candidate.overridden_by || "Recruiter"}</em> — "{candidate.override_reason}"
+                  </div>
+                )}
               </div>
             )}
 

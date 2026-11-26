@@ -1,3 +1,4 @@
+import { useState } from "react";
 import styles from "./CandidateLeaderboard.module.css";
 import type { ScreeningLeaderboardItem, MatchTier, ScreeningStatus } from "@/lib/screening_api";
 import type { SortKey, TierFilter } from "@/hooks/useCandidateScreening";
@@ -46,6 +47,7 @@ function ScoreRing({ score }: { score: number | null }) {
 
 function StatusPill({ status }: { status: ScreeningStatus }) {
   if (status === "COMPLETED") return null;
+<<<<<<< HEAD
   const map = {
     QUEUED: { label: "Queued", cls: styles.pillQueued },
     ANALYZING: { label: "Analyzing", cls: styles.pillAnalyzing },
@@ -56,6 +58,23 @@ function StatusPill({ status }: { status: ScreeningStatus }) {
   return (
     <span className={`${styles.statusPill} ${map[status].cls}`}>
       {map[status].label}
+=======
+  const map: Record<string, string> = {
+    QUEUED: styles.pillQueued,
+    ANALYZING: styles.pillAnalyzing,
+    FAILED: styles.pillFailed,
+    PARSE_FAILED: styles.pillFailed,
+  };
+  return (
+    <span className={`${styles.statusPill} ${map[status] ?? ""}`}>
+      {status === "ANALYZING"
+        ? "⟳ Analyzing"
+        : status === "QUEUED"
+        ? "Queued"
+        : status === "PARSE_FAILED"
+        ? "⚠️ Unreadable"
+        : "Failed"}
+>>>>>>> smartleaven_work/main
     </span>
   );
 }
@@ -64,6 +83,7 @@ export default function CandidateLeaderboard({
   candidates, totalCandidates, sortKey, tierFilter,
   onSortChange, onTierFilterChange, onSelectCandidate, onDeleteCandidate,
 }: CandidateLeaderboardProps) {
+  const [blindMode, setBlindMode] = useState(false);
   return (
     <div className={styles.leaderboardCard}>
       {/* Controls */}
@@ -81,6 +101,14 @@ export default function CandidateLeaderboard({
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            className={`${styles.blindToggleBtn} ${blindMode ? styles.blindToggleActive : ""}`}
+            onClick={() => setBlindMode(!blindMode)}
+            title="Toggle Blind Screening Mode to mask candidate names, emails, and filenames"
+          >
+            {blindMode ? "🙈 Blind Mode ON" : "👁️ Blind Mode OFF"}
+          </button>
         </div>
         <div className={styles.sortRow}>
           <span className={styles.sortLabel}>Sort:</span>
@@ -128,6 +156,7 @@ export default function CandidateLeaderboard({
                     <td className={styles.rank}>{c.rank != null ? `#${c.rank}` : "—"}</td>
                     <td className={styles.candidateCell}>
                       <div className={styles.candidateName}>
+<<<<<<< HEAD
                         {canOpen ? (
                           <button type="button" className={styles.candidateDetails} onClick={(e) => {
                             e.stopPropagation();
@@ -136,10 +165,23 @@ export default function CandidateLeaderboard({
                             {c.candidate_name ?? "Candidate details"}
                           </button>
                         ) : c.candidate_name ?? <em className={styles.unknown}>Unknown</em>}
+=======
+                        {blindMode ? (
+                          <span className={styles.blindTag}>Candidate #{c.rank}</span>
+                        ) : (
+                          c.candidate_name ?? <em className={styles.unknown}>Unknown</em>
+                        )}
+>>>>>>> smartleaven_work/main
                       </div>
                       <div className={styles.candidateMeta}>
-                        {c.email && <span>{c.email}</span>}
-                        <span className={styles.filename}>{c.filename}</span>
+                        {blindMode ? (
+                          <span className={styles.blindSub}>[Identity Masked for Fairness]</span>
+                        ) : (
+                          <>
+                            {c.email && <span>{c.email}</span>}
+                            <span className={styles.filename}>{c.filename}</span>
+                          </>
+                        )}
                       </div>
                       <StatusPill status={c.status} />
                     </td>

@@ -87,7 +87,11 @@ export function useCandidateScreening(): UseCandidateScreeningReturn {
       // Stop polling when all candidates are in a terminal state
       setCandidates((prev) => {
         const allDone = prev.length > 0 && prev.every(
+<<<<<<< HEAD
           (c) => c.status !== "QUEUED" && c.status !== "ANALYZING"
+=======
+          (c) => c.status === "COMPLETED" || c.status === "FAILED" || c.status === "PARSE_FAILED"
+>>>>>>> smartleaven_work/main
         );
         if (allDone && pollTimerRef.current) {
           clearInterval(pollTimerRef.current);
