@@ -20,9 +20,12 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math
 import re
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
+
+from app.services.resume.evidence import ResumeEvidence, is_assessable
 
 logger = logging.getLogger("jd_agent.evaluator")
 
@@ -37,6 +40,12 @@ WEIGHT_TENURE_BASE    = 0.10
 SCORE_MET           = 1.0
 SCORE_PARTIALLY_MET = 0.5
 SCORE_NOT_EVIDENCED = 0.0
+_STATUS_WEIGHTS = {
+    "MET": SCORE_MET,
+    "PARTIALLY_MET": SCORE_PARTIALLY_MET,
+    "NOT_EVIDENCED": SCORE_NOT_EVIDENCED,
+}
+NO_EVALUATION_CRITERIA = "NO_EVALUATION_CRITERIA_DEFINED"
 
 # Thresholds
 STRONG_MATCH_THRESHOLD    = 80
@@ -46,80 +55,6 @@ POTENTIAL_MATCH_THRESHOLD = 60
 # ---------------------------------------------------------------------------
 # Evidence extraction helpers
 # ---------------------------------------------------------------------------
-
-def _build_keyword_variants(requirement: str) -> List[str]:
-    """
-    Derive a set of search keywords from a requirement statement.
-    Splits on common separators, strips short stop words, lowercases.
-    """
-    # Extract quoted tech terms first
-    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'|`([^`]+)`', requirement)
-    keywords: List[str] = []
-    for groups in quoted:
-        kw = next(g for g in groups if g)
-        keywords.append(kw.lower())
-
-    # Also split requirement into individual significant words
-    words = re.sub(r"[^a-zA-Z0-9+#\s\-_./]", " ", requirement).split()
-    stop = {
-        "a", "an", "the", "in", "of", "for", "and", "or", "with", "to",
-        "is", "are", "has", "have", "be", "been", "been", "must", "should",
-        "experience", "knowledge", "understanding", "ability", "skills",
-        "working", "using", "demonstrate", "demonstrated", "familiarity",
-        "years", "year", "months", "strong", "good", "solid", "proven",
-    }
-    for word in words:
-        clean = word.strip("-_./").lower()
-        if len(clean) >= 3 and clean not in stop:
-            keywords.append(clean)
-
-    # Deduplicate while preserving order
-    seen: set = set()
-    result = []
-    for k in keywords:
-        if k not in seen:
-            seen.add(k)
-            result.append(k)
-    return result
-
-
-def _find_evidence_quote(requirement: str, resume_text: str) -> Optional[str]:
-    """
-    Search the resume text for a sentence containing the requirement's key terms.
-    Returns the best matching sentence (up to 200 chars) or None if nothing found.
-
-    Matching strategy:
-      1. Try multi-keyword conjunction (all significant keywords appear in one sentence).
-      2. Fall back to any sentence containing the highest-scoring keyword subset.
-    """
-    keywords = _build_keyword_variants(requirement)
-    if not keywords:
-        return None
-
-    # Split resume into sentences (simple heuristic)
-    sentences = re.split(r"(?<=[.!?])\s+|\n{2,}|\n(?=[A-Z])", resume_text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-
-    best_sentence: Optional[str] = None
-    best_score = 0
-
-    for sentence in sentences:
-        sentence_lower = sentence.lower()
-        hit_count = sum(1 for kw in keywords if kw in sentence_lower)
-        if hit_count > best_score:
-            best_score = hit_count
-            best_sentence = sentence
-
-    # Require at least 1 keyword hit for any evidence claim
-    if best_score == 0:
-        return None
-
-    # Truncate long sentences to 250 chars
-    if best_sentence and len(best_sentence) > 250:
-        best_sentence = best_sentence[:247] + "..."
-
-    return best_sentence
-
 
 def _clean_requirements(items: List[str]) -> List[str]:
     """
@@ -136,24 +71,21 @@ def _clean_requirements(items: List[str]) -> List[str]:
         "preferred qualifications", "requirements", "overview", "about the role",
         "role overview", "technical requirements", "general requirements"
     }
-    RUBRIC_PREFIXES = (
-        "working knowledge / conceptual:",
-        "equivalents acceptable:",
-        "strict:",
-        "nice-to-have:",
-        "explicitly unspecified:",
-        "clarification:",
-    )
+    RUBRIC_LABELS = {
+        "working knowledge / conceptual", "equivalents acceptable", "all listed elements required",
+        "any one element qualifies", "at least two required", "strict must-have", "preferred only",
+        "hands-on production depth", "strict", "nice-to-have", "explicitly unspecified", "clarification",
+    }
     cleaned: List[str] = []
     seen: set = set()
     for req in items:
         r = req.strip()
-        if not r or len(r) < 5:
+        if not r:
             continue
-        clean_hdr = re.sub(r"[*_#`]", "", r).strip().lower().rstrip(":")
+        clean_hdr = re.sub(r"^#+\s+|[*_\x60]", "", r).strip().lower().rstrip(":")
         if clean_hdr in JUNK_HEADERS:
             continue
-        if any(clean_hdr.startswith(p) for p in RUBRIC_PREFIXES):
+        if clean_hdr.partition(":")[0].strip() in RUBRIC_LABELS:
             continue
         # Pure tenure string e.g. "Experience: 2-4 years"
         if re.match(r"^(?:experience|tenure)\s*[:*–-]*\s*\d+.*years?$", clean_hdr):
@@ -161,99 +93,14 @@ def _clean_requirements(items: List[str]) -> List[str]:
         # Intro blurb
         if clean_hdr.startswith("we are looking for") and "experience" in clean_hdr:
             continue
-        norm_key = re.sub(r"\W+", " ", clean_hdr).strip()
+        if not is_assessable(r):
+            continue
+        norm_key = " ".join(clean_hdr.split())
         if norm_key in seen:
             continue
         seen.add(norm_key)
         cleaned.append(r)
     return cleaned
-
-
-def _classify_requirement(
-    requirement: str,
-    resume_text: str,
-) -> Tuple[str, float, Optional[str], str]:
-    """
-    Classify a single requirement as MET, PARTIALLY_MET, or NOT_EVIDENCED.
-
-    Returns:
-        (status, score_weight, evidence_quote, reasoning)
-    """
-    clean_req = re.sub(r"[*_#`]", "", requirement).strip()
-    resume_lower = resume_text.lower()
-
-    # 1. Identify primary anchor skill/topic if present (e.g. "**SQL:** ...", "**Python:** ...")
-    anchor_skill = None
-    if ":" in clean_req:
-        prefix = clean_req.split(":", 1)[0].strip()
-        if len(prefix.split()) <= 4:
-            anchor_skill = prefix.lower()
-
-    # 2. Find evidence quote
-    evidence = _find_evidence_quote(requirement, resume_text)
-    keywords = _build_keyword_variants(requirement)
-
-    if evidence is None and (not anchor_skill or anchor_skill not in resume_lower):
-        return (
-            "NOT_EVIDENCED",
-            SCORE_NOT_EVIDENCED,
-            None,
-            "No verifiable evidence or mention of this requirement found in the resume.",
-        )
-
-    # 3. Check anchor skill presence and context
-    if anchor_skill and anchor_skill in resume_lower:
-        if evidence and (anchor_skill in evidence.lower() or any(kw in evidence.lower() for kw in keywords[:3])):
-            return (
-                "MET",
-                SCORE_MET,
-                evidence,
-                f"Strong evidence found for '{anchor_skill.title()}' in candidate profile/projects.",
-            )
-        elif evidence:
-            return (
-                "MET",
-                SCORE_MET,
-                evidence,
-                f"Candidate evidences '{anchor_skill.title()}' with relevant project experience.",
-            )
-        else:
-            return (
-                "PARTIALLY_MET",
-                SCORE_PARTIALLY_MET,
-                f"Candidate lists {anchor_skill.title()} in technical competencies.",
-                f"Candidate lists '{anchor_skill.title()}' as a skill without expanded project details.",
-            )
-
-    # 4. General keyword matching
-    total_kw = len(keywords)
-    matched_kw = sum(1 for kw in keywords if kw in resume_lower)
-    coverage = matched_kw / total_kw if total_kw > 0 else 0
-
-    evidence_lower = (evidence or "").lower()
-    evidence_hits = sum(1 for kw in keywords if kw in evidence_lower)
-
-    if (coverage >= 0.4 and evidence_hits >= 2) or evidence_hits >= 3:
-        return (
-            "MET",
-            SCORE_MET,
-            evidence,
-            f"Strong evidence found with {matched_kw}/{total_kw} keywords present in resume.",
-        )
-    elif evidence or coverage >= 0.25:
-        return (
-            "PARTIALLY_MET",
-            SCORE_PARTIALLY_MET,
-            evidence,
-            f"Partial evidence found ({matched_kw}/{total_kw} keywords). Adjacent or theoretical exposure indicated.",
-        )
-    else:
-        return (
-            "NOT_EVIDENCED",
-            SCORE_NOT_EVIDENCED,
-            None,
-            "No verifiable evidence found in the resume.",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +128,15 @@ def _score_tenure(
 # Spec v2 requirement extraction
 # ---------------------------------------------------------------------------
 
+_GENERAL_TENURE = re.compile(
+    r"(?:experience\s*:\s*)?(?:(?:must have|minimum(?: of)?|at least)\s+)?"
+    r"(?:\d+(?:\.\d+)?(?:\+|\s*(?:[-–—]|to)\s*\d+(?:\.\d+)?)?\s*years?"
+    r"(?:\s+or more)?(?:\s+of)?\s*)?"
+    r"(?:(?:total|overall|professional|work)\s+)?(?:experience)?(?:\s+(?:required|minimum))?",
+    re.IGNORECASE,
+)
+
+
 def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
     List[str], List[str], Optional[float]
 ]:
@@ -288,7 +144,8 @@ def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
     Extract must-have requirements, preferred qualifications, and minimum years
     from a canonical_json Specification v2 structure.
 
-    Handles multiple known JSON shapes:
+    Handles canonical must_have_requirements, preferred_requirements, and
+    conventional_requirements.experience, plus legacy JSON shapes:
       - { must_haves: [...], preferred_qualifications: [...], experience_requirements: {...} }
       - { requirements: { must_have: [...], preferred: [...] } }
       - { sections: { requirements: {...} } }
@@ -319,6 +176,8 @@ def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
         preferred = _flatten(spec_json["preferred_qualifications"])
     if "preferred" in spec_json:
         preferred = _flatten(spec_json["preferred"])
+    if "preferred_requirements" in spec_json:
+        preferred = _flatten(spec_json["preferred_requirements"])
 
     # Shape 2: nested requirements dict
     if "requirements" in spec_json and isinstance(spec_json["requirements"], dict):
@@ -339,8 +198,33 @@ def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
                 if not preferred:
                     preferred  = _flatten(sec.get("preferred") or sec.get("preferred_qualifications") or [])
 
-    # Extract minimum years from experience_requirements
+    # Total resume tenure can satisfy only an overall experience minimum.
+    conventional = spec_json.get("conventional_requirements") or {}
+    experience = conventional.get("experience") if isinstance(conventional, dict) else None
+    tenure_descriptions = set()
+    for item in experience if isinstance(experience, list) else []:
+        if not isinstance(item, dict) or item.get("priority", "MUST_HAVE") not in ("MUST_HAVE", "MANDATORY"):
+            continue
+        if item.get("explicit_or_derived") == "derived":
+            continue
+        description = str(item.get("description") or "").strip().rstrip(".")
+        if not description or not _GENERAL_TENURE.fullmatch(description):
+            continue
+        try:
+            years = float(item.get("min_years"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(years) and years > 0:
+            min_years = max(min_years or 0.0, years)
+            tenure_descriptions.add(description.casefold())
+
+    if tenure_descriptions:
+        must_haves = [req for req in must_haves if req.strip().rstrip(".").casefold() not in tenure_descriptions]
+
+    # Legacy overall tenure fields.
     for key in ("experience_requirements", "experience", "seniority"):
+        if min_years is not None:
+            break
         exp_block = spec_json.get(key)
         if isinstance(exp_block, dict):
             for yr_key in ("minimum_years", "min_years", "years_required", "required_years"):
@@ -375,14 +259,14 @@ def _generate_interview_question(requirement: str, status: str, evidence_quote: 
     """
     if status == "NOT_EVIDENCED":
         return (
-            f"The candidate's resume does not explicitly mention: \"{requirement[:120]}\". "
-            f"Ask: 'Can you describe your hands-on experience with this, including specific projects or production usage?'"
+            f"The extracted resume does not substantiate: \"{requirement[:120]}\". "
+            "Ask for relevant examples, dates, or credentials."
         )
     else:  # PARTIALLY_MET
         snippet = f" (found: \"{evidence_quote[:80]}...\")" if evidence_quote else ""
         return (
             f"Partial evidence found for: \"{requirement[:120]}\"{snippet}. "
-            f"Ask: 'Can you go into more depth — specifically your production-level responsibilities and outcomes?'"
+            "Ask which parts they can evidence and what they personally did."
         )
 
 
@@ -449,7 +333,7 @@ def _compute_score(
     pref_evals: List[Dict[str, Any]],
     tenure_score: float,
     tenure_base_weight: float,
-) -> Tuple[int, str, Dict[str, Any]]:
+) -> Tuple[Optional[int], Optional[str], Dict[str, Any]]:
     """
     Compute overall_score (0-100), match_tier, and score_breakdown.
 
@@ -457,7 +341,7 @@ def _compute_score(
     - JD with 0 must-haves: must-have weight slot deactivated
     - JD with 0 preferred: preferred weight slot deactivated
     - JD with no tenure specified: tenure weight slot deactivated
-    - All weights zero: return 100 with NO_CRITERIA_DEFINED warning
+    - All weights zero: leave the evaluation unscored for review
     """
     n_must = len(must_evals)
     n_pref = len(pref_evals)
@@ -479,9 +363,9 @@ def _compute_score(
             "must_have_base_weight": 0.0,
             "preferred_base_weight": 0.0,
             "tenure_base_weight": 0.0,
-            "warning": "NO_EVALUATION_CRITERIA_DEFINED",
+            "warning": NO_EVALUATION_CRITERIA,
         }
-        return 100, "POTENTIAL_MATCH", breakdown
+        return None, None, breakdown
 
     # Category subscores (average of item weights)
     s_must   = (sum(e["score_weight"] for e in must_evals) / n_must) if n_must > 0 else 0.0
@@ -545,31 +429,28 @@ def evaluate_candidate(
     """
     must_have_reqs, preferred_reqs, min_years = _extract_requirements_from_spec(spec_canonical_json)
 
-    # --- Evaluate each requirement ---
-    must_evals: List[Dict[str, Any]] = []
-    pref_evals:  List[Dict[str, Any]] = []
+    evidence = ResumeEvidence(resume_text, parsed_profile)
+    guidance_by_requirement = {
+        item["explicit_requirement"]: item["derived_interpretation"]
+        for item in spec_canonical_json.get("requirement_interpretations") or []
+        if isinstance(item, dict) and item.get("requirement_id") and item.get("explicit_requirement")
+        and isinstance(item.get("derived_interpretation"), list)
+    }
 
-    for req in must_have_reqs:
-        status, weight, evidence, reasoning = _classify_requirement(req, resume_text)
-        must_evals.append({
-            "requirement":    req,
-            "category":       "must_have",
-            "status":         status,
-            "score_weight":   weight,
-            "evidence_quote": evidence,
-            "reasoning":      reasoning,
-        })
+    def assess(requirement: str, category: str) -> dict[str, Any]:
+        status, quotes, reasoning = evidence.assess(requirement, guidance_by_requirement.get(requirement, []))
+        return {
+            "requirement": requirement,
+            "category": category,
+            "status": status,
+            "score_weight": _STATUS_WEIGHTS[status],
+            "evidence_quote": quotes[0] if quotes else None,
+            "evidence_quotes": quotes,
+            "reasoning": reasoning,
+        }
 
-    for req in preferred_reqs:
-        status, weight, evidence, reasoning = _classify_requirement(req, resume_text)
-        pref_evals.append({
-            "requirement":    req,
-            "category":       "preferred",
-            "status":         status,
-            "score_weight":   weight,
-            "evidence_quote": evidence,
-            "reasoning":      reasoning,
-        })
+    must_evals = [assess(req, "must_have") for req in must_have_reqs]
+    pref_evals = [assess(req, "preferred") for req in preferred_reqs]
 
     # --- Tenure scoring ---
     candidate_years = parsed_profile.get("total_experience_years") or 0.0
@@ -579,6 +460,10 @@ def evaluate_candidate(
     overall_score, match_tier, score_breakdown = _compute_score(
         must_evals, pref_evals, tenure_score, tenure_base_weight
     )
+    if tenure_base_weight:
+        score_breakdown["tenure_evidence"] = evidence.checked_quotes(
+            [entry.get("date_text") for entry in evidence.work_history if entry.get("start_date") and entry.get("end_date")]
+        )
 
     # --- Summaries ---
     def _summarize(evals: List[Dict]) -> Dict[str, int]:

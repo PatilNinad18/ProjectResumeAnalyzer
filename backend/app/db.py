@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
 from app.config import get_settings
@@ -21,6 +21,10 @@ def init_db() -> None:
     """Create tables and apply lightweight SQLite migrations for added columns."""
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite()
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TYPE screeningstatusenum ADD VALUE IF NOT EXISTS 'PARSE_FAILED'"))
+            conn.execute(text("ALTER TYPE screeningstatusenum ADD VALUE IF NOT EXISTS 'NEEDS_REVIEW'"))
 
 
 def _migrate_sqlite() -> None:

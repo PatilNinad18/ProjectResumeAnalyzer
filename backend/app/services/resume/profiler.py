@@ -145,9 +145,9 @@ def _extract_date_ranges(text: str) -> List[Tuple[date, date]]:
         if re.match(r"present|current|now|till date", end_raw.strip(), re.IGNORECASE):
             end = today
         else:
-            end = _parse_month_year(end_raw) or today
-        if end < start:
-            end = today
+            end = _parse_month_year(end_raw)
+        if not end or end < start:
+            continue
         ranges.append((start, end))
     return ranges
 
@@ -155,7 +155,7 @@ def _extract_date_ranges(text: str) -> List[Tuple[date, date]]:
 def _total_years_from_ranges(ranges: List[Tuple[date, date]]) -> float:
     """
     Sum of all date ranges, deduplicated by merging overlapping intervals.
-    Returns years as a float rounded to 1 decimal place.
+    Returns elapsed years before rounding for display.
     """
     if not ranges:
         return 0.0
@@ -170,7 +170,7 @@ def _total_years_from_ranges(ranges: List[Tuple[date, date]]) -> float:
             cur_start, cur_end = s, e
     merged.append((cur_start, cur_end))
     total_days = sum((e - s).days for s, e in merged)
-    return round(total_days / 365.25, 1)
+    return total_days / 365.25
 
 
 def _extract_section_text(resume_text: str, section: str) -> str:
@@ -273,7 +273,7 @@ def _extract_work_history(resume_text: str) -> List[Dict[str, Any]]:
             after_end = range_positions[i + 1][0]
         else:
             after_end = len(exp_text)
-        description = exp_text[rend:after_end].strip()[:500]
+        description = exp_text[rend:after_end].strip()
 
         # Parse dates
         dates = _extract_date_ranges(date_str)
@@ -290,6 +290,7 @@ def _extract_work_history(resume_text: str) -> List[Dict[str, Any]]:
             "start_date":     start_d.isoformat() if start_d else None,
             "end_date":       end_d.isoformat()   if end_d   else None,
             "duration_years": dur,
+            "date_text":      date_str,
             "description":    description,
         })
 
@@ -371,7 +372,7 @@ def profile_resume(parsed_text: str) -> Dict[str, Any]:
                 except ValueError:
                     pass
         if wh_ranges:
-            total_experience_years = _total_years_from_ranges(wh_ranges)
+            total_experience_years = round(_total_years_from_ranges(wh_ranges), 1)
 
     # --- Skills ---
     skills = _extract_skills(parsed_text)
@@ -395,3 +396,17 @@ def profile_resume(parsed_text: str) -> Dict[str, Any]:
         "companies":              companies,
         "current_or_last_title":  current_or_last_title,
     }
+
+
+def resume_parse_issue(parsed_text: str) -> Optional[str]:
+    """Identify sparse or garbled extraction without requiring a standard resume layout."""
+    if not parsed_text.strip():
+        return "No readable resume text was extracted. Upload a text-searchable copy for screening."
+
+    without_contact = _PHONE_RE.sub("", _EMAIL_RE.sub("", parsed_text))
+    words = set(re.findall(r"[^\W\d_]{2,}", without_contact.lower()))
+    has_section = any(pattern.search(without_contact) for pattern in _SECTION_HEADERS.values())
+    damaged_chars = sum(char in "\ufffd\x00" or "\ue000" <= char <= "\uf8ff" for char in without_contact)
+    if len(words) < (6 if has_section else 12) or damaged_chars > len(without_contact) * 0.02:
+        return "The extracted resume text is sparse or garbled. Review the file or upload a text-searchable copy."
+    return None

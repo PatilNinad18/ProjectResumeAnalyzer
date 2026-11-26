@@ -299,6 +299,10 @@ class StructuredRequirement(_Base):
     min_years: Optional[float] = None
     max_years: Optional[float] = None
     negated: bool = False
+    assessment_guidance: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Recruiter guidance for evaluating this requirement, keyed by clarification question.",
+    )
 
     @model_validator(mode="before")
     @classmethod

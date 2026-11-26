@@ -11,7 +11,7 @@ import {
 } from "@/lib/screening_api";
 
 export type SortKey = "rank" | "score" | "tier" | "name" | "experience";
-export type TierFilter = "ALL" | "STRONG_MATCH" | "POTENTIAL_MATCH" | "NOT_A_FIT";
+export type TierFilter = "ALL" | "STRONG_MATCH" | "POTENTIAL_MATCH" | "NOT_A_FIT" | "REVIEW";
 
 export interface UseCandidateScreeningReturn {
   // State
@@ -87,7 +87,7 @@ export function useCandidateScreening(): UseCandidateScreeningReturn {
       // Stop polling when all candidates are in a terminal state
       setCandidates((prev) => {
         const allDone = prev.length > 0 && prev.every(
-          (c) => c.status === "COMPLETED" || c.status === "FAILED"
+          (c) => c.status !== "QUEUED" && c.status !== "ANALYZING"
         );
         if (allDone && pollTimerRef.current) {
           clearInterval(pollTimerRef.current);
@@ -171,16 +171,20 @@ export function useCandidateScreening(): UseCandidateScreeningReturn {
   // Filtered + sorted derived list
   const filteredAndSorted: ScreeningLeaderboardItem[] = (() => {
     let list = [...candidates];
-    if (tierFilter !== "ALL") list = list.filter((c) => c.match_tier === tierFilter);
+    if (tierFilter === "REVIEW") {
+      list = list.filter((c) => c.status === "NEEDS_REVIEW" || c.status === "PARSE_FAILED");
+    } else if (tierFilter !== "ALL") {
+      list = list.filter((c) => c.match_tier === tierFilter);
+    }
     list.sort((a, b) => {
       if (sortKey === "score") return (b.overall_score ?? -1) - (a.overall_score ?? -1);
       if (sortKey === "name") return (a.candidate_name ?? "").localeCompare(b.candidate_name ?? "");
       if (sortKey === "experience") return (b.total_experience_years ?? 0) - (a.total_experience_years ?? 0);
       if (sortKey === "tier") {
         const order = { STRONG_MATCH: 0, POTENTIAL_MATCH: 1, NOT_A_FIT: 2 };
-        return (order[a.match_tier ?? "NOT_A_FIT"] ?? 3) - (order[b.match_tier ?? "NOT_A_FIT"] ?? 3);
+        return (a.match_tier ? order[a.match_tier] : 3) - (b.match_tier ? order[b.match_tier] : 3);
       }
-      return a.rank - b.rank; // default: rank
+      return (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER);
     });
     return list;
   })();

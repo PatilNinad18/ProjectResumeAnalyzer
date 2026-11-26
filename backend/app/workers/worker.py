@@ -124,8 +124,7 @@ def process_job_description_version(
         spec.metadata.prompt_version = "deterministic_v1"
         spec.metadata.model_version = "deterministic_ekg"
 
-        # Generate clarification questions on master context.
-        # Team size and salary are included so they flow as Ambiguity questions when absent from JD.
+        # Generate screening clarifications. Optional job details come from missing_information.
         from app.services.clarification.engine import generate_clarification_questions
         master_context = generate_clarification_questions(master_context, actor="worker_baseline")
 

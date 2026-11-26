@@ -143,6 +143,9 @@
 .pillQueued    { background: #f3f4f6; color: #6b7280; }
 .pillAnalyzing { background: #eff6ff; color: #2563eb; animation: pulse 1.5s infinite; }
 .pillFailed    { background: #fef2f2; color: #b91c1c; }
+.pillReview    { background: #fef3c7; color: #92400e; }
+.candidateDetails { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; text-align: left; }
+.candidateDetails:hover { text-decoration: underline; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 .noResults {

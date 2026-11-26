@@ -344,6 +344,7 @@ export function useJDWorkflow({
     // 3. Synthesize questions for raw ambiguities if not already present
     if (clarificationsData?.ambiguities && clarificationsData.ambiguities.length > 0) {
       clarificationsData.ambiguities.forEach((amb, idx) => {
+        if (amb.ta_confirmation_required === false) return;
         const stmt = (amb.statement || "").trim();
         if (!stmt) return;
         const ambKey = `amb_${idx}`;
@@ -584,7 +585,10 @@ export function useJDWorkflow({
     const snapshotBeforeResolve = markdown;
 
     try {
-      await resolveClarifications(jdId, clarificationAnswers);
+      const answers = Object.fromEntries(
+        allClarificationItems.filter((item) => item.currentValue.trim()).map((item) => [item.key, item.currentValue])
+      );
+      await resolveClarifications(jdId, answers);
       await waitForTask(jdId, "resolve", {
         signal: controller.signal,
         onTick: (s) => {

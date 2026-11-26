@@ -7,7 +7,7 @@ export const API_BASE_SCREENING = (process.env.NEXT_PUBLIC_API_URL || "http://12
 // Types
 // ---------------------------------------------------------------------------
 
-export type ScreeningStatus = "QUEUED" | "ANALYZING" | "COMPLETED" | "FAILED";
+export type ScreeningStatus = "QUEUED" | "ANALYZING" | "COMPLETED" | "FAILED" | "PARSE_FAILED" | "NEEDS_REVIEW";
 export type EvaluationStatus = "MET" | "PARTIALLY_MET" | "NOT_EVIDENCED";
 export type MatchTier = "STRONG_MATCH" | "POTENTIAL_MATCH" | "NOT_A_FIT";
 
@@ -31,6 +31,7 @@ export interface RequirementEvaluation {
   status: EvaluationStatus;
   score_weight: number;
   evidence_quote: string | null;
+  evidence_quotes?: string[];
   reasoning: string;
 }
 
@@ -55,6 +56,7 @@ export interface ScoreBreakdown {
   must_have_base_weight: number;
   preferred_base_weight: number;
   tenure_base_weight: number;
+  tenure_evidence?: string[];
 }
 
 export interface CandidateProfile {
@@ -73,6 +75,7 @@ export interface CandidateEvaluationDetail {
   spec_version_id: string | null;
   specification_version: number;
   status: ScreeningStatus;
+  review_reason: string | null;
   overall_score: number | null;
   match_tier: MatchTier | null;
   candidate_profile: CandidateProfile | null;
@@ -88,7 +91,7 @@ export interface CandidateEvaluationDetail {
 }
 
 export interface ScreeningLeaderboardItem {
-  rank: number;
+  rank: number | null;
   candidate_resume_id: string;
   filename: string;
   candidate_name: string | null;
@@ -97,10 +100,12 @@ export interface ScreeningLeaderboardItem {
   overall_score: number | null;
   match_tier: MatchTier | null;
   must_haves_met: number;
+  must_haves_partially_met: number;
   must_haves_total: number;
   not_evidenced_count: number;
   validation_checkpoints_count: number;
   status: ScreeningStatus;
+  review_reason: string | null;
   created_at: string | null;
 }
 

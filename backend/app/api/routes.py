@@ -1013,12 +1013,12 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
 
         matched_statement = None
         if q_key.startswith("amb_"):
-            try:
-                idx = int(q_key.replace("amb_", ""))
-                if idx < len(canonical_ambs):
-                    matched_statement = canonical_ambs[idx].get("statement")
-            except Exception:
-                pass
+            index = q_key.removeprefix("amb_")
+            if index.isdecimal():
+                idx = int(index)
+                if idx >= len(canonical_ambs) or canonical_ambs[idx].get("ta_confirmation_required") is False:
+                    continue
+                matched_statement = canonical_ambs[idx].get("statement")
         elif q_key.startswith("statement:"):
             matched_statement = q_key.replace("statement:", "").strip()
 

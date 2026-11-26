@@ -40,6 +40,8 @@ from app.models.screening_models import (
 )
 from app.services.resume.profiler import profile_resume
 from app.services.resume.evaluator import evaluate_candidate, _compute_score
+from app.services.extraction_pipeline import ExtractionPipeline
+from app.services.projection.canonical_projector import project_to_canonical
 
 
 SAMPLE_RESUME_TEXT = """
@@ -131,11 +133,94 @@ def test_evaluator_grounded_quotes_and_statuses():
 
 
 def test_evaluator_scoring_edge_case_zero_criteria():
-    """Ensure zero must-haves and zero preferred qualifications do not cause ZeroDivisionError."""
+    """An empty rubric has neither a match score nor a tier."""
     score, tier, breakdown = _compute_score([], [], 0.0, 0.0)
-    assert score == 100
-    assert tier == "POTENTIAL_MATCH"
+    assert score is None
+    assert tier is None
     assert breakdown.get("warning") == "NO_EVALUATION_CRITERIA_DEFINED"
+    invalid = evaluate_candidate(
+        "Built an accounting tool and improved team reporting.", {},
+        {"must_have_requirements": ["Requirements", "All listed elements required: Candidate must demonstrate proficiency."]},
+    )
+    assert invalid["overall_score"] is None
+    assert invalid["detailed_evaluations"] == []
+
+
+@pytest.mark.parametrize(
+    ("requirement", "resume", "status"),
+    [
+        ("Java", "Built a checkout application with JavaScript.", "NOT_EVIDENCED"),
+        ("Must be proficient in Python", "Built a reporting service in Python.", "MET"),
+        ("Python proficiency required", "Developed a system and demonstrated proficiency in all listed items.", "NOT_EVIDENCED"),
+        ("Python", "Skills: Python, PostgreSQL, and Git", "PARTIALLY_MET"),
+        ("Python", "Worked with Python.", "PARTIALLY_MET"),
+        ("Python", "Developed a data validation pipeline in Python for a class project.", "MET"),
+        ("Python", "Projects\n- Developed a validation pipeline with\n  python for inventory reporting.", "MET"),
+        ("Python", "I have no experience with Python.", "NOT_EVIDENCED"),
+        ("AWS deployment", "Configured AWS Identity and Access Management for the team.", "PARTIALLY_MET"),
+        ("AWS deployment", "Deployed an inventory service to AWS.", "MET"),
+        ("Python for financial modeling", "Built an inventory application in Python.", "PARTIALLY_MET"),
+        ("Python for financial modeling", "Built a Python tool for financial modeling.", "MET"),
+        ("C++", "Implemented a renderer in C++ for a game prototype.", "MET"),
+        ("C#", "Built a C++ physics engine for a prototype.", "NOT_EVIDENCED"),
+        ("Bachelor's degree in Computer Science", "Education: B.S. in Computer Science, 2022", "MET"),
+        ("Bachelor's degree in Computer Science", "Education: B.S. in Mathematics, 2022", "PARTIALLY_MET"),
+        ("AWS Certified Solutions Architect", "Deployed a web application to AWS.", "PARTIALLY_MET"),
+        ("AWS Certified Solutions Architect", "Certifications: AWS Certified Cloud Practitioner, 2024", "PARTIALLY_MET"),
+        ("AWS Certified Solutions Architect", "Certifications: AWS Certified Solutions Architect, 2024", "MET"),
+    ],
+)
+def test_evidence_grades_match_the_claim(requirement, resume, status):
+    result = evaluate_candidate(resume, {}, {"must_have_requirements": [requirement]})
+    evidence, = result["detailed_evaluations"]
+    assert evidence["status"] == status
+    for quote in evidence["evidence_quotes"]:
+        assert " ".join(quote.split()) in " ".join(resume.split())
+    assert bool(evidence["evidence_quotes"]) == (status != "NOT_EVIDENCED")
+
+
+def test_scoped_years_use_multiple_grounded_roles_and_merge_overlap():
+    resume = (
+        "Experience\n"
+        "Engineer at Example A\nJan 2020 - Dec 2022\n"
+        "Developed a Python scheduling service used by the operations team.\n\n"
+        "Engineer at Example B\nJan 2022 - Jun 2025\n"
+        "Built a Python validation pipeline for inventory data.\n\n"
+        "Analyst at Example C\nJan 2010 - Dec 2019\n"
+        "Reconciled customer accounts and prepared monthly reports.\n"
+    )
+    result = evaluate_candidate(
+        resume, profile_resume(resume),
+        {"must_have_requirements": ["5+ years of Python development", "6+ years of Python development"]},
+    )
+    met, partial = result["detailed_evaluations"]
+    assert met["status"] == "MET"
+    assert partial["status"] == "PARTIALLY_MET"
+    assert len(met["evidence_quotes"]) == 4
+    assert "Jan 2020 - Dec 2022" in met["evidence_quotes"]
+    assert "Jan 2022 - Jun 2025" in met["evidence_quotes"]
+    assert all(quote in resume and "2010" not in quote for quote in met["evidence_quotes"])
+    overall = evaluate_candidate(resume, profile_resume(resume), {"minimum_years": 2})
+    assert "Jan 2020 - Dec 2022" in overall["score_breakdown"]["tenure_evidence"]
+
+
+def test_confirmed_grouping_controls_the_grade():
+    requirement = "Python or Java"
+    spec = {
+        "must_have_requirements": [requirement],
+        "requirement_interpretations": [{
+            "requirement_id": "req_languages",
+            "explicit_requirement": requirement,
+            "derived_interpretation": ["All listed elements required: Show application of both languages."],
+        }],
+    }
+    resume = "Projects\nBuilt an inventory application using Python."
+    assert evaluate_candidate(resume, {}, {"must_have_requirements": [requirement]})["overall_score"] == 100
+    assert evaluate_candidate(resume, {}, spec)["overall_score"] == 50
+    resume += "\nImplemented an auditing service in Java."
+    result = evaluate_candidate(resume, {}, spec)
+    assert result["overall_score"] == 100
+    assert len(result["detailed_evaluations"][0]["evidence_quotes"]) == 2
 
 
 def test_evaluator_scoring_edge_case_zero_preferred():
@@ -150,6 +235,28 @@ def test_evaluator_scoring_edge_case_zero_preferred():
     assert score == 75
     assert tier == "POTENTIAL_MATCH"
     assert breakdown["active_weight_total"] == 0.70
+
+
+def test_evaluator_reads_projected_preferred_and_overall_tenure():
+    raw_jd = (
+        "Requirements:\n"
+        "- 4 years of professional experience.\n"
+        "- 8+ years of experience in distributed systems.\n\n"
+        "Preferred Qualifications:\n"
+        "- 12+ years of experience is preferred.\n"
+        "- Terraform infrastructure automation.\n"
+    )
+    master = ExtractionPipeline().process_jd(raw_jd).to_master_context(raw_jd_text=raw_jd)
+    spec = project_to_canonical(master).model_dump(mode="json")
+
+    result = evaluate_candidate("Used Terraform for infrastructure automation.", {"total_experience_years": 2}, spec)
+
+    assert result["score_breakdown"]["tenure_base_weight"] == 0.10
+    assert result["score_breakdown"]["tenure_subscore"] == 0.5
+    assert result["score_breakdown"]["preferred_base_weight"] == 0.20
+    assert result["must_haves_summary"]["total"] == 1
+    assert result["detailed_evaluations"][0]["requirement"] == "8+ years of experience in distributed systems."
+    assert next(item for item in result["detailed_evaluations"] if "Terraform" in item["requirement"])["status"] == "MET"
 
 
 def test_evaluator_guardrail_caps_unevidenced_must_have():
@@ -269,3 +376,63 @@ def test_resume_screening_api_lifecycle(test_setup):
     # Verify deleted
     res_lb_after = client.get(f"/api/jds/{jd_id}/resumes")
     assert res_lb_after.json()["total_candidates"] == 0
+
+
+def test_screening_review_rows_are_unranked_and_coverage_matches_detail(test_setup):
+    from pypdf import PdfWriter
+    from app.workers.screening_worker import process_candidate_evaluation
+
+    client = TestClient(app)
+    jd_id, spec_id = test_setup["jd_id"], test_setup["spec_id"]
+    base = f"/api/jds/{jd_id}/resumes"
+    pdf = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(pdf)
+    upload = client.post(base, files=[
+        ("files", ("scan.pdf", pdf.getvalue(), "application/pdf")),
+        ("files", ("sparse.txt", b"Jordan Doe\njordan@example.com\n1", "text/plain")),
+        ("files", ("readable.txt", b"Jordan Doe\nSkills: Python, FastAPI, SQL, Git, Docker, Linux\n", "text/plain")),
+    ])
+    assert upload.status_code == 202
+    response = client.post(f"{base}/screen", json={"spec_version_id": spec_id})
+    assert response.status_code == 202
+    evaluation_ids = response.json()["candidate_resume_ids"]
+    with SessionLocal() as db:
+        for evaluation_id in evaluation_ids:
+            process_candidate_evaluation(db, evaluation_id)
+
+    leaderboard = {row["filename"]: row for row in client.get(base).json()["candidates"]}
+    for filename, status in (("scan.pdf", "PARSE_FAILED"), ("sparse.txt", "NEEDS_REVIEW")):
+        row = leaderboard[filename]
+        assert row["status"] == status
+        assert row["rank"] is row["overall_score"] is row["match_tier"] is None
+        detail = client.get(f"{base}/{row['candidate_resume_id']}").json()
+        assert detail["review_reason"] == row["review_reason"]
+        assert detail["overall_score"] is None
+        assert detail["detailed_evaluations"] == []
+
+    readable = leaderboard["readable.txt"]
+    detail_path = f"{base}/{readable['candidate_resume_id']}"
+    summary = client.get(detail_path).json()["must_haves_summary"]
+    assert readable["rank"] == 1
+    assert readable["must_haves_met"] == summary["met"] == 0
+    assert readable["must_haves_partially_met"] == summary["partially_met"] == 2
+    assert readable["not_evidenced_count"] == summary["not_evidenced"] == 0
+    assert readable["validation_checkpoints_count"] == 2
+
+    with SessionLocal() as db:
+        db.get(JobSpecificationVersion, spec_id).canonical_json = {"must_have_requirements": []}
+        db.commit()
+    rerun = client.post(f"{base}/screen", json={
+        "candidate_resume_ids": [readable["candidate_resume_id"]], "spec_version_id": spec_id,
+    })
+    assert rerun.status_code == 202
+    assert client.get(detail_path).json()["overall_score"] is None
+    with SessionLocal() as db:
+        process_candidate_evaluation(db, rerun.json()["candidate_resume_ids"][0])
+    detail = client.get(detail_path).json()
+    assert detail["status"] == "NEEDS_REVIEW"
+    assert "no usable screening criteria" in detail["review_reason"]
+    assert detail["overall_score"] is None
+    assert all(row["rank"] is None for row in client.get(base).json()["candidates"])

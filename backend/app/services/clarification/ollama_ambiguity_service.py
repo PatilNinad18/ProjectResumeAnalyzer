@@ -173,20 +173,19 @@ class OllamaAmbiguityService:
 
         system_prompt = (
             "You are an expert Principal Technical Recruiter and Hiring Manager. "
-            "Analyze the following Job Description to identify 3 to 4 genuine ambiguities, "
-            "role trade-offs, and screening dilemmas before interviewing candidates.\n\n"
+            "Identify up to four genuine screening ambiguities in the Job Description. "
+            "Return an empty list when the screening criteria are clear.\n\n"
             "CRITICAL RULES:\n"
             "1. Every technical ambiguity MUST include an exact 'evidence_quote' copied verbatim from the Job Description.\n"
-            "2. If Team Size or Salary/Compensation are absent from the JD, include them as conversational clarification questions (evidence_quote='ABSENT_FROM_JD'). "
-            "If they ARE already stated in the JD, DO NOT ask about them.\n"
+            "2. Team size and salary are collected separately as optional job details. Exclude them from screening ambiguities.\n"
             "3. Return ONLY a valid JSON object matching this schema:\n"
             "{\n"
             '  "ambiguities": [\n'
             "    {\n"
-            '      "topic": "2-3 word punchy tab label (e.g. Framework strictness, Hands-on %, Customer, Team size, Salary band)",\n'
+            '      "topic": "2-3 word tab label (e.g. Framework strictness, Hands-on %, Customer scope)",\n'
             '      "question": "Conversational question referencing the specific JD dilemma",\n'
             '      "evidence_quote": "Verbatim quote from the JD supporting this dilemma",\n'
-            '      "field_target": "Target schema path (e.g. requirements.framework_strictness, job_context.team_size, job_context.salary_range, role_overview.travel_model)",\n'
+            '      "field_target": "Target schema path (e.g. requirements.framework_strictness, role_overview.travel_model)",\n'
             '      "options": [\n'
             '        {"label": "...", "description": "..."},\n'
             '        {"label": "...", "description": "..."},\n'

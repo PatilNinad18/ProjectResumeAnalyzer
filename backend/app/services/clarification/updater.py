@@ -160,15 +160,15 @@ def submit_answer(
 
     if question is None:
 
-        if question_key.startswith("amb_") or question_key.startswith("jd_ambiguity_"):
+        if not target_statement and question_key.startswith(("amb_", "jd_ambiguity_")):
 
-            target_id = question_key.replace("jd_ambiguity_", "").replace("amb_", "")
+            target_id = question_key.removeprefix("jd_ambiguity_")
 
             question = next((
 
                 q for q in master.clarification_history
 
-                if (target_id and (target_id in q.question_key or (q.field_target and target_id in q.field_target)))
+                if q.field_target in (f"ambiguities[{target_id}]", f"raw_ambiguities[{target_id}]")
 
             ), None)
 
@@ -783,11 +783,16 @@ def _apply_field_patch(
 
                             item.is_mandatory = (new_priority == RequirementPriority.MUST_HAVE)
 
-                    elif ".text" in field_target:
+                    elif field_target.endswith((".assessment_guidance", ".text")):
 
-                        item.text = answer_text
-
-                        item.requires_clarification = False
+                        # Saved questions used .text for scope and grouping before
+                        # guidance had its own field.
+                        if status == QuestionStatus.ANSWERED:
+                            item.assessment_guidance[question_key] = answer_text
+                            item.requires_clarification = False
+                        else:
+                            item.assessment_guidance.pop(question_key, None)
+                            return
 
                     elif ".is_mandatory" in field_target:
 

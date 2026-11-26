@@ -58,6 +58,7 @@ class ParameterExtractor:
         
         # Experience patterns - minimum
         self.exp_min_patterns = [
+            re.compile(r'(\d+(?:\.\d+)?)\+?\s*years?\s+(?:of\s+)?(?:total|overall|professional|work)\s+experience\b', re.IGNORECASE),
             re.compile(r'(\d+)\+\s*years?\s+(?:of\s+)?experience', re.IGNORECASE),
             re.compile(r'(?:at\s+least|minimum\s+(?:of\s+)?|min\.?)\s*(\d+)\s*years?', re.IGNORECASE),
             re.compile(r'(\d+)\s*years?\s+(?:or\s+more|minimum)', re.IGNORECASE),

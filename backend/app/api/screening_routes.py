@@ -50,7 +50,8 @@ from app.schemas.screening import (
     ValidationCheckpoint,
 )
 from app.services.document_parser import DocumentParseError, SUPPORTED_EXTENSIONS
-from app.workers.screening_worker import screening_queue
+from app.services.resume.evaluator import NO_EVALUATION_CRITERIA
+from app.workers.screening_worker import NO_CRITERIA_REVIEW, screening_queue
 
 logger = logging.getLogger("jd_agent.screening_routes")
 
@@ -90,38 +91,51 @@ def _tier_sort_key(tier: Optional[str]) -> int:
     return order.get(tier or "", 3)
 
 
-def _get_best_eval(resume: CandidateResume) -> Optional[CandidateEvaluation]:
-    if not resume.evaluations:
-        return None
-    completed = [e for e in resume.evaluations if e.status == ScreeningStatusEnum.COMPLETED]
-    if completed:
-        return sorted(completed, key=lambda e: e.completed_at or e.created_at or datetime.min, reverse=True)[0]
-    return sorted(resume.evaluations, key=lambda e: e.created_at or datetime.min, reverse=True)[0]
+def _get_latest_eval(resume: CandidateResume) -> Optional[CandidateEvaluation]:
+    return max(resume.evaluations, key=lambda e: e.created_at or datetime.min, default=None)
 
 
-def _build_leaderboard_item(rank: int, resume: CandidateResume) -> ScreeningLeaderboardItem:
-    latest_eval = _get_best_eval(resume)
-    mh_summary = latest_eval.must_haves_summary if latest_eval and latest_eval.must_haves_summary else {}
+def _status_and_review_reason(evaluation: Optional[CandidateEvaluation]) -> tuple[ScreeningStatus, Optional[str]]:
+    if evaluation is None:
+        return ScreeningStatus.QUEUED, None
+    if evaluation.status == ScreeningStatusEnum.COMPLETED and (
+        (evaluation.score_breakdown or {}).get("warning") == NO_EVALUATION_CRITERIA
+        or evaluation.overall_score is None
+    ):
+        return ScreeningStatus.NEEDS_REVIEW, NO_CRITERIA_REVIEW
+    status = ScreeningStatus(evaluation.status.value)
+    reason = evaluation.error_message if status in (ScreeningStatus.PARSE_FAILED, ScreeningStatus.NEEDS_REVIEW) else None
+    return status, reason
+
+
+def _build_leaderboard_item(resume: CandidateResume) -> ScreeningLeaderboardItem:
+    latest_eval = _get_latest_eval(resume)
+    status, reason = _status_and_review_reason(latest_eval)
+    scored = latest_eval if status == ScreeningStatus.COMPLETED else None
+    mh_summary = (scored.must_haves_summary or {}) if scored else {}
     return ScreeningLeaderboardItem(
-        rank=rank,
+        rank=None,
         candidate_resume_id=resume.id,
         filename=resume.filename,
         candidate_name=resume.candidate_name,
         email=resume.email,
         total_experience_years=resume.total_experience_years,
-        overall_score=latest_eval.overall_score if latest_eval else None,
-        match_tier=latest_eval.match_tier if latest_eval else None,
-        must_haves_met=mh_summary.get("met", 0) + mh_summary.get("partially_met", 0),
+        overall_score=scored.overall_score if scored else None,
+        match_tier=scored.match_tier if scored else None,
+        must_haves_met=mh_summary.get("met", 0),
+        must_haves_partially_met=mh_summary.get("partially_met", 0),
         must_haves_total=mh_summary.get("total", 0),
         not_evidenced_count=mh_summary.get("not_evidenced", 0),
-        validation_checkpoints_count=len(latest_eval.validation_checkpoints or []) if latest_eval else 0,
-        status=ScreeningStatus(latest_eval.status.value) if latest_eval else ScreeningStatus.QUEUED,
+        validation_checkpoints_count=len(scored.validation_checkpoints or []) if scored else 0,
+        status=status,
+        review_reason=reason,
         created_at=resume.created_at,
     )
 
 
 def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationResponse:
-    latest_eval = _get_best_eval(resume)
+    latest_eval = _get_latest_eval(resume)
+    status, reason = _status_and_review_reason(latest_eval)
     profile = resume.parsed_profile_json or {}
     candidate_profile = CandidateProfile(
         candidate_name=resume.candidate_name or profile.get("candidate_name"),
@@ -133,13 +147,14 @@ def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationRe
         current_or_last_title=profile.get("current_or_last_title"),
     )
 
-    if not latest_eval:
+    if not latest_eval or status != ScreeningStatus.COMPLETED:
         return CandidateEvaluationResponse(
             candidate_resume_id=resume.id,
             job_description_id=resume.job_description_id,
-            spec_version_id=None,
-            specification_version=2,
-            status=ScreeningStatus.QUEUED,
+            spec_version_id=latest_eval.spec_version_id if latest_eval else None,
+            specification_version=latest_eval.specification_version if latest_eval else 2,
+            status=status,
+            review_reason=reason,
             overall_score=None,
             match_tier=None,
             candidate_profile=candidate_profile,
@@ -147,7 +162,7 @@ def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationRe
             preferred_summary=None,
             score_breakdown=None,
             created_at=resume.created_at,
-            completed_at=None,
+            completed_at=latest_eval.completed_at if reason else None,
         )
 
     def _parse_req_evals(items: list) -> List[RequirementEvaluation]:
@@ -177,7 +192,7 @@ def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationRe
         job_description_id=resume.job_description_id,
         spec_version_id=latest_eval.spec_version_id,
         specification_version=latest_eval.specification_version,
-        status=ScreeningStatus(latest_eval.status.value),
+        status=status,
         overall_score=latest_eval.overall_score,
         match_tier=latest_eval.match_tier,
         candidate_profile=candidate_profile,
@@ -322,10 +337,15 @@ def trigger_screening(
             .first()
         )
         if existing:
-            # Re-queue evaluation with clean status
-            existing.status = ScreeningStatusEnum.QUEUED
-            existing.spec_version_id = body.spec_version_id
-            existing.error_message = None
+            # Keep an active run pinned to its current inputs.
+            db.query(CandidateEvaluation).filter(
+                CandidateEvaluation.id == existing.id,
+                CandidateEvaluation.status.notin_((ScreeningStatusEnum.QUEUED, ScreeningStatusEnum.ANALYZING)),
+            ).update({
+                "status": ScreeningStatusEnum.QUEUED,
+                "spec_version_id": body.spec_version_id,
+                "error_message": None,
+            }, synchronize_session=False)
             queued_ids.append(existing.id)
             continue
 
@@ -373,15 +393,12 @@ def get_leaderboard(
         .all()
     )
 
-    # Sort by tier then score
-    def sort_key(r: CandidateResume):
-        latest_eval = r.evaluations[-1] if r.evaluations else None
-        tier  = latest_eval.match_tier if latest_eval else None
-        score = latest_eval.overall_score if latest_eval else -1
-        return (_tier_sort_key(tier), -(score or 0))
-
-    sorted_resumes = sorted(resumes, key=sort_key)
-    items = [_build_leaderboard_item(rank + 1, r) for rank, r in enumerate(sorted_resumes)]
+    items = [_build_leaderboard_item(resume) for resume in resumes]
+    items.sort(key=lambda item: (item.overall_score is None, _tier_sort_key(item.match_tier), -(item.overall_score or 0)))
+    for rank, item in enumerate(items, start=1):
+        if item.overall_score is None:
+            break
+        item.rank = rank
 
     return ScreeningLeaderboardResponse(
         job_description_id=jd_id,

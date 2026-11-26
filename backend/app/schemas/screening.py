@@ -34,6 +34,8 @@ class ScreeningStatus(str, enum.Enum):
     ANALYZING = "ANALYZING"
     COMPLETED = "COMPLETED"
     FAILED    = "FAILED"
+    PARSE_FAILED = "PARSE_FAILED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +78,7 @@ class RequirementEvaluation(BaseModel):
         None,
         description="Verbatim excerpt quoted directly from the resume text. Required if status is MET or PARTIALLY_MET.",
     )
+    evidence_quotes: List[str] = Field(default_factory=list)
     reasoning: str = Field(description="Brief explanation of why this status was assigned.")
 
 
@@ -102,6 +105,7 @@ class ScoreBreakdown(BaseModel):
     must_have_base_weight: float
     preferred_base_weight: float
     tenure_base_weight:   float
+    tenure_evidence:      List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +145,7 @@ class CandidateEvaluationResponse(BaseModel):
     specification_version: int
 
     status:        ScreeningStatus
+    review_reason: Optional[str] = None
     overall_score: Optional[int]
     match_tier:    Optional[MatchTier]
 
@@ -167,7 +172,7 @@ class CandidateEvaluationResponse(BaseModel):
 
 class ScreeningLeaderboardItem(BaseModel):
     """Compact candidate entry for the recruiter leaderboard table."""
-    rank:                   int
+    rank:                   Optional[int]
     candidate_resume_id:    str
     filename:               str
     candidate_name:         Optional[str]
@@ -176,10 +181,12 @@ class ScreeningLeaderboardItem(BaseModel):
     overall_score:          Optional[int]
     match_tier:             Optional[MatchTier]
     must_haves_met:         int
+    must_haves_partially_met: int
     must_haves_total:       int
     not_evidenced_count:    int
     validation_checkpoints_count: int
     status:                 ScreeningStatus
+    review_reason:          Optional[str] = None
     created_at:             Optional[datetime]
 
     model_config = ConfigDict(from_attributes=True)

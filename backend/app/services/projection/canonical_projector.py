@@ -90,6 +90,7 @@ def project_to_canonical(
     experience_reqs: List[Dict[str, Any]] = []
     evidence_specs: List[Dict[str, Any]] = []
     ambiguities_out: List[Dict[str, Any]] = []
+    requirement_interpretations: List[Dict[str, Any]] = []
 
     # Collect known responsibility descriptions for deduplication
     resp_descriptions = {
@@ -102,7 +103,7 @@ def project_to_canonical(
     answered_q_map = {}
     answered_by_text = {}
     for q in master.clarification_history:
-        if q.status == QuestionStatus.ANSWERED and q.answer_text:
+        if q.status == QuestionStatus.ANSWERED and q.answer_text and not q.field_target.startswith("job_context."):
             answered_q_map[q.question_key] = q
             if q.field_target:
                 answered_q_map[q.field_target] = q
@@ -125,6 +126,14 @@ def project_to_canonical(
         )
         if is_resp:
             continue
+
+        if req.assessment_guidance:
+            requirement_interpretations.append({
+                "requirement_id": req.id,
+                "explicit_requirement": req.text,
+                "derived_interpretation": list(req.assessment_guidance.values()),
+                "source": {"text": req.provenance.source_span.raw_text if req.provenance.source_span else req.text},
+            })
 
         # Look up matching answered clarification question for this requirement
         matching_q = (
@@ -280,8 +289,10 @@ def project_to_canonical(
             })
             existing_statements.add(amb_text.lower())
 
-    # Include any answered clarification questions from clarification_history
+    # Include answered screening clarifications. Job details remain in job_context.
     for q in master.clarification_history:
+        if q.field_target.startswith("job_context."):
+            continue
         if q.status == QuestionStatus.ANSWERED and q.answer_text:
             stmt = None
             q_text = q.question_text or ""
@@ -438,6 +449,7 @@ def project_to_canonical(
         conventional_requirements=conventional,
         must_have_requirements=must_haves,
         preferred_requirements=preferred,
+        requirement_interpretations=requirement_interpretations,
         evidence_requirements=evidence_specs,
         compliance_flags=compliance_flags_out,
         ambiguities=ambiguities_out,
@@ -532,6 +544,7 @@ def _flatten_requirements(
 def _map_priority(priority: RequirementPriority) -> str:
     mapping = {
         RequirementPriority.MUST_HAVE: "MUST_HAVE",
+        RequirementPriority.MANDATORY: "MUST_HAVE",
         RequirementPriority.PREFERRED: "PREFERRED",
         RequirementPriority.INFORMATIONAL: "INFORMATIONAL",
         RequirementPriority.UNRESOLVED: "AMBIGUOUS",

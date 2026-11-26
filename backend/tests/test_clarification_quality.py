@@ -14,6 +14,11 @@ from app.schemas.master_context import (
     RoleOverview,
 )
 from app.services.clarification import engine
+from app.services.clarification.ollama_ambiguity_service import get_ollama_ambiguity_service
+from app.services.clarification.updater import _apply_field_patch, attempt_finalization, submit_answer
+from app.services.extraction_pipeline import ExtractionPipeline
+from app.services.projection.canonical_projector import project_to_canonical
+from app.services.resume.evaluator import evaluate_candidate
 from tests.stubs import make_must_have, make_preferred, make_responsibility
 
 
@@ -132,6 +137,73 @@ def test_missing_salary_and_team_size_are_not_clarification_questions(monkeypatc
     result = engine.generate_clarification_questions(master)
 
     assert result.clarification_history == []
+
+
+@pytest.mark.parametrize("legacy_target", [False, True])
+def test_clarification_preserves_screening_criteria_from_glued_jd(monkeypatch, legacy_target):
+    mixed = "Experience with Java and Python or C# is required."
+    core = "Strong practical experience with React/Next.js, TypeScript, PostgreSQL, APIs, and Git."
+    preferred = "Experience with Supabase, Tailwind/shadcn, Vercel, and Claude Code or similar tools is highly preferred."
+    degree = "Bachelor's degree in Computer Science, Information Technology, or a related field."
+    raw_jd = (
+        "Job Title: Full-Stack Developer\n\n"
+        "V1 Scope PhilosophyThe first release excludes advanced capabilities."
+        f"Ideal Candidate{core} {preferred}We are looking for engineering judgment."
+        f"Required Experience And Qualifications{degree}\n"
+        f"{mixed}Benefits\nFlexible leave policy"
+    )
+    monkeypatch.setattr(
+        get_ollama_ambiguity_service(),
+        "discover_ambiguities",
+        lambda *_: [
+            {"topic": "Team size", "field_target": "job_context.team_size"},
+            {"topic": "Salary", "field_target": "job_context.salary_range"},
+        ],
+    )
+
+    master = ExtractionPipeline().process_jd(raw_jd).to_master_context(raw_jd_text=raw_jd)
+    master = engine.generate_clarification_questions(master)
+    initial = project_to_canonical(master)
+    assert not any(q.field_target.startswith("job_context.") for q in master.clarification_history)
+    assert {item.field for item in initial.missing_information} == {"team_size", "salary_range"}
+    assert preferred in initial.preferred_requirements
+    assert degree in initial.must_have_requirements
+    assert any(text.rstrip(".") == core.rstrip(".") for text in initial.must_have_requirements)
+
+    question, = (q for q in master.clarification_history if q.question_key.startswith("mixed_logic_"))
+    requirement = next(req for req in master.requirements if getattr(req, "text", None) == mixed)
+    assert question.field_target == f"requirements[id={requirement.id}].assessment_guidance"
+    if legacy_target:
+        question.field_target = f"requirements[id={requirement.id}].text"
+    option = question.structured_options[0]
+    answer = f"{option.label}: {option.description}"
+    assert option.label == "All listed elements required"
+
+    master = submit_answer(master, question.question_key, answer, answered_by="Recruiter")
+    _apply_field_patch(master, "org_metadata_team_size", "16–50 people", "Recruiter", "org_metadata_team_size")
+    _apply_field_patch(master, "compensation_salary_range", "Market standard", "Recruiter", "compensation_salary_range")
+    master = attempt_finalization(master, actor="Recruiter")
+    final = project_to_canonical(master, specification_version=2)
+
+    assert final.must_have_requirements == initial.must_have_requirements
+    assert final.preferred_requirements == initial.preferred_requirements
+    assert final.job_context.team_size == "16–50 people"
+    assert final.job_context.salary_range == "Market standard"
+    assert final.missing_information == []
+    assert {amb.statement for amb in final.ambiguities}.isdisjoint({"Team size", "Salary"})
+    guidance, = final.requirement_interpretations
+    assert guidance.requirement_id == requirement.id
+    assert guidance.explicit_requirement == mixed
+    assert guidance.derived_interpretation == [answer]
+    assert guidance.source.text == mixed
+
+    spec = final.model_dump(mode="json")
+    relevant = evaluate_candidate("Built software in Java, Python, and C# using Supabase for a customer launch.", {}, spec)
+    unrelated = evaluate_candidate("Prepared quarterly accounting reports and reconciled payments.", {}, spec)
+    assert {item["requirement"] for item in relevant["detailed_evaluations"]} == set(
+        final.must_have_requirements + final.preferred_requirements
+    )
+    assert relevant["overall_score"] > unrelated["overall_score"]
 
 
 @pytest.mark.parametrize(

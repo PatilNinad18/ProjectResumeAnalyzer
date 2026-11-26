@@ -43,6 +43,8 @@ class ScreeningStatusEnum(str, enum.Enum):
     ANALYZING  = "ANALYZING"
     COMPLETED  = "COMPLETED"
     FAILED     = "FAILED"
+    PARSE_FAILED = "PARSE_FAILED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
 
 
 class MatchTierEnum(str, enum.Enum):
@@ -155,6 +157,7 @@ class CandidateEvaluation(Base):
     #   "status": "MET" | "PARTIALLY_MET" | "NOT_EVIDENCED",
     #   "score_weight": 1.0 | 0.5 | 0.0,
     #   "evidence_quote": str | null,  # verbatim excerpt from resume
+    #   "evidence_quotes": list[str],  # all supporting verbatim excerpts
     #   "reasoning": str,
     # }, ...]
     detailed_evaluations = Column(JSON, nullable=True)

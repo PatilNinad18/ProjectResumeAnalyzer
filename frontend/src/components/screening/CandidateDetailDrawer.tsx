@@ -21,16 +21,17 @@ function EvalStatusBadge({ status }: { status: string }) {
 }
 
 function RequirementRow({ eval: ev }: { eval: RequirementEvaluation }) {
+  const quotes = ev.evidence_quotes?.length ? ev.evidence_quotes : ev.evidence_quote ? [ev.evidence_quote] : [];
   return (
     <div className={styles.reqRow}>
       <div className={styles.reqHeader}>
         <span className={styles.reqText}>{ev.requirement}</span>
         <EvalStatusBadge status={ev.status} />
       </div>
-      {ev.evidence_quote && (
+      {quotes.length > 0 && (
         <blockquote className={styles.evidenceQuote}>
           <span className={styles.evidenceLabel}>📄 Resume Evidence</span>
-          <span className={styles.evidenceText}>"{ev.evidence_quote}"</span>
+          {quotes.map((quote) => <div className={styles.evidenceText} key={quote}>“{quote}”</div>)}
         </blockquote>
       )}
       {ev.reasoning && (
@@ -46,6 +47,7 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
   const tier = candidate?.match_tier ? TIER_META[candidate.match_tier] : null;
   const profile = candidate?.candidate_profile;
   const mhSummary = candidate?.must_haves_summary;
+  const tenureEvidence = candidate?.score_breakdown?.tenure_evidence ?? [];
   const mustHaveEvals = candidate?.detailed_evaluations.filter((e) => e.category === "must_have") ?? [];
   const preferredEvals = candidate?.detailed_evaluations.filter((e) => e.category === "preferred") ?? [];
 
@@ -78,18 +80,24 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
           </div>
         ) : !candidate ? null : (
           <div className={styles.drawerBody}>
+            {candidate.review_reason && (
+              <div className={styles.mhSummary}>
+                <span className={styles.sectionTitle}>Needs review</span>
+                <p className={styles.reasoning}>{candidate.review_reason}</p>
+              </div>
+            )}
 
             {/* Score + profile summary */}
             <div className={styles.summaryRow}>
-              <div className={styles.scoreBig}>
+              {candidate.overall_score !== null && <div className={styles.scoreBig}>
                 <span className={styles.scoreNum} style={{
                   color: (candidate.overall_score ?? 0) >= 80 ? "#16a34a"
                        : (candidate.overall_score ?? 0) >= 60 ? "#d97706" : "#dc2626"
                 }}>
-                  {candidate.overall_score ?? "—"}%
+                  {candidate.overall_score}%
                 </span>
                 <span className={styles.scoreSubLabel}>Match Score</span>
-              </div>
+              </div>}
               <div className={styles.profileMeta}>
                 {profile?.email && <span>✉️ {profile.email}</span>}
                 {profile?.phone && <span>📞 {profile.phone}</span>}
@@ -101,6 +109,15 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
                 )}
               </div>
             </div>
+
+            {tenureEvidence.length > 0 && (
+              <div className={styles.mhSummary}>
+                <span className={styles.sectionTitle}>Dates used for experience scoring</span>
+                <ul>
+                  {tenureEvidence.map((quote) => <li key={quote}>{quote}</li>)}
+                </ul>
+              </div>
+            )}
 
             {/* Must-have summary bar */}
             {mhSummary && (

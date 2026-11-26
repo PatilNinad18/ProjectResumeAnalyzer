@@ -40,6 +40,16 @@ from app.services.deterministic.missing_info_detector import create_missing_info
 
 logger = logging.getLogger("jd_agent.deterministic")
 
+_INLINE_SECTION_HEADER = re.compile(
+    r"(?:^|(?<=[.!?])[ \t]*)(?P<heading>"
+    r"Required Experience [Aa]nd Qualifications|Responsibilities [Aa]nd Duties|"
+    r"Ideal Candidate|Job Summary|(?:V\d+ )?Scope(?: Philosophy)?|Benefits"
+    r")(?:[ \t]*:[ \t]*|(?=[ \t]*\r?$|[A-Z]))"
+)
+_GLUED_SENTENCE_START = re.compile(
+    r"(?<=[.!?])(?=(?:We|You|The|This|Our|Experience|Proficiency|Must|Candidates|Applicants|Bachelor)\b)"
+)
+
 
 class DeterministicExtractor:
     """
@@ -64,17 +74,24 @@ class DeterministicExtractor:
         """
         sections: List[JDSection] = []
         lines = jd_text.split('\n')
+        section_lines = (
+            (line_num, segment)
+            for line_num, line in enumerate(lines, start=1)
+            for segment in _INLINE_SECTION_HEADER.split(line)
+            if segment or not line
+        )
         
         # Section header patterns
         section_patterns = [
             (r'^(?:qualifications?\s*(?:&|and)\s*requirements?|requirements?\s*(?:&|and)\s*qualifications?)\s*:?$', 'requirements'),
+            (r'^(?:required\s+)?experience\s*(?:&|and)\s*qualifications?\s*:?$', 'requirements'),
             (r'^(?:(?:key|minimum|basic|job|core|technical|must[- ]have|required)\s+)*(?:technical\s+)?requirements?\s*:?$', 'requirements'),
             (r'^(?:(?:key|minimum|basic|job|core|technical|must[- ]have|required)\s+)*(?:technical\s+)?skills?\s*:?$', 'requirements'),
             (r'^(?:minimum\s+|basic\s+|required\s+|desired\s+)?qualifications?\s*:?$', 'requirements'),
             (r'^(?:what\s+(?:we(?:\x27re|\s+are)?\s+looking\s+for|you(?:\x27ll)?\s+need|you\s+bring|we\s+expect))\s*:?$', 'requirements'),
-            (r'^(?:candidate\s+profile|eligibility(?:\s+criteria)?|must\s+haves?)\s*:?$', 'requirements'),
+            (r'^(?:ideal\s+candidate|candidate\s+profile|eligibility(?:\s+criteria)?|must\s+haves?)\s*:?$', 'requirements'),
             (r'^(?:(?:key|primary|core|main|major|essential|job)\s+)*(?:role\s*(?:&|and)\s*)?responsibilities?\s*:?$', 'responsibilities'),
-            (r'^(?:duties|role\s+overview|what\s+you\s+will\s+do|scope\s+of\s+work|your\s+role)\s*:?$', 'responsibilities'),
+            (r'^(?:responsibilities\s*(?:&|and)\s*duties|duties|role\s+overview|what\s+you\s+will\s+do|scope\s+of\s+work|your\s+role)\s*:?$', 'responsibilities'),
             (r'^(?:preferred\s+|nice\s+to\s+have|bonus\s+points?|plus|good\s+to\s+have|desired\s+)(?:skills?|qualifications?|requirements?)?\s*:?$', 'preferred'),
             (r'^(?:tech\s+stack|tools\s*(?:&|and)\s*technologies)\s*:?$', 'requirements'),
             (r'^(?:education(?:al)?(?:\s+background|\s+qualifications?)?|academic\s+background)\s*:?$', 'education'),
@@ -83,14 +100,16 @@ class DeterministicExtractor:
             (r'^(?:position\s+summary|role\s+summary|job\s+summary)\s*:?$', 'about'),
             (r'^(?:expected\s+deliverables|key\s+deliverables|deliverables)\s*:?$', 'responsibilities'),
             (r'^(?:growth\s+path|career\s+path|growth\s+opportunities)\s*:?$', 'about'),
+            (r'^(?:(?:v\d+\s+)?scope(?:\s+philosophy)?|benefits)\s*:?$', 'about'),
             (r'^(?:about\s+(?:us|the\s+company|the\s+role|the\s+team)|company\s+overview|who\s+we\s+are)\s*:?$', 'about'),
             (r'^(?:location|work\s+mode|work\s+arrangement|workplace\s+type)\s*:?$', 'location'),
         ]
         
         current_section: Optional[Dict] = None
         current_content: List[str] = []
+        previous_line_num = 1
         
-        for line_num, line in enumerate(lines, start=1):
+        for line_num, line in section_lines:
             clean_line = re.sub(r'^[#*_\-\s•]+|[#*_\-\s:]+$', '', line).strip()
             # Check if line is a section header (headers are short and not full sentences)
             matched_section = None
@@ -104,7 +123,7 @@ class DeterministicExtractor:
                 # Save previous section
                 if current_section:
                     current_section['content'] = '\n'.join(current_content).strip()
-                    current_section['line_end'] = line_num - 1
+                    current_section['line_end'] = previous_line_num
                     if current_section['content']:
                         sections.append(JDSection(**current_section))
                 elif current_content and any(c.strip() for c in current_content):
@@ -114,7 +133,7 @@ class DeterministicExtractor:
                         title="Overview",
                         section_type="general",
                         line_start=1,
-                        line_end=line_num - 1,
+                        line_end=previous_line_num,
                         content='\n'.join(current_content).strip(),
                     ))
                 
@@ -130,6 +149,7 @@ class DeterministicExtractor:
             else:
                 # Add line to current section content
                 current_content.append(line)
+            previous_line_num = line_num
         
         # Save last section
         if current_section:
@@ -214,8 +234,23 @@ class DeterministicExtractor:
             # Classify clause
             clause_type = self._classify_clause(clause_text, section.section_type)
             
-            # Determine priority
+            # Determine priority and retain any experience bounds on this clause.
             priority = self._detect_priority(clause_text, section.section_type)
+
+            experience_years = {}
+            if (
+                clause_type == ClauseType.REQUIREMENT
+                and priority in (RequirementPriority.MANDATORY, RequirementPriority.PREFERRED)
+                and (section.section_type == "experience" or re.search(r"\bexperience\b", clause_text, re.IGNORECASE))
+            ):
+                experience_years = {
+                    param.parameter_name: float(param.value)
+                    for param in self.parameter_extractor.extract_experience(clause_text)
+                    if param.parameter_name in {
+                        "experience_range_min", "experience_range_max", "min_experience_years",
+                        "total_experience_years", "relevant_experience_years", "domain_experience_years",
+                    }
+                }
             
             # Match EKG entities
             entity_matches = self.ekg.match_entities(clause_text)
@@ -241,7 +276,12 @@ class DeterministicExtractor:
                     line_number=section.line_start
                 ),
                 is_explicit=is_explicit,
-                requires_clarification=False
+                requires_clarification=False,
+                min_years=next(
+                    (value for name, value in experience_years.items() if name != "experience_range_max"),
+                    None,
+                ),
+                max_years=experience_years.get("experience_range_max"),
             )
             
             requirements.append(req)
@@ -333,9 +373,10 @@ class DeterministicExtractor:
             if subhead_pattern.match(clean) or metadata_pattern.match(clean):
                 continue
 
-            # Split sentences on period only when followed by whitespace and capital letter
-            # (protects decimals like TLM 2.0, Python 3.11, 8.5+ years)
+            # Restore known sentence starts glued to punctuation while preserving
+            # technology names and decimal numbers such as Next.js and Python 3.11.
             sentences = re.split(r'(?<=[a-zA-Z0-9])\.\s+(?=[A-Z])', clean)
+            sentences = [part for sentence in sentences for part in _GLUED_SENTENCE_START.split(sentence)]
 
             for sent in sentences:
                 sent = sent.strip()

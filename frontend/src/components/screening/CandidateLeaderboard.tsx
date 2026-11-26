@@ -1,5 +1,5 @@
 import styles from "./CandidateLeaderboard.module.css";
-import type { ScreeningLeaderboardItem, MatchTier } from "@/lib/screening_api";
+import type { ScreeningLeaderboardItem, MatchTier, ScreeningStatus } from "@/lib/screening_api";
 import type { SortKey, TierFilter } from "@/hooks/useCandidateScreening";
 
 interface CandidateLeaderboardProps {
@@ -44,16 +44,18 @@ function ScoreRing({ score }: { score: number | null }) {
   );
 }
 
-function StatusPill({ status }: { status: string }) {
+function StatusPill({ status }: { status: ScreeningStatus }) {
   if (status === "COMPLETED") return null;
-  const map: Record<string, string> = {
-    QUEUED: styles.pillQueued,
-    ANALYZING: styles.pillAnalyzing,
-    FAILED: styles.pillFailed,
+  const map = {
+    QUEUED: { label: "Queued", cls: styles.pillQueued },
+    ANALYZING: { label: "Analyzing", cls: styles.pillAnalyzing },
+    FAILED: { label: "Failed", cls: styles.pillFailed },
+    PARSE_FAILED: { label: "Unreadable resume", cls: styles.pillReview },
+    NEEDS_REVIEW: { label: "Needs review", cls: styles.pillReview },
   };
   return (
-    <span className={`${styles.statusPill} ${map[status] ?? ""}`}>
-      {status === "ANALYZING" ? "⟳ Analyzing" : status === "QUEUED" ? "Queued" : "Failed"}
+    <span className={`${styles.statusPill} ${map[status].cls}`}>
+      {map[status].label}
     </span>
   );
 }
@@ -69,13 +71,13 @@ export default function CandidateLeaderboard({
         <div className={styles.controlsLeft}>
           <span className={styles.resultCount}>{candidates.length} of {totalCandidates}</span>
           <div className={styles.filterBtns}>
-            {(["ALL", "STRONG_MATCH", "POTENTIAL_MATCH", "NOT_A_FIT"] as TierFilter[]).map((f) => (
+            {(["ALL", "STRONG_MATCH", "POTENTIAL_MATCH", "NOT_A_FIT", "REVIEW"] as TierFilter[]).map((f) => (
               <button
                 key={f}
                 className={`${styles.filterBtn} ${tierFilter === f ? styles.filterActive : ""}`}
                 onClick={() => onTierFilterChange(f)}
               >
-                {f === "ALL" ? "All" : f === "STRONG_MATCH" ? "🟢 Strong" : f === "POTENTIAL_MATCH" ? "🟡 Potential" : "🔴 Not a Fit"}
+                {f === "ALL" ? "All" : f === "STRONG_MATCH" ? "🟢 Strong" : f === "POTENTIAL_MATCH" ? "🟡 Potential" : f === "REVIEW" ? "Needs review" : "🔴 Not a Fit"}
               </button>
             ))}
           </div>
@@ -108,24 +110,32 @@ export default function CandidateLeaderboard({
                 <th>Tier</th>
                 <th>Must-Haves</th>
                 <th>Experience</th>
-                <th>Gaps</th>
+                <th>To verify</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {candidates.map((c) => {
                 const tier = c.match_tier ? TIER_META[c.match_tier] : null;
+                const canOpen = c.status === "COMPLETED" || c.status === "NEEDS_REVIEW" || c.status === "PARSE_FAILED";
                 return (
                   <tr
                     key={c.candidate_resume_id}
                     className={styles.tableRow}
-                    onClick={() => c.status === "COMPLETED" && onSelectCandidate(c.candidate_resume_id)}
-                    title={c.status !== "COMPLETED" ? `Status: ${c.status}` : "Click to view details"}
+                    onClick={() => canOpen && onSelectCandidate(c.candidate_resume_id)}
+                    title={c.review_reason ?? (canOpen ? "Click to view details" : undefined)}
                   >
-                    <td className={styles.rank}>#{c.rank}</td>
+                    <td className={styles.rank}>{c.rank != null ? `#${c.rank}` : "—"}</td>
                     <td className={styles.candidateCell}>
                       <div className={styles.candidateName}>
-                        {c.candidate_name ?? <em className={styles.unknown}>Unknown</em>}
+                        {canOpen ? (
+                          <button type="button" className={styles.candidateDetails} onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectCandidate(c.candidate_resume_id);
+                          }}>
+                            {c.candidate_name ?? "Candidate details"}
+                          </button>
+                        ) : c.candidate_name ?? <em className={styles.unknown}>Unknown</em>}
                       </div>
                       <div className={styles.candidateMeta}>
                         {c.email && <span>{c.email}</span>}
@@ -142,9 +152,9 @@ export default function CandidateLeaderboard({
                       ) : <span className={styles.scoreEmpty}>—</span>}
                     </td>
                     <td>
-                      <div className={styles.mustHaveBar}>
+                      {c.status === "COMPLETED" ? <div className={styles.mustHaveBar}>
                         <span className={styles.mustHaveCount}>
-                          {c.must_haves_met}/{c.must_haves_total}
+                          {c.must_haves_met}/{c.must_haves_total} met
                         </span>
                         <div className={styles.barTrack}>
                           <div
@@ -157,15 +167,15 @@ export default function CandidateLeaderboard({
                             }}
                           />
                         </div>
-                      </div>
+                      </div> : "—"}
                     </td>
                     <td className={styles.expCell}>
                       {c.total_experience_years != null ? `${c.total_experience_years}y` : "—"}
                     </td>
                     <td>
-                      {c.not_evidenced_count > 0 ? (
+                      {c.must_haves_partially_met + c.not_evidenced_count > 0 ? (
                         <span className={styles.gapBadge}>
-                          ⚠️ {c.not_evidenced_count} gap{c.not_evidenced_count !== 1 ? "s" : ""}
+                          {c.must_haves_partially_met} partial · {c.not_evidenced_count} not evidenced
                         </span>
                       ) : c.status === "COMPLETED" ? (
                         <span className={styles.noGap}>✓ None</span>

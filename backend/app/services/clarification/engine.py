@@ -1145,8 +1145,7 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
     """
     Propose conversational candidates grounded in JD statements via:
     1. Dynamic Ollama Ambiguity Discovery (Claude-style recruiter persona)
-    2. Guaranteed deterministic team-size & salary validation and inclusion
-    3. Deterministic domain-generalized fallback detectors when Ollama is unavailable
+    2. Deterministic domain-generalized fallback detectors when Ollama is unavailable
     """
     candidates: List[AmbiguityCandidate] = []
     ro = getattr(master, "role_overview", None)
@@ -1174,6 +1173,11 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
             topic = item.get("topic", f"Ambiguity {idx+1}")
             q_text = item.get("question", "")
             ft = item.get("field_target") or f"requirements.ambiguity_{idx+1}"
+            if ft in {"job_context.team_size", "job_context.salary_range"} or re.match(
+                r"(?:team[-_ ]size|salary|compensation)\b", topic, re.IGNORECASE
+            ):
+                # Optional job details are collected from canonical missing_information.
+                continue
             quote = item.get("evidence_quote") or "Information not specified in JD"
             opts = tuple(
                 (opt["label"].strip(), opt["description"].strip())
@@ -1336,7 +1340,11 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
             re.search(r"\band\s*/\s*or\b", text, re.IGNORECASE)
             or (
                 re.search(r"\band\b", text, re.IGNORECASE)
-                and re.search(r"\bor\b", text, re.IGNORECASE)
+                and re.search(
+                    r"\bor\b(?!\s+(?:(?:a|an)\s+)?(?:similar|equivalent|comparable)\b)",
+                    text,
+                    re.IGNORECASE,
+                )
             )
         )
         if mixed_logic and f"mixed_logic_{item.id[:8]}" not in existing_keys:
@@ -1346,19 +1354,20 @@ def _detect_conversational_ambiguities(master, existing_keys: set) -> List[Ambig
                 kind="boolean_logic",
                 source_statements=(statement,),
                 requirement_id=item.id,
-                field_target=f"requirements[id={item.id}].text",
+                field_target=f"requirements[id={item.id}].assessment_guidance",
                 reason="The source requirement combines AND and OR relationships without clear grouping.",
                 blocking=True,
             ))
             continue
-        if _TECHNICAL_SCOPE.search(text) and _VAGUE_SCOPE.search(text) and f"vague_technical_scope_{item.id[:8]}" not in existing_keys:
+        scope_text = re.sub(r"\bor (?:a )?related (?:field|discipline)\b", "", text, flags=re.IGNORECASE)
+        if _TECHNICAL_SCOPE.search(text) and _VAGUE_SCOPE.search(scope_text) and f"vague_technical_scope_{item.id[:8]}" not in existing_keys:
             candidates.append(AmbiguityCandidate(
                 key=f"vague_technical_scope_{item.id[:8]}",
                 category=QuestionCategory.TECHNICAL_SCOPE,
                 kind="vague_technical_criterion",
                 source_statements=(statement,),
                 requirement_id=item.id,
-                field_target=f"requirements[id={item.id}].text",
+                field_target=f"requirements[id={item.id}].assessment_guidance",
                 reason="The screening requirement uses a subjective or open-ended technical criterion.",
             ))
 

@@ -282,6 +282,7 @@ class EvidenceSpec(_Base):
 
 class RequirementInterpretation(_Base):
     """Explicit JD requirement vs. the derived evaluation interpretation."""
+    requirement_id: OptStr = None
     explicit_requirement: Str = ""
     derived_interpretation: StrList = Field(default_factory=list)
     rationale: OptStr = None
