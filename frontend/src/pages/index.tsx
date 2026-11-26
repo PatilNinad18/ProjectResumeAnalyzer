@@ -18,6 +18,8 @@ import type { CompanyDetails, CreatedAgent, BatchTask } from "@/lib/api";
 export default function Home() {
   // Navigation
   const [activeTab, setActiveTab] = useState<"workflow" | "screening" | "chat" | "settings">("workflow");
+  const [screeningJdId, setScreeningJdId] = useState<string | null>(null);
+  const [screeningBatchIds, setScreeningBatchIds] = useState<string[]>([]);
 
   const [agents, setAgents] = useState<CreatedAgent[]>([]);
   const [agentNameInput, setAgentNameInput] = useState("");
@@ -105,9 +107,16 @@ export default function Home() {
 
   const hasReadyContext = isStep3Done || Boolean(activeAgentForChat);
 
+  function openScreening(preferredId: string | null, batchIds: string[] = []) {
+    setScreeningJdId(preferredId);
+    setScreeningBatchIds(batchIds);
+    setActiveTab("screening");
+  }
+
   const workflowPageProps = {
     batchState,
     handleLaunchBatchAgent,
+    onScreenBatch: openScreening,
     isStep1Done,
     isStep2Done,
     currentStep,
@@ -183,7 +192,7 @@ export default function Home() {
     isCreatingAgent,
     createAgentError,
     handleCreateAgent,
-    onNavigateToScreening: () => setActiveTab("screening"),
+    onNavigateToScreening: () => openScreening(jdId),
   };
 
   const chatPageProps = {
@@ -261,8 +270,9 @@ export default function Home() {
           {activeTab === "settings" && <SettingsPage {...settingsPageProps} />}
           {activeTab === "screening" && (
             <ScreeningPage
-              jdId={jdId ?? undefined}
-              jdTitle={jobTitle ?? undefined}
+              preferredJdId={screeningJdId ?? (clarificationsData?.lifecycle_status === "FINALIZED" ? jdId : null)}
+              onSelectJd={setScreeningJdId}
+              initialBatchIds={screeningBatchIds}
             />
           )}
           {/* Delete Confirmation Modal */}

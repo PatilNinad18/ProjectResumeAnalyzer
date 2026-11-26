@@ -255,6 +255,7 @@ OptSource = Annotated[Optional[SourceRef], BeforeValidator(_to_source)]
 class EvidenceSpec(_Base):
     """What candidate evidence downstream Candidate Analysis should look for and how to weigh it."""
     requirement_id: OptStr = None
+    critical: bool = False
     requirement: Str = ""
     priority: PriorityT = Priority.AMBIGUOUS
     explicit_or_derived: ExplicitT = ExplicitOrDerived.DERIVED

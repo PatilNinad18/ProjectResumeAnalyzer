@@ -17,12 +17,12 @@ interface CandidateLeaderboardProps {
 const TIER_META: Record<MatchTier, { label: string; color: string; icon: string }> = {
   STRONG_MATCH:    { label: "Strong Match",    color: styles.tierStrong,    icon: "🟢" },
   POTENTIAL_MATCH: { label: "Potential Match", color: styles.tierPotential, icon: "🟡" },
-  NOT_A_FIT:       { label: "Not a Fit",       color: styles.tierNotFit,    icon: "🔴" },
+  NOT_A_FIT:       { label: "Limited evidence", color: styles.tierNotFit,    icon: "🔴" },
 };
 
 function ScoreRing({ score }: { score: number | null }) {
   if (score === null) return <span className={styles.scoreEmpty}>—</span>;
-  const color = score >= 80 ? "#16a34a" : score >= 60 ? "#d97706" : "#dc2626";
+  const color = score >= 75 ? "#16a34a" : score >= 50 ? "#d97706" : "#dc2626";
   const r = 18;
   const circ = 2 * Math.PI * r;
   const dash = (score / 100) * circ;
@@ -47,7 +47,6 @@ function ScoreRing({ score }: { score: number | null }) {
 
 function StatusPill({ status }: { status: ScreeningStatus }) {
   if (status === "COMPLETED") return null;
-<<<<<<< HEAD
   const map = {
     QUEUED: { label: "Queued", cls: styles.pillQueued },
     ANALYZING: { label: "Analyzing", cls: styles.pillAnalyzing },
@@ -58,23 +57,6 @@ function StatusPill({ status }: { status: ScreeningStatus }) {
   return (
     <span className={`${styles.statusPill} ${map[status].cls}`}>
       {map[status].label}
-=======
-  const map: Record<string, string> = {
-    QUEUED: styles.pillQueued,
-    ANALYZING: styles.pillAnalyzing,
-    FAILED: styles.pillFailed,
-    PARSE_FAILED: styles.pillFailed,
-  };
-  return (
-    <span className={`${styles.statusPill} ${map[status] ?? ""}`}>
-      {status === "ANALYZING"
-        ? "⟳ Analyzing"
-        : status === "QUEUED"
-        ? "Queued"
-        : status === "PARSE_FAILED"
-        ? "⚠️ Unreadable"
-        : "Failed"}
->>>>>>> smartleaven_work/main
     </span>
   );
 }
@@ -91,13 +73,13 @@ export default function CandidateLeaderboard({
         <div className={styles.controlsLeft}>
           <span className={styles.resultCount}>{candidates.length} of {totalCandidates}</span>
           <div className={styles.filterBtns}>
-            {(["ALL", "STRONG_MATCH", "POTENTIAL_MATCH", "NOT_A_FIT", "REVIEW"] as TierFilter[]).map((f) => (
+            {(["ALL", "STRONG_MATCH", "POTENTIAL_MATCH", "NOT_A_FIT", "REVIEW", "OUTDATED"] as TierFilter[]).map((f) => (
               <button
                 key={f}
                 className={`${styles.filterBtn} ${tierFilter === f ? styles.filterActive : ""}`}
                 onClick={() => onTierFilterChange(f)}
               >
-                {f === "ALL" ? "All" : f === "STRONG_MATCH" ? "🟢 Strong" : f === "POTENTIAL_MATCH" ? "🟡 Potential" : f === "REVIEW" ? "Needs review" : "🔴 Not a Fit"}
+                {f === "ALL" ? "All" : f === "STRONG_MATCH" ? "🟢 Strong" : f === "POTENTIAL_MATCH" ? "🟡 Potential" : f === "REVIEW" ? "Needs review" : f === "OUTDATED" ? "Needs rerun" : "🔴 Limited evidence"}
               </button>
             ))}
           </div>
@@ -144,8 +126,10 @@ export default function CandidateLeaderboard({
             </thead>
             <tbody>
               {candidates.map((c) => {
-                const tier = c.match_tier ? TIER_META[c.match_tier] : null;
-                const canOpen = c.status === "COMPLETED" || c.status === "NEEDS_REVIEW" || c.status === "PARSE_FAILED";
+                const effectiveTier = c.effective_tier ?? c.match_tier;
+                const tier = effectiveTier ? TIER_META[effectiveTier] : null;
+                const canOpen = c.evaluation_id !== null || c.status === "NEEDS_REVIEW" || c.status === "PARSE_FAILED";
+                const name = blindMode ? `Candidate ${c.candidate_resume_id.slice(0, 8)}` : c.candidate_name;
                 return (
                   <tr
                     key={c.candidate_resume_id}
@@ -156,22 +140,14 @@ export default function CandidateLeaderboard({
                     <td className={styles.rank}>{c.rank != null ? `#${c.rank}` : "—"}</td>
                     <td className={styles.candidateCell}>
                       <div className={styles.candidateName}>
-<<<<<<< HEAD
                         {canOpen ? (
                           <button type="button" className={styles.candidateDetails} onClick={(e) => {
                             e.stopPropagation();
                             onSelectCandidate(c.candidate_resume_id);
                           }}>
-                            {c.candidate_name ?? "Candidate details"}
+                            {name ?? "Candidate details"}
                           </button>
-                        ) : c.candidate_name ?? <em className={styles.unknown}>Unknown</em>}
-=======
-                        {blindMode ? (
-                          <span className={styles.blindTag}>Candidate #{c.rank}</span>
-                        ) : (
-                          c.candidate_name ?? <em className={styles.unknown}>Unknown</em>
-                        )}
->>>>>>> smartleaven_work/main
+                        ) : name ?? <em className={styles.unknown}>Unknown</em>}
                       </div>
                       <div className={styles.candidateMeta}>
                         {blindMode ? (
@@ -184,6 +160,8 @@ export default function CandidateLeaderboard({
                         )}
                       </div>
                       <StatusPill status={c.status} />
+                      {c.spec_outdated && <span className={`${styles.statusPill} ${styles.pillReview}`}>Needs rerun</span>}
+                      {c.has_override && <span className={`${styles.statusPill} ${styles.pillReview}`}>Recruiter override</span>}
                     </td>
                     <td><ScoreRing score={c.overall_score} /></td>
                     <td>
@@ -194,7 +172,7 @@ export default function CandidateLeaderboard({
                       ) : <span className={styles.scoreEmpty}>—</span>}
                     </td>
                     <td>
-                      {c.status === "COMPLETED" ? <div className={styles.mustHaveBar}>
+                      {c.rank != null ? <div className={styles.mustHaveBar}>
                         <span className={styles.mustHaveCount}>
                           {c.must_haves_met}/{c.must_haves_total} met
                         </span>
@@ -219,7 +197,7 @@ export default function CandidateLeaderboard({
                         <span className={styles.gapBadge}>
                           {c.must_haves_partially_met} partial · {c.not_evidenced_count} not evidenced
                         </span>
-                      ) : c.status === "COMPLETED" ? (
+                      ) : c.rank != null ? (
                         <span className={styles.noGap}>✓ None</span>
                       ) : null}
                     </td>

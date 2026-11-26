@@ -20,7 +20,8 @@ import enum
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from typing import Annotated
 
 
 # ---------------------------------------------------------------------------
@@ -40,19 +41,12 @@ class MatchTier(str, enum.Enum):
 
 
 class ScreeningStatus(str, enum.Enum):
-<<<<<<< HEAD
     QUEUED    = "QUEUED"
     ANALYZING = "ANALYZING"
     COMPLETED = "COMPLETED"
     FAILED    = "FAILED"
     PARSE_FAILED = "PARSE_FAILED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
-=======
-    QUEUED       = "QUEUED"
-    ANALYZING    = "ANALYZING"
-    COMPLETED    = "COMPLETED"
-    FAILED       = "FAILED"
-    PARSE_FAILED = "PARSE_FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +60,6 @@ class ParseQualityCheck(BaseModel):
     word_count:     int
     alpha_ratio:    float
     failure_reason: Optional[str] = None
->>>>>>> smartleaven_work/main
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +78,7 @@ class ResumeUploadResponse(BaseModel):
 
 class BatchResumeUploadResponse(BaseModel):
     uploaded:     List[ResumeUploadResponse]
-    failed:       List[Dict[str, str]]   # [{filename: str, error: str}]
+    failed:       List[Dict[str, str]]   # filename, error, and existing_candidate_resume_id for duplicates
     total_queued: int
 
 
@@ -115,20 +108,11 @@ class RequirementEvaluation(BaseModel):
         None,
         description="Verbatim excerpt from resume text, verified present in parsed_text.",
     )
-<<<<<<< HEAD
     evidence_quotes: List[str] = Field(default_factory=list)
     reasoning: str = Field(description="Brief explanation of why this status was assigned.")
-=======
-    quote_verified:    Optional[bool] = Field(
-        None,
-        description="True if evidence_quote was confirmed in parsed_text. None for NOT_EVIDENCED.",
-    )
-    searched_keywords: List[str] = Field(
-        default_factory=list,
-        description="Keywords searched during classification — audit trail for NOT_EVIDENCED.",
-    )
-    reasoning: str = Field(description="Brief explanation of the assigned status.")
->>>>>>> smartleaven_work/main
+    quote_verified: Optional[bool] = None
+    searched_keywords: List[str] = Field(default_factory=list)
+    critical: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -153,13 +137,10 @@ class ScoreBreakdown(BaseModel):
     active_weight_total:   float
     must_have_base_weight: float
     preferred_base_weight: float
-<<<<<<< HEAD
     tenure_base_weight:   float
     tenure_evidence:      List[str] = Field(default_factory=list)
-=======
-    tenure_base_weight:    float
+    critical_to_verify:   List[str] = Field(default_factory=list)
     warning:               Optional[str] = None   # e.g. "NO_EVALUATION_CRITERIA_DEFINED"
->>>>>>> smartleaven_work/main
 
 
 # ---------------------------------------------------------------------------
@@ -212,17 +193,13 @@ class RecruiterOverrideRequest(BaseModel):
         None, ge=0, le=100,
         description="Recruiter's corrected score (0-100). Optional.",
     )
-    reason: str = Field(
-        min_length=10,
-        description="Mandatory justification for the override (minimum 10 characters).",
-    )
-    overridden_by: Optional[str] = Field(
-        None,
-        description="Identifier of the recruiter making this override (email, name, or user ID).",
-    )
+    evaluation_id: str
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+    overridden_by: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 
 
 class RecruiterOverrideResponse(BaseModel):
+    evaluation_id:           str
     candidate_resume_id:    str
     job_description_id:     str
     recruiter_override_tier: MatchTier
@@ -231,6 +208,36 @@ class RecruiterOverrideResponse(BaseModel):
     overridden_by:           Optional[str]
     overridden_at:           datetime
     message:                 str
+
+
+class ScreeningOverrideEvent(BaseModel):
+    tier: MatchTier
+    score: Optional[int] = None
+    reason: str
+    reviewer: Optional[str]
+    created_at: datetime
+
+
+class ScreeningRun(BaseModel):
+    evaluation_id: str
+    specification_version: int
+    status: ScreeningStatus
+    overall_score: Optional[int]
+    match_tier: Optional[MatchTier]
+    evaluator_version: Optional[str]
+    spec_outdated: bool
+    created_at: Optional[datetime]
+
+
+class ScreeningCriterion(BaseModel):
+    requirement_id: str
+    text: str
+    critical: bool = False
+
+
+class ScreeningPolicyUpdate(BaseModel):
+    spec_version_id: str
+    critical_requirement_ids: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +251,11 @@ class CandidateEvaluationResponse(BaseModel):
     spec_version_id:       Optional[str]
     specification_version: int
     spec_outdated:         bool = False
+    evaluation_id:         Optional[str] = None
+    spec_checksum:         Optional[str] = None
+    runs:                  List[ScreeningRun] = Field(default_factory=list)
+    override_history:      List[ScreeningOverrideEvent] = Field(default_factory=list)
+    can_override:          bool = False
 
     status:        ScreeningStatus
     review_reason: Optional[str] = None
@@ -288,6 +300,8 @@ class ScreeningLeaderboardItem(BaseModel):
     """Compact candidate entry for the recruiter leaderboard table."""
     rank:                   Optional[int]
     candidate_resume_id:    str
+    evaluation_id:         Optional[str] = None
+    has_override:          bool = False
     filename:               str
     candidate_name:         Optional[str]
     email:                  Optional[str]
@@ -300,14 +314,11 @@ class ScreeningLeaderboardItem(BaseModel):
     not_evidenced_count:    int
     validation_checkpoints_count: int
     status:                 ScreeningStatus
-<<<<<<< HEAD
     review_reason:          Optional[str] = None
-=======
     parse_failed:           bool = False    # True if PARSE_FAILED status
     spec_outdated:          bool = False    # True if evaluated against an older spec
     # Show effective tier (recruiter override wins if present)
     effective_tier:         Optional[MatchTier] = None
->>>>>>> smartleaven_work/main
     created_at:             Optional[datetime]
 
     model_config = ConfigDict(from_attributes=True)
@@ -317,6 +328,10 @@ class ScreeningLeaderboardResponse(BaseModel):
     job_description_id: str
     total_candidates:   int
     candidates:         List[ScreeningLeaderboardItem]
+    spec_version_id:    Optional[str] = None
+    specification_version: Optional[int] = None
+    spec_finalized:     bool = False
+    criteria:           List[ScreeningCriterion] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,12 @@ backend/.pytest_cache/
 *.sqlite3
 *.db
 *.sqlite
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
 storage_data/
 backend/storage_data/
 backend/*.db

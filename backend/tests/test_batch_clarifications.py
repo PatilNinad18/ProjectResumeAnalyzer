@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_five_batch_jds_keep_questions_isolated_and_refresh_answered_artifacts():
+def test_batch_jds_keep_questions_isolated_and_screen_after_finalization():
     from app.schemas.master_context import JDMasterContext
     from tests.stubs import make_unresolved
 
@@ -171,6 +171,63 @@ def test_five_batch_jds_keep_questions_isolated_and_refresh_answered_artifacts()
             names = zipped.namelist()
         assert len(names) == 10
         assert len(set(names)) == len(names)
+
+        # Resolve two more roles while leaving role 3 unfinished. The saved job
+        # list and the batch must agree on which specifications can be screened.
+        for index in (1, 2):
+            task = tasks_by_filename[f"role-{index}.txt"]
+            role_id = task["jd_id"]
+            question_key = questions_by_jd[role_id][0]["question_key"]
+            resolved = client.post(
+                f"/api/jds/{role_id}/clarifications/resolve",
+                json={"answers": {question_key: "Mandatory"}},
+            )
+            assert resolved.status_code == 202, resolved.text
+            assert client.get(f"/api/jds/{role_id}/tasks/resolve").json()["status"] == "done"
+            assert client.post(f"/api/batches/{batch_id}/tasks/{task['task_id']}/refresh").status_code == 200
+
+        batch_tasks = {task["jd_id"]: task for task in client.get(f"/api/batches/{batch_id}").json()["tasks"]}
+        saved = client.get("/api/jds", params={"project_id": "batch-clarification-isolation"})
+        assert saved.status_code == 200, saved.text
+        saved_jobs = {job["jd_id"]: job for job in saved.json()}
+        screening_ids = jd_ids_by_index[:3]
+        for role_id in screening_ids:
+            assert batch_tasks[role_id]["lifecycle_status"] == "FINALIZED"
+            assert saved_jobs[role_id]["lifecycle_status"] == "FINALIZED"
+        assert saved_jobs[jd_ids_by_index[3]]["lifecycle_status"] == "AWAITING_CLARIFICATION"
+
+        resume = b"Alex Example designed printed circuit boards, verified schematics and documented the validation results."
+        files = [("files", ("alex.txt", resume, "text/plain"))]
+        candidate_ids = set()
+        run_ids = set()
+        for role_id in screening_ids:
+            base = f"/api/jds/{role_id}/resumes"
+            spec_id = saved_jobs[role_id]["spec_version_id"]
+            assert spec_id
+            assert client.post(f"{base}/screen", json={"spec_version_id": spec_id}).status_code == 404
+            uploaded = client.post(base, files=files)
+            assert uploaded.status_code == 202, uploaded.text
+            candidate_id = uploaded.json()["uploaded"][0]["candidate_resume_id"]
+            assert candidate_id not in candidate_ids
+            candidate_ids.add(candidate_id)
+            queued = client.post(
+                f"{base}/screen",
+                json={"spec_version_id": spec_id, "candidate_resume_ids": [candidate_id]},
+            )
+            assert queued.status_code == 202, queued.text
+            assert queued.json()["queued_count"] == 1
+            run_id = queued.json()["candidate_resume_ids"][0]
+            assert run_id not in run_ids
+            run_ids.add(run_id)
+            leaderboard = client.get(base).json()
+            assert leaderboard["spec_version_id"] == spec_id
+            assert leaderboard["total_candidates"] == 1
+            assert leaderboard["candidates"][0]["candidate_resume_id"] == candidate_id
+            assert leaderboard["candidates"][0]["evaluation_id"] == run_id
+
+        unfinalized_base = f"/api/jds/{jd_ids_by_index[3]}/resumes"
+        assert client.post(unfinalized_base, files=files).status_code == 202
+        assert client.post(f"{unfinalized_base}/screen").status_code == 409
 
 
 def test_batch_failure_isolation_retry_and_safe_cancellation():

@@ -17,6 +17,7 @@ Tests:
      - Candidate deletion
 """
 import io
+import time
 import uuid
 import pytest
 from fastapi.testclient import TestClient
@@ -159,6 +160,8 @@ def test_evaluator_scoring_edge_case_zero_criteria():
         ("Python", "I have no experience with Python.", "NOT_EVIDENCED"),
         ("AWS deployment", "Configured AWS Identity and Access Management for the team.", "PARTIALLY_MET"),
         ("AWS deployment", "Deployed an inventory service to AWS.", "MET"),
+        ("Kafka, RabbitMQ, or Redis", "Built asynchronous billing workers with RabbitMQ.", "MET"),
+        ("SQL and relational database optimization (PostgreSQL or MySQL)", "Optimized PostgreSQL queries for the inventory service.", "MET"),
         ("Python for financial modeling", "Built an inventory application in Python.", "PARTIALLY_MET"),
         ("Python for financial modeling", "Built a Python tool for financial modeling.", "MET"),
         ("C++", "Implemented a renderer in C++ for a game prototype.", "MET"),
@@ -275,6 +278,31 @@ def test_evaluator_guardrail_caps_unevidenced_must_have():
     assert tier == "POTENTIAL_MATCH"
 
 
+def test_critical_partial_evidence_caps_tier_without_changing_score():
+    must = [
+        {"requirement": "Python", "status": "MET", "score_weight": 1.0},
+        {"requirement": "PostgreSQL", "status": "PARTIALLY_MET", "score_weight": 0.5},
+    ]
+    score, tier, _ = _compute_score(must, [], 0.0, 0.0)
+    assert (score, tier) == (75, "STRONG_MATCH")
+    must[-1]["critical"] = True
+    score, tier, details = _compute_score(must, [], 0.0, 0.0)
+    assert (score, tier) == (75, "POTENTIAL_MATCH")
+    assert details["critical_to_verify"] == ["PostgreSQL"]
+
+
+def test_employment_gap_is_absent_from_screening_observations():
+    resume = (
+        "Experience\nEngineer at Example A\nJan 2015 - Dec 2016\n"
+        "Developed a Python scheduling service.\n\n"
+        "Engineer at Example B\nJan 2020 - Jun 2022\n"
+        "Built a Python validation pipeline.\n"
+    )
+    result = evaluate_candidate(resume, profile_resume(resume), {"must_have_requirements": ["Python"]})
+    assert result["overall_score"] == 100
+    assert result["timeline_observations"] == []
+
+
 # ---------------------------------------------------------------------------
 # 3. API Integration Tests
 # ---------------------------------------------------------------------------
@@ -325,6 +353,18 @@ def test_setup():
     db.close()
 
 
+def _wait_for_screening(client: TestClient, base: str, count: int) -> list[dict]:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(base)
+        assert response.status_code == 200
+        candidates = response.json()["candidates"]
+        if len(candidates) == count and all(row["status"] not in {"QUEUED", "ANALYZING"} for row in candidates):
+            return candidates
+        time.sleep(0.025)
+    pytest.fail("Screening did not reach a terminal state.")
+
+
 def test_resume_screening_api_lifecycle(test_setup):
     client = TestClient(app)
     jd_id = test_setup["jd_id"]
@@ -344,20 +384,8 @@ def test_resume_screening_api_lifecycle(test_setup):
     assert res_screen.status_code == 202
     assert res_screen.json()["queued_count"] >= 1
 
-    # Give background worker a brief moment to process or execute inline
-    from app.workers.screening_worker import process_candidate_evaluation
-    db = SessionLocal()
-    eval_row = db.query(CandidateEvaluation).filter(CandidateEvaluation.candidate_resume_id == resume_id).first()
-    if eval_row and eval_row.status != ScreeningStatusEnum.COMPLETED:
-        process_candidate_evaluation(db, eval_row.id)
-    db.close()
-
     # 3. Check Leaderboard
-    res_lb = client.get(f"/api/jds/{jd_id}/resumes")
-    assert res_lb.status_code == 200
-    lb_data = res_lb.json()
-    assert lb_data["total_candidates"] == 1
-    item = lb_data["candidates"][0]
+    item, = _wait_for_screening(client, f"/api/jds/{jd_id}/resumes", 1)
     assert item["candidate_resume_id"] == resume_id
     assert item["overall_score"] is not None
     assert item["match_tier"] in ("STRONG_MATCH", "POTENTIAL_MATCH", "NOT_A_FIT")
@@ -380,7 +408,6 @@ def test_resume_screening_api_lifecycle(test_setup):
 
 def test_screening_review_rows_are_unranked_and_coverage_matches_detail(test_setup):
     from pypdf import PdfWriter
-    from app.workers.screening_worker import process_candidate_evaluation
 
     client = TestClient(app)
     jd_id, spec_id = test_setup["jd_id"], test_setup["spec_id"]
@@ -397,12 +424,8 @@ def test_screening_review_rows_are_unranked_and_coverage_matches_detail(test_set
     assert upload.status_code == 202
     response = client.post(f"{base}/screen", json={"spec_version_id": spec_id})
     assert response.status_code == 202
-    evaluation_ids = response.json()["candidate_resume_ids"]
-    with SessionLocal() as db:
-        for evaluation_id in evaluation_ids:
-            process_candidate_evaluation(db, evaluation_id)
 
-    leaderboard = {row["filename"]: row for row in client.get(base).json()["candidates"]}
+    leaderboard = {row["filename"]: row for row in _wait_for_screening(client, base, 3)}
     for filename, status in (("scan.pdf", "PARSE_FAILED"), ("sparse.txt", "NEEDS_REVIEW")):
         row = leaderboard[filename]
         assert row["status"] == status
@@ -429,10 +452,215 @@ def test_screening_review_rows_are_unranked_and_coverage_matches_detail(test_set
     })
     assert rerun.status_code == 202
     assert client.get(detail_path).json()["overall_score"] is None
-    with SessionLocal() as db:
-        process_candidate_evaluation(db, rerun.json()["candidate_resume_ids"][0])
+    _wait_for_screening(client, base, 3)
     detail = client.get(detail_path).json()
     assert detail["status"] == "NEEDS_REVIEW"
     assert "no usable screening criteria" in detail["review_reason"]
     assert detail["overall_score"] is None
     assert all(row["rank"] is None for row in client.get(base).json()["candidates"])
+
+
+def test_screening_runs_preserve_audited_overrides_and_pin_specification_revisions(test_setup, monkeypatch):
+    from app.models.db_models import AuditEvent
+    from app.services.enrichment.ta_enrichment_service import get_enrichment_service
+    from app.services.storage import get_storage
+    from app.workers import screening_worker
+    from app.workers.worker import process_job_description_version
+
+    process_candidate_evaluation = screening_worker.process_candidate_evaluation
+    monkeypatch.setattr(screening_worker, "process_candidate_evaluation", lambda *_: None)
+    client = TestClient(app)
+    jd_id, spec_id = test_setup["jd_id"], test_setup["spec_id"]
+    base = f"/api/jds/{jd_id}/resumes"
+    with SessionLocal() as db:
+        spec = db.get(JobSpecificationVersion, spec_id)
+        spec.canonical_json = {
+            "must_have_requirements": ["Python", "Kubernetes"],
+            "evidence_requirements": [
+                {"requirement_id": "python", "requirement": "Python", "priority": "MUST_HAVE"},
+                {"requirement_id": "k8s", "requirement": "Kubernetes", "priority": "MUST_HAVE"},
+            ],
+        }
+        db.commit()
+
+    resume = "Projects\nDeveloped a reporting pipeline in Python.\n\nSkills\nKubernetes, PostgreSQL, Git, Docker, Linux\n"
+    uploaded = client.post(base, files=[("files", ("versioned.txt", resume, "text/plain"))]).json()
+    resume_id = uploaded["uploaded"][0]["candidate_resume_id"]
+    detail_path = f"{base}/{resume_id}"
+    first = client.post(f"{base}/screen", json={"spec_version_id": spec_id})
+    assert first.status_code == 202
+    first_id, = first.json()["candidate_resume_ids"]
+    retried = client.post(f"{base}/screen", json={"spec_version_id": spec_id})
+    assert retried.json()["candidate_resume_ids"] == [first_id]
+    with SessionLocal() as db:
+        process_candidate_evaluation(db, first_id)
+
+    detail = client.get(detail_path).json()
+    assert detail["spec_version_id"] == spec_id
+    assert detail["specification_version"] == 2
+    assert len(detail["spec_checksum"]) == 64
+    assert detail["provenance"]["evaluator_engine"] == "resume-evidence-v3"
+    assert detail["overall_score"] == 75 and detail["match_tier"] == "STRONG_MATCH"
+    assert detail["can_override"]
+
+    decision = {
+        "evaluation_id": first_id, "override_tier": "POTENTIAL_MATCH", "overridden_by": "Recruiter A",
+        "reason": "Verified one responsibility during the interview.",
+    }
+    assert client.post(f"{detail_path}/override", json={**decision, "reason": " " * 20}).status_code == 422
+    assert client.post(f"{detail_path}/override", json=decision).status_code == 200
+    assert client.post(f"{detail_path}/override", json={
+        **decision, "override_tier": "NOT_A_FIT", "override_score": 0, "reason": "Updated after reviewing the work sample.",
+    }).status_code == 200
+    assert client.get(base).json()["candidates"][0]["overall_score"] == 0
+    detail = client.get(detail_path).json()
+    assert detail["overall_score"] == 75
+    assert [event["tier"] for event in detail["override_history"]] == ["NOT_A_FIT", "POTENTIAL_MATCH"]
+
+    queued_old = client.post(f"{detail_path}/re-screen").json()["candidate_resume_ids"][0]
+    assert queued_old != first_id
+    with SessionLocal() as db:
+        assert db.get(CandidateEvaluation, queued_old).spec_version_id == spec_id
+    change = client.put(f"{base}/policy", json={"spec_version_id": spec_id, "critical_requirement_ids": ["k8s"]})
+    assert change.status_code == 200
+    new_spec_id = change.json()["spec_version_id"]
+    assert change.json()["specification_version"] == 3
+    with SessionLocal() as db:
+        process_candidate_evaluation(db, queued_old)
+    outdated = client.get(base).json()["candidates"][0]
+    assert outdated["spec_outdated"] and outdated["rank"] is None
+    assert client.get(f"{base}/status").json()["candidates"][0]["overall_score"] is None
+    assert client.post(f"{base}/screen", json={"spec_version_id": spec_id}).status_code == 409
+    assert client.post(f"{detail_path}/override", json=decision).status_code == 409
+
+    rerun = client.post(f"{detail_path}/re-screen", params={"spec_version_id": new_spec_id})
+    assert rerun.status_code == 202
+    latest_id, = rerun.json()["candidate_resume_ids"]
+    with SessionLocal() as db:
+        process_candidate_evaluation(db, latest_id)
+        assert db.get(CandidateEvaluation, first_id).overall_score == 75
+        assert db.get(CandidateEvaluation, queued_old).spec_version_id == spec_id
+        assert db.get(CandidateEvaluation, latest_id).spec_version_id == new_spec_id
+        assert db.query(AuditEvent).filter_by(entity_type="candidate_evaluation", entity_id=first_id).count() == 2
+
+    latest = client.get(detail_path).json()
+    assert latest["evaluation_id"] == latest_id
+    assert latest["spec_outdated"] is False
+    assert latest["overall_score"] == 75 and latest["match_tier"] == "POTENTIAL_MATCH"
+    assert latest["score_breakdown"]["critical_to_verify"] == ["Kubernetes"]
+    assert latest["recruiter_override_tier"] is None
+    assert len(latest["runs"]) == 3
+    historical = client.get(detail_path, params={"evaluation_id": first_id}).json()
+    assert historical["spec_outdated"] and not historical["can_override"]
+    assert historical["recruiter_override_score"] == 0
+    assert len(historical["override_history"]) == 2
+
+    monkeypatch.setattr(get_enrichment_service(), "check_ollama_available", lambda: False)
+    with SessionLocal() as db:
+        jd_version = db.get(JobSpecificationVersion, new_spec_id).jd_version
+        get_storage().put_text(jd_version.s3_raw_key, "Job Title: Engineer\n\nRequirements:\n- Python development is required.")
+        process_job_description_version(db, jd_version.id)
+    reanalyzed = client.get(base).json()
+    assert reanalyzed["specification_version"] == 4
+    assert reanalyzed["candidates"][0]["spec_outdated"]
+    assert reanalyzed["candidates"][0]["rank"] is None
+
+
+def test_candidate_data_scoping_and_retryable_removal(test_setup, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from app.models.db_models import AuditEvent
+
+    client = TestClient(app)
+    jd_id, spec_id = test_setup["jd_id"], test_setup["spec_id"]
+    with SessionLocal() as db:
+        second_jd = JobDescription(project_id=db.get(JobDescription, jd_id).project_id, title="Different role")
+        db.add(second_jd)
+        db.commit()
+        other_jd = second_jd.id
+    base = f"/api/jds/{jd_id}/resumes"
+    other_base = f"/api/jds/{other_jd}/resumes"
+    content = b"Projects\nDeveloped Python software for reporting and reconciled large batches of test accounts.\n"
+    first = client.post(base, files=[("files", ("resume.txt", content, "text/plain"))]).json()
+    resume_id = first["uploaded"][0]["candidate_resume_id"]
+    detail_path = f"{base}/{resume_id}"
+    duplicate = client.post(base, files=[("files", ("renamed.txt", content, "text/plain"))]).json()
+    assert not duplicate["uploaded"]
+    assert "Duplicate" in duplicate["failed"][0]["error"]
+    assert duplicate["failed"][0]["existing_candidate_resume_id"] == resume_id
+    other = client.post(other_base, files=[("files", ("resume.txt", content, "text/plain"))]).json()
+    other_id = other["uploaded"][0]["candidate_resume_id"]
+    assert other_id != resume_id
+    assert client.get(f"{other_base}/{resume_id}").status_code == 404
+    assert client.delete(f"{other_base}/{resume_id}").status_code == 404
+
+    with SessionLocal() as db:
+        resume = db.get(CandidateResume, resume_id)
+        file_path = Path(resume.file_key)
+        run = CandidateEvaluation(candidate_resume_id=resume_id, job_description_id=jd_id,
+                                  spec_version_id=spec_id, status=ScreeningStatusEnum.ANALYZING)
+        db.add(run)
+        db.flush()
+        run_id = run.id
+        db.add(AuditEvent(entity_type="candidate_evaluation", entity_id=run_id, action="test_review"))
+        db.commit()
+    assert client.delete(detail_path).status_code == 409
+    assert file_path.is_file()
+
+    outside = tmp_path / "unrelated.txt"
+    outside.write_text("Keep this file.", encoding="utf-8")
+    with SessionLocal() as db:
+        db.get(CandidateEvaluation, run_id).status = ScreeningStatusEnum.COMPLETED
+        db.get(CandidateResume, resume_id).file_key = str(outside)
+        db.commit()
+    assert client.delete(detail_path).status_code == 503
+    assert outside.is_file()
+    with SessionLocal() as db:
+        db.get(CandidateResume, resume_id).file_key = str(file_path)
+        db.commit()
+
+    unlink = Path.unlink
+    with monkeypatch.context() as patch:
+        def locked(path, *args, **kwargs):
+            if path == file_path:
+                raise PermissionError("File is in use")
+            return unlink(path, *args, **kwargs)
+
+        patch.setattr(Path, "unlink", locked)
+        assert client.delete(detail_path).status_code == 503
+        assert client.get(detail_path).status_code == 200
+    assert client.delete(detail_path).status_code == 204
+    assert not file_path.exists()
+    assert client.get(f"{other_base}/{other_id}").status_code == 200
+    with SessionLocal() as db:
+        assert db.get(CandidateEvaluation, run_id) is None
+        assert db.query(AuditEvent).filter_by(entity_id=run_id).count() == 0
+
+
+def test_retention_is_job_scoped_and_previews_before_removal(test_setup):
+    from datetime import datetime, timedelta, timezone
+
+    from scripts.candidate_retention import run
+
+    jd_id = test_setup["jd_id"]
+    with SessionLocal() as db:
+        second_jd = JobDescription(project_id=db.get(JobDescription, jd_id).project_id, title="Different role")
+        db.add(second_jd)
+        db.flush()
+        timestamp = datetime.now(timezone.utc) - timedelta(days=31)
+        expired = CandidateResume(job_description_id=jd_id, filename="older.txt", created_at=timestamp)
+        current = CandidateResume(job_description_id=jd_id, filename="current.txt")
+        elsewhere = CandidateResume(job_description_id=second_jd.id, filename="older.txt", created_at=timestamp)
+        db.add_all([expired, current, elsewhere])
+        db.flush()
+        expired_id, current_id, elsewhere_id = expired.id, current.id, elsewhere.id
+        db.commit()
+
+    assert run(jd_id, 30, apply=False)["matching"] == 1
+    with SessionLocal() as db:
+        assert db.get(CandidateResume, expired_id)
+    assert run(jd_id, 30, apply=True)["removed"] == 1
+    with SessionLocal() as db:
+        assert db.get(CandidateResume, expired_id) is None
+        assert db.get(CandidateResume, current_id)
+        assert db.get(CandidateResume, elsewhere_id)

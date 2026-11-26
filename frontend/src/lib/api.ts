@@ -138,6 +138,19 @@ async function request<T>(
 // ---------------------------------------------------------------------------
 // JD endpoints
 // ---------------------------------------------------------------------------
+export interface SavedJD {
+  jd_id: string;
+  project_id: string;
+  title: string;
+  specification_version: number | null;
+  spec_version_id: string | null;
+  lifecycle_status: string | null;
+}
+
+export async function listJDs(signal?: AbortSignal): Promise<SavedJD[]> {
+  return request("/api/jds", { signal });
+}
+
 export async function uploadJD(
   projectId: string,
   input: { text?: string; file?: File },

@@ -10,6 +10,7 @@ type BatchHook = ReturnType<typeof useJDBatch>;
 export interface BatchUploadSectionProps {
   state: BatchHook;
   onLaunchAgent: (agentName: string, task: BatchTask, markdown: string) => Promise<void>;
+  onScreenBatch: (jdId: string, batchIds?: string[]) => void;
 }
 
 const taskStatusLabel: Record<BatchTask["status"], string> = {
@@ -111,7 +112,7 @@ function missingInfoLabel(item: Record<string, unknown>, index: number) {
     : `Missing information ${index + 1}`;
 }
 
-export default function BatchUploadSection({ state, onLaunchAgent }: BatchUploadSectionProps) {
+export default function BatchUploadSection({ state, onLaunchAgent, onScreenBatch }: BatchUploadSectionProps) {
   const [agentName, setAgentName] = useState("");
   const [isLaunchingAgent, setIsLaunchingAgent] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
@@ -193,11 +194,11 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
 
   const nextUnfinishedTask = batch?.tasks.find(
     (t) => t.task_id !== selectedTask?.task_id && t.status === "COMPLETED" && t.lifecycle_status !== "FINALIZED"
-  ) || batch?.tasks.find((t) => t.task_id !== selectedTask?.task_id);
+  );
 
   async function handleResolveAndNext() {
-    await resolveSelectedTask();
-    if (nextUnfinishedTask) {
+    const finalized = await resolveSelectedTask();
+    if (finalized && nextUnfinishedTask) {
       setSelectedTaskId(nextUnfinishedTask.task_id);
     }
   }
@@ -221,6 +222,7 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
   }
 
   if (!batch) return null;
+  const finalizedTasks = batch.tasks.filter((task) => task.status === "COMPLETED" && task.lifecycle_status === "FINALIZED");
 
   return (
     <section className={styles.section} aria-labelledby="batch-jd-heading">
@@ -247,6 +249,12 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
           <span>{batch.queued} queued</span>
           <span>{batch.failed} failed</span>
           <span>{batch.cancelled} cancelled</span>
+          {finalizedTasks.length > 1 && (
+            <button type="button" className="btn-primary" onClick={() => onScreenBatch(
+              finalizedTasks.find((task) => task.task_id === selectedTaskId)?.jd_id ?? finalizedTasks[0].jd_id,
+              finalizedTasks.map((task) => task.jd_id),
+            )}>Screen {finalizedTasks.length} finalized jobs</button>
+          )}
         </div>
         <div className={styles.progressTrack} role="progressbar" aria-valuenow={batch.progress_percent} aria-valuemin={0} aria-valuemax={100}>
           <div className={styles.progressFill} style={{ width: `${batch.progress_percent}%` }} />
@@ -306,6 +314,9 @@ export default function BatchUploadSection({ state, onLaunchAgent }: BatchUpload
           </select>
           {selectedTask && (
             <div className={styles.taskActions}>
+              {finalizedTasks.some((task) => task.task_id === selectedTask.task_id) && (
+                <button type="button" className="btn-primary" onClick={() => onScreenBatch(selectedTask.jd_id)}>Screen resumes for this job</button>
+              )}
               {(selectedTask.status === "QUEUED" || selectedTask.status === "PROCESSING") && (
                 <button type="button" className="btn-ghost-dark" onClick={() => void cancelTask(selectedTask)}>Cancel JD</button>
               )}

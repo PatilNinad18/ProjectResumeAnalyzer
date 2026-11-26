@@ -248,7 +248,7 @@ export function useJDBatch(projectId: string) {
   }
 
   async function resolveSelectedTask() {
-    if (!batch || !selectedTask || !clarifications || resolveLock.current) return;
+    if (!batch || !selectedTask || !clarifications || resolveLock.current) return false;
     resolveLock.current = true;
     setIsResolving(true);
     setTaskError(null);
@@ -259,8 +259,10 @@ export function useJDBatch(projectId: string) {
       const latest = await getJDBatch(batch.batch_id);
       setBatch(latest);
       setArtifactRevision((revision) => revision + 1);
+      return latest.tasks.some((task) => task.task_id === selectedTask.task_id && task.lifecycle_status === "FINALIZED");
     } catch (cause) {
       setTaskError(cause instanceof Error ? cause.message : "Could not resolve this JD's ambiguities.");
+      return false;
     } finally {
       resolveLock.current = false;
       setIsResolving(false);

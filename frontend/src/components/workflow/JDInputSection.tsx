@@ -32,11 +32,13 @@ type JDInputSectionProps = Pick<
 type JDInputSectionPropsWithBatch = JDInputSectionProps & {
   batchState: ReturnType<typeof useJDBatch>;
   handleLaunchBatchAgent: WorkflowPageProps["handleLaunchBatchAgent"];
+  onScreenBatch: WorkflowPageProps["onScreenBatch"];
 };
 
 export default function JDInputSection({
   batchState,
   handleLaunchBatchAgent,
+  onScreenBatch,
   agents,
   handleResetForNewJD,
   status,
@@ -58,7 +60,7 @@ export default function JDInputSection({
   setError,
 }: JDInputSectionPropsWithBatch) {
   // ── Mode toggle: "single" = one JD textarea/file, "multi" = batch parallel upload ──
-  const [mode, setMode] = useState<"single" | "multi">("single");
+  const [mode, setMode] = useState<"single" | "multi">(() => batchState.batch ? "multi" : "single");
 
   const analysisRunning = status !== null && !TERMINAL_STATUSES.includes(status);
   const batchFiles = batchState.files;
@@ -336,6 +338,7 @@ export default function JDInputSection({
             <BatchUploadSection
               state={batchState}
               onLaunchAgent={handleLaunchBatchAgent}
+              onScreenBatch={onScreenBatch}
             />
           )}
         </div>

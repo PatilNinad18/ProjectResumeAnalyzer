@@ -1,17 +1,21 @@
+import { useState } from "react";
 import styles from "./CandidateDetailDrawer.module.css";
-import type { CandidateEvaluationDetail, RequirementEvaluation, ValidationCheckpoint, MatchTier } from "@/lib/screening_api";
+import { MATCH_TIER_LABELS, type CandidateEvaluationDetail, type RequirementEvaluation, type MatchTier, type ScreeningOverrideRequest } from "@/lib/screening_api";
 
 interface CandidateDetailDrawerProps {
   isOpen: boolean;
   isLoading: boolean;
   candidate: CandidateEvaluationDetail | null;
   onClose: () => void;
+  onOpenRun: (resumeId: string, evaluationId: string) => Promise<void>;
+  onOverride: (request: ScreeningOverrideRequest) => Promise<void>;
+  onRerun?: (resumeId: string) => Promise<void>;
 }
 
 const TIER_META: Record<MatchTier, { label: string; cls: string; icon: string }> = {
   STRONG_MATCH: { label: "Strong Match", cls: styles.tierStrong, icon: "🟢" },
   POTENTIAL_MATCH: { label: "Potential Match", cls: styles.tierPotential, icon: "🟡" },
-  NOT_A_FIT: { label: "Not a Fit", cls: styles.tierNotFit, icon: "🔴" },
+  NOT_A_FIT: { label: "Limited evidence", cls: styles.tierNotFit, icon: "🔴" },
 };
 
 function EvalStatusBadge({ status }: { status: string }) {
@@ -26,6 +30,7 @@ function RequirementRow({ eval: ev }: { eval: RequirementEvaluation }) {
     <div className={styles.reqRow}>
       <div className={styles.reqHeader}>
         <span className={styles.reqText}>{ev.requirement}</span>
+        {ev.critical && <span className={styles.reviewChip}>Critical</span>}
         <EvalStatusBadge status={ev.status} />
       </div>
       {quotes.length > 0 && (
@@ -41,7 +46,52 @@ function RequirementRow({ eval: ev }: { eval: RequirementEvaluation }) {
   );
 }
 
-export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, onClose }: CandidateDetailDrawerProps) {
+function OverrideForm({ candidate, onSave }: { candidate: CandidateEvaluationDetail; onSave: CandidateDetailDrawerProps["onOverride"] }) {
+  const [tier, setTier] = useState<MatchTier>(candidate.recruiter_override_tier ?? candidate.match_tier ?? "POTENTIAL_MATCH");
+  const [score, setScore] = useState(candidate.recruiter_override_score?.toString() ?? "");
+  const [reviewer, setReviewer] = useState(candidate.overridden_by ?? "");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <details className={styles.reviewPanel}>
+      <summary>Override match recommendation</summary>
+      <form className={styles.reviewForm} onSubmit={async (e) => {
+        e.preventDefault();
+        if (!candidate.evaluation_id) return;
+        setSaving(true);
+        setError(null);
+        try {
+          await onSave({
+            evaluation_id: candidate.evaluation_id,
+            override_tier: tier,
+            override_score: score === "" ? null : Number(score),
+            overridden_by: reviewer.trim(),
+            reason: reason.trim(),
+          });
+          setReason("");
+        } catch (e: unknown) {
+          setError(e instanceof Error ? e.message : "Could not save the override.");
+        } finally {
+          setSaving(false);
+        }
+      }}>
+        <label>Recruiter name<input value={reviewer} onChange={(e) => setReviewer(e.target.value)} maxLength={255} required /></label>
+        <label>Match tier<select value={tier} onChange={(e) => setTier(e.target.value as MatchTier)}>
+          {Object.entries(MATCH_TIER_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+        </select></label>
+        <label>Override score (optional)<input type="number" min={0} max={100} step={1} value={score} onChange={(e) => setScore(e.target.value)} /></label>
+        <label>Reason<textarea value={reason} onChange={(e) => setReason(e.target.value)} minLength={10} maxLength={2000} required rows={3} /></label>
+        {error && <p role="alert">{error}</p>}
+        <button type="submit" className={styles.reviewButton} disabled={saving || !reviewer.trim() || reason.trim().length < 10}>
+          {saving ? "Saving…" : "Save override"}
+        </button>
+      </form>
+    </details>
+  );
+}
+
+export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, onClose, onOpenRun, onOverride, onRerun }: CandidateDetailDrawerProps) {
   if (!isOpen) return null;
 
   const tier = candidate?.match_tier ? TIER_META[candidate.match_tier] : null;
@@ -86,17 +136,24 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
                 <p className={styles.reasoning}>{candidate.review_reason}</p>
               </div>
             )}
+            {candidate.spec_outdated && (
+              <div className={styles.reviewPanel}>
+                <strong>Outdated result</strong>
+                <p>This run used an earlier specification or evaluator. Rerun screening for a current rank.</p>
+                {onRerun && <button type="button" className={styles.reviewButton} onClick={() => onRerun(candidate.candidate_resume_id)}>Rerun screening</button>}
+              </div>
+            )}
 
             {/* Score + profile summary */}
             <div className={styles.summaryRow}>
               {candidate.overall_score !== null && <div className={styles.scoreBig}>
                 <span className={styles.scoreNum} style={{
-                  color: (candidate.overall_score ?? 0) >= 80 ? "#16a34a"
-                    : (candidate.overall_score ?? 0) >= 60 ? "#d97706" : "#dc2626"
+                  color: candidate.overall_score >= 75 ? "#16a34a"
+                       : candidate.overall_score >= 50 ? "#d97706" : "#dc2626"
                 }}>
                   {candidate.overall_score}%
                 </span>
-                <span className={styles.scoreSubLabel}>Match Score</span>
+                <span className={styles.scoreSubLabel}>Automated score</span>
               </div>}
               <div className={styles.profileMeta}>
                 {profile?.email && <span>✉️ {profile.email}</span>}
@@ -109,6 +166,49 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
                 )}
               </div>
             </div>
+
+            {candidate.evaluation_id && (
+              <div className={styles.reviewPanel}>
+                <strong>Screening run</strong>
+                <p>Specification v{candidate.specification_version} · {candidate.provenance?.evaluator_engine ?? "Legacy evaluator"}</p>
+                {candidate.spec_checksum && <p>Specification checksum <code className={styles.digest}>{candidate.spec_checksum}</code></p>}
+                {candidate.quote_verification_pass === false && <p>One or more excerpts could not be verified.</p>}
+                {candidate.runs.length > 1 && (
+                  <label className={styles.runSelector}>View previous runs
+                    <select value={candidate.evaluation_id} onChange={(e) => onOpenRun(candidate.candidate_resume_id, e.target.value)}>
+                      {candidate.runs.map((run) => <option key={run.evaluation_id} value={run.evaluation_id}>
+                        v{run.specification_version} · {run.overall_score !== null ? `${run.overall_score}%` : run.status} · {run.created_at ? new Date(run.created_at).toLocaleString() : "Unknown date"}
+                      </option>)}
+                    </select>
+                  </label>
+                )}
+              </div>
+            )}
+
+            {candidate.recruiter_override_tier && (
+              <div className={styles.reviewPanel}>
+                <strong>Recruiter override</strong>
+                <p>{MATCH_TIER_LABELS[candidate.recruiter_override_tier]}{candidate.recruiter_override_score != null ? ` · ${candidate.recruiter_override_score}%` : ""} · {candidate.overridden_by}</p>
+                <p>{candidate.override_reason}</p>
+                {candidate.override_history.length > 0 && <details>
+                  <summary>Override history</summary>
+                  <ul>
+                    {candidate.override_history.map((event, i) => <li key={event.created_at + i}>
+                      <strong>{event.reviewer ?? "Recruiter"} · {MATCH_TIER_LABELS[event.tier]}{event.score != null ? ` · ${event.score}%` : ""}</strong>
+                      <p>{new Date(event.created_at).toLocaleString()} · {event.reason}</p>
+                    </li>)}
+                  </ul>
+                </details>}
+              </div>
+            )}
+            {candidate.can_override && <OverrideForm key={candidate.evaluation_id} candidate={candidate} onSave={onOverride} />}
+
+            {!!candidate.score_breakdown?.critical_to_verify?.length && (
+              <div className={styles.reviewPanel}>
+                <strong>Critical requirements to verify</strong>
+                <ul>{candidate.score_breakdown.critical_to_verify.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul>
+              </div>
+            )}
 
             {tenureEvidence.length > 0 && (
               <div className={styles.mhSummary}>
@@ -187,11 +287,11 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
             )}
 
             {/* Timeline Observations */}
-            {((candidate.timeline_observations && candidate.timeline_observations.length > 0) || (candidate.red_flags && candidate.red_flags.length > 0)) && (
+            {candidate.timeline_observations && candidate.timeline_observations.length > 0 && (
               <div className={styles.section}>
                 <span className={styles.sectionTitle}>⏱️ Timeline Observations (Neutral Notes)</span>
                 <ul className={styles.redFlagList}>
-                  {(candidate.timeline_observations || candidate.red_flags || []).map((flag, i) => (
+                  {candidate.timeline_observations.map((flag, i) => (
                     <li key={i} className={styles.redFlagItem}>{flag}</li>
                   ))}
                 </ul>
@@ -207,19 +307,6 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
                     <li key={i} className={styles.iqItem}>{q}</li>
                   ))}
                 </ol>
-              </div>
-            )}
-
-            {/* Audit & Evaluator Provenance */}
-            {candidate.provenance && (
-              <div style={{ marginTop: "1rem", padding: "0.75rem", background: "#f8fafc", borderRadius: "6px", fontSize: "0.75rem", color: "#64748b", border: "1px solid #e2e8f0" }}>
-                <div>🔍 Engine: <strong>{candidate.provenance.evaluator_engine}</strong> | Prompt: <strong>{candidate.provenance.prompt_version}</strong> | Temp: <strong>{candidate.provenance.temperature}</strong> | Seed: <strong>{candidate.provenance.seed}</strong></div>
-                <div style={{ marginTop: "0.25rem" }}>🔒 Verbatim Quote Integrity: <strong style={{ color: candidate.quote_verification_pass !== false ? "#16a34a" : "#dc2626" }}>{candidate.quote_verification_pass !== false ? "✓ All Quotes Verified in Resume" : "⚠️ Unverified Quotes Detected"}</strong></div>
-                {candidate.recruiter_override_tier && (
-                  <div style={{ marginTop: "0.4rem", color: "#b45309", borderTop: "1px dashed #cbd5e1", paddingTop: "0.4rem" }}>
-                    ⭐ Recruiter Override: <strong>{candidate.recruiter_override_tier}</strong> ({candidate.recruiter_override_score}%) by <em>{candidate.overridden_by || "Recruiter"}</em> — "{candidate.override_reason}"
-                  </div>
-                )}
               </div>
             )}
 

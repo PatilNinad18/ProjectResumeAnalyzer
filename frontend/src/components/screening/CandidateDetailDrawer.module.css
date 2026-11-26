@@ -219,3 +219,13 @@
 /* Interview questions */
 .iqList { margin: 0; padding: 0 0 0 20px; display: flex; flex-direction: column; gap: 10px; }
 .iqItem { font-size: 0.875rem; color: #374151; line-height: 1.6; }
+.reviewPanel { background: #f8fafc; border: 1px solid #dbe4ef; border-radius: 8px; padding: 10px 12px; color: #25354d; font-size: .85rem; line-height: 1.45; }
+.reviewPanel p { margin: 6px 0; }
+.reviewPanel summary { cursor: pointer; font-weight: 650; }
+.reviewForm { display: grid; gap: 8px; padding-top: 10px; }
+.reviewForm label, .runSelector { display: grid; gap: 4px; }
+.reviewForm input, .reviewForm select, .reviewForm textarea, .runSelector select { min-width: 0; width: 100%; padding: 6px; border: 1px solid #cbd5e1; border-radius: 5px; font: inherit; color: #25354d; background: #fff; }
+.reviewButton { justify-self: start; background: #e0e7ff; border: 1px solid #c7d2fe; color: #3730a3; border-radius: 5px; padding: 5px 9px; font-weight: 650; cursor: pointer; }
+.reviewButton:disabled { opacity: .5; cursor: default; }
+.reviewChip { border-radius: 6px; background: #fef3c7; color: #854d0e; padding: 2px 6px; font-size: .7rem; }
+.digest { overflow-wrap: anywhere; font-size: .8rem; }

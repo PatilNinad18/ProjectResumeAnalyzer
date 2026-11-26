@@ -174,6 +174,7 @@ def project_to_canonical(
                 "requirement_id": req.id,
                 "requirement": req.text,
                 "priority": "MUST_HAVE",
+                "critical": req.is_critical,
                 "explicit_or_derived": "explicit",
                 "confidence": _map_confidence(req.confidence.entity_match_confidence.value),
                 "source": {"text": req.provenance.source_span.raw_text if req.provenance.source_span else ""},

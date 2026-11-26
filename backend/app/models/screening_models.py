@@ -50,20 +50,12 @@ from app.models.db_models import Base, UUID_COL, gen_uuid
 
 class ScreeningStatusEnum(str, enum.Enum):
     """Processing state of a candidate evaluation run."""
-<<<<<<< HEAD
     QUEUED     = "QUEUED"
     ANALYZING  = "ANALYZING"
     COMPLETED  = "COMPLETED"
     FAILED     = "FAILED"
     PARSE_FAILED = "PARSE_FAILED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
-=======
-    QUEUED       = "QUEUED"
-    ANALYZING    = "ANALYZING"
-    COMPLETED    = "COMPLETED"
-    FAILED       = "FAILED"
-    PARSE_FAILED = "PARSE_FAILED"   # Unreadable PDF/DOCX (scanned image, corrupted)
->>>>>>> smartleaven_work/main
 
 
 class MatchTierEnum(str, enum.Enum):
@@ -179,8 +171,10 @@ class CandidateEvaluation(Base):
     # The specific spec version UUID evaluated against
     spec_version_id      = Column(UUID_COL, nullable=True)
     specification_version = Column(Integer, nullable=False, default=2)
+    spec_checksum = Column(String(64), nullable=True)
+    active_run_key = Column(String(64), nullable=True, unique=True, index=True)
 
-    # Is this evaluation against an outdated spec? Set True when a newer spec version exists.
+    # Retained for older databases. The API compares the pinned inputs to the current revision.
     spec_outdated = Column(Boolean, nullable=False, default=False)
 
     # --- Processing state ---
@@ -221,14 +215,8 @@ class CandidateEvaluation(Base):
     #   "category": "must_have" | "preferred",
     #   "status": "MET" | "PARTIALLY_MET" | "NOT_EVIDENCED",
     #   "score_weight": 1.0 | 0.5 | 0.0,
-<<<<<<< HEAD
     #   "evidence_quote": str | null,  # verbatim excerpt from resume
     #   "evidence_quotes": list[str],  # all supporting verbatim excerpts
-=======
-    #   "evidence_quote": str | null,      # verbatim excerpt verified in parsed_text
-    #   "quote_verified": bool | null,     # True if quote found in parsed_text
-    #   "searched_keywords": List[str],    # terms searched (audit trail for NOT_EVIDENCED)
->>>>>>> smartleaven_work/main
     #   "reasoning": str,
     # }, ...]
     detailed_evaluations = Column(JSON, nullable=True)
@@ -243,7 +231,7 @@ class CandidateEvaluation(Base):
 
     # JSON array: neutral timeline observations (NOT penalties, NOT score modifiers)
     # e.g. career pauses, concurrent roles, overlapping dates
-    # Renamed from red_flags — gaps are NOT negative signals, just notes for interview
+    # Neutral date-overlap and document integrity observations.
     timeline_observations = Column(JSON, nullable=True)
 
     # JSON array of 3-5 tailored technical interview question strings

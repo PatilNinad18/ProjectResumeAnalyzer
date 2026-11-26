@@ -7,12 +7,14 @@ interface ResumeUploadZoneProps {
   isScreening: boolean;
   uploadResult: BatchResumeUploadResponse | null;
   hasResumes: boolean;
+  specFinalized: boolean;
+  specificationVersion: number | null;
   onUpload: (files: File[]) => Promise<void>;
   onScreenAll: () => Promise<void>;
 }
 
 export default function ResumeUploadZone({
-  isUploading, isScreening, uploadResult, hasResumes, onUpload, onScreenAll,
+  isUploading, isScreening, uploadResult, hasResumes, specFinalized, specificationVersion, onUpload, onScreenAll,
 }: ResumeUploadZoneProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -89,7 +91,7 @@ export default function ResumeUploadZone({
           <button
             className={styles.screenBtn}
             onClick={onScreenAll}
-            disabled={isScreening || isUploading}
+            disabled={isScreening || isUploading || !specFinalized}
           >
             {isScreening ? (
               <><span className={styles.spinner} /> Triggering evaluation…</>
@@ -98,7 +100,7 @@ export default function ResumeUploadZone({
             )}
           </button>
           <span className={styles.screenHint}>
-            Runs grounded evaluation against the finalized Job Specification v2
+            {specFinalized ? `Evaluates resumes against finalized specification v${specificationVersion}.` : "Finalize the current job specification to enable screening."}
           </span>
         </div>
       )}

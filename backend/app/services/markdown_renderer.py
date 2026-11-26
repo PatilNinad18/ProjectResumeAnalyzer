@@ -232,6 +232,8 @@ def render_markdown(
     if spec.evidence_requirements:
         for ev in spec.evidence_requirements:
             md.append(f"### {ev.requirement}")
+            if ev.critical:
+                md.append("**Critical requirement.** Verify the evidence before assigning a strong match.")
             if ev.evidence_to_look_for:
                 md.append(f"**Evidence:** {', '.join(ev.evidence_to_look_for)}")
             if ev.strong_evidence:

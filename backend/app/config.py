@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 
     # Auth
     auth_provider: str = os.environ.get("AUTH_PROVIDER", "supabase")  # "supabase" | "auth0" | "cognito"
+    frontend_origin: Optional[str] = os.environ.get("FRONTEND_ORIGIN") or None
 
     # Misc
     environment: str = os.environ.get("ENVIRONMENT", "development")

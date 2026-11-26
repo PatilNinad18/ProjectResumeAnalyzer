@@ -13,8 +13,7 @@ Changes from v2.0:
   4. RECALIBRATED MET BAR: MET requires verifiable professional application
      (action verbs: designed, built, deployed, managed) rather than "production" only.
   5. PROMPT INJECTION SCANNER: scan_for_injection() flags suspicious hidden text.
-  6. TIMELINE OBSERVATIONS (not red_flags): career gaps are neutral interview notes,
-     never scoring penalties. renamed from _detect_red_flags.
+  6. TIMELINE OBSERVATIONS: Report overlapping roles used for experience scoring.
   7. EVALUATOR PROVENANCE: returns engine/model/prompt/temp/seed in result.
   8. TIER THRESHOLDS updated: STRONG_MATCH >= 75 (was 80), NOT_A_FIT < 50 (was 60).
 
@@ -40,12 +39,13 @@ from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.resume.evidence import ResumeEvidence, is_assessable
+from app.services.resume.profiler import profile_resume
 
 logger = logging.getLogger("jd_agent.evaluator")
 
 # Evaluator provenance constants
-EVALUATOR_ENGINE = "deterministic_v1"
-PROMPT_VERSION   = "eval_v2.1"
+EVALUATOR_ENGINE = "resume-evidence-v3"
+PROMPT_VERSION   = "eval_v3"
 TEMPERATURE      = 0.0
 SEED             = 42
 
@@ -67,8 +67,8 @@ _STATUS_WEIGHTS = {
 NO_EVALUATION_CRITERIA = "NO_EVALUATION_CRITERIA_DEFINED"
 
 # Tier thresholds
-STRONG_MATCH_THRESHOLD    = 75   # >= 75 AND 0 NOT_EVIDENCED must-haves
-POTENTIAL_MATCH_THRESHOLD = 50   # >= 50 AND <= 1 NOT_EVIDENCED must-have
+STRONG_MATCH_THRESHOLD    = 75
+POTENTIAL_MATCH_THRESHOLD = 50
 
 # Action verbs indicating professional application (wider than "production")
 _PROFESSIONAL_VERBS = re.compile(
@@ -161,7 +161,10 @@ def scan_for_injection(text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_PHONE_RE = re.compile(r"(?:(?:\+?91[\s\-]?)?(?:\(\d{3,5}\)[\s\-]?|\d{3,5}[\s\-]?)?\d{3,5}[\s\-]?\d{4,5}|\+?1[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4})")
+_PHONE_RE = re.compile(
+    r"(?<!\w)(?:\+?1[ .-]?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}"
+    r"|(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}|(?:\+91[ -]?)?\d{10})(?!\w)"
+)
 _LINK_RE  = re.compile(r"(?:https?://)?(?:www\.)?(?:linkedin\.com/(?:in|pub)/[A-Za-z0-9_\-\.]+|github\.com/[A-Za-z0-9_\-\.]+)", re.IGNORECASE)
 
 _TECH_WHITELIST = {
@@ -203,7 +206,7 @@ def anonymize_resume(
         anon_text = anon_text.replace(em, "[CANDIDATE_EMAIL]")
 
     # 2. Mask Phone
-    if phone:
+    if phone and _PHONE_RE.fullmatch(phone.strip()):
         redacted["phone"] = phone
         anon_text = re.sub(re.escape(phone), "[CANDIDATE_PHONE]", anon_text, flags=re.IGNORECASE)
     for m in _PHONE_RE.finditer(anon_text):
@@ -340,109 +343,6 @@ def verify_quote_in_text(quote: str, parsed_text: str) -> bool:
 # Evidence extraction helpers
 # ---------------------------------------------------------------------------
 
-<<<<<<< HEAD
-=======
-def _build_keyword_variants(requirement: str) -> List[str]:
-    """
-    Derive a set of search keywords from a requirement statement.
-    Splits on common separators, strips short stop words, lowercases.
-    Returns deduplicated list.
-    """
-    # Extract quoted tech terms first
-    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'|`([^`]+)`', requirement)
-    keywords: List[str] = []
-    for groups in quoted:
-        kw = next(g for g in groups if g)
-        keywords.append(kw.lower())
-
-    # Also split requirement into individual significant words
-    words = re.sub(r"[^a-zA-Z0-9+#\s\-_./]", " ", requirement).split()
-    stop = {
-        "a", "an", "the", "in", "of", "for", "and", "or", "with", "to",
-        "is", "are", "has", "have", "be", "been", "must", "should",
-        "working", "using", "demonstrate", "demonstrated", "familiarity",
-        "years", "year", "months", "strong", "good", "solid", "proven",
-        "knowledge", "understanding", "ability", "skills", "experience",
-        "systems", "technologies", "platforms", "solutions", "tools",
-        "cloud", "apache", "environment", "environments", "role", "roles",
-        "cluster", "clusters", "pipeline", "pipelines",
-    }
-    for word in words:
-        clean = word.strip("-_./").lower()
-        if len(clean) >= 3 and clean not in stop:
-            keywords.append(clean)
-
-    # Deduplicate while preserving order
-    seen: set = set()
-    result = []
-    for k in keywords:
-        if k not in seen:
-            seen.add(k)
-            result.append(k)
-    return result
-
-
-def _kw_in_text(kw: str, text_lower: str) -> bool:
-    """Check if keyword exists in text with word boundary matching."""
-    if not kw:
-        return False
-    if kw in ("c++", "c#", ".net", "ci/cd"):
-        return kw in text_lower
-    return bool(re.search(r"\b" + re.escape(kw) + r"\b", text_lower))
-
-
-def _find_evidence_quote(requirement: str, resume_text: str) -> Optional[str]:
-    """
-    Search the resume text for a sentence or bullet point containing the requirement's key terms.
-    Returns the best matching sentence (up to 250 chars) or None if nothing found.
-    """
-    keywords = _build_keyword_variants(requirement)
-    if not keywords:
-        return None
-
-    raw_lines = resume_text.splitlines()
-    sentences = []
-    for line in raw_lines:
-        line_clean = re.sub(r"^\s*[-•*–—]+\s*", "", line).strip()
-        if len(line_clean) > 15:
-            sentences.append(line_clean)
-        # Also split on clear sentence boundaries while avoiding abbreviation periods (M.S., B.S., Inc.)
-        sub_sents = re.split(r"(?<=[a-z0-9][.!?])\s+(?=[A-Z])", line_clean)
-        for sub in sub_sents:
-            sub = sub.strip()
-            if len(sub) > 15 and sub != line_clean:
-                sentences.append(sub)
-
-    best_sentence: Optional[str] = None
-    best_score = -100
-
-    for sentence in sentences:
-        sentence_lower = sentence.lower()
-        is_skills_list = bool(re.match(r"^(?:skills|technologies|tools|languages)\s*:", sentence_lower))
-        hit_count = sum(1 for kw in keywords if _kw_in_text(kw, sentence_lower))
-        if hit_count == 0:
-            continue
-        has_verb = bool(_PROFESSIONAL_VERBS.search(sentence))
-        # Prefer actual work experience bullet points with action verbs over bare skill lists
-        score = hit_count * 2 + (4 if has_verb else 0) - (8 if is_skills_list else 0)
-        if score > best_score:
-            best_score = score
-            best_sentence = sentence
-
-    if best_score <= 0:
-        return None
-
-    if best_sentence and len(best_sentence) > 250:
-        best_sentence = best_sentence[:247] + "..."
-
-    return best_sentence
-
-
-# ---------------------------------------------------------------------------
-# Requirement cleaner
-# ---------------------------------------------------------------------------
-
->>>>>>> smartleaven_work/main
 def _clean_requirements(items: List[str]) -> List[str]:
     """
     Filter out non-requirement noise from canonical_json specification:
@@ -485,247 +385,6 @@ def _clean_requirements(items: List[str]) -> List[str]:
     return cleaned
 
 
-<<<<<<< HEAD
-=======
-# ---------------------------------------------------------------------------
-# Requirement classifier
-# ---------------------------------------------------------------------------
-
-_META_ANCHORS = {
-    "experience", "requirements", "mandatory requirements", "qualification",
-    "qualifications", "experience and qualification", "mandatory", "general", "other"
-}
-
-
-def _extract_min_years_from_req(req: str) -> Optional[float]:
-    """Extract minimum years of experience required by a requirement string."""
-    clean = re.sub(r"[*_#`]", "", req).strip()
-    m = re.search(r"(?:at\s+least|minimum|min\.?)\s+(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))?\s*(?:years?|yrs?)", clean, re.I)
-    if m:
-        return float(m.group(1))
-    m2 = re.search(r"(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))\s*(?:years?|yrs?)\s+of\s+experience", clean, re.I)
-    if m2:
-        return float(m2.group(1))
-    m3 = re.search(r"(?:experience|tenure)\s*[:\*\-]*\s*(\d+(?:\.\d+)?)\s*(?:[-–to]+\s*(\d+(?:\.\d+)?))?\s*(?:years?|yrs?)", clean, re.I)
-    if m3:
-        return float(m3.group(1))
-    m4 = re.search(r"\b(\d+(?:\.\d+)?)\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:[a-zA-Z\s]+)?experience", clean, re.I)
-    if m4:
-        return float(m4.group(1))
-    return None
-
-
-def _classify_requirement(
-    requirement: str,
-    resume_text: str,
-    parsed_text_for_verification: str,
-    candidate_exp: Optional[float] = None,
-) -> Tuple[str, float, Optional[str], Optional[bool], List[str], str]:
-    """
-    Classify a single requirement as MET, PARTIALLY_MET, or NOT_EVIDENCED.
-
-    Returns:
-        (status, score_weight, evidence_quote, quote_verified, searched_keywords, reasoning)
-
-    MET bar recalibration (v2.1):
-    - MET = verifiable professional application evidenced by action verbs
-      (designed, built, deployed, managed, implemented, etc.) in a relevant sentence.
-    - PARTIALLY_MET = keyword present but only listed as skill/coursework, no action verb.
-    - NOT_EVIDENCED = no keywords found anywhere in resume.
-
-    Quote verification:
-    - Every MET/PARTIALLY_MET quote is verified via verify_quote_in_text().
-    - If verification fails: status downgraded to NOT_EVIDENCED, quote cleared.
-    """
-    clean_req = re.sub(r"[*_#`]", "", requirement).strip()
-    resume_lower = resume_text.lower()
-    keywords = _build_keyword_variants(requirement)
-
-    # 0. Check if requirement is explicitly an experience/tenure requirement
-    req_min_years = _extract_min_years_from_req(requirement)
-    is_exp_req = req_min_years is not None and (
-        re.search(r"\b(?:experience|tenure)\b", clean_req, re.I) or
-        clean_req.lower().startswith("experience")
-    )
-    if is_exp_req and candidate_exp is not None:
-        if candidate_exp == 0.0:
-            return (
-                "NOT_EVIDENCED",
-                SCORE_NOT_EVIDENCED,
-                None,
-                None,
-                keywords,
-                f"Candidate has 0.0 years of verified job/internship experience (fresher); requirement calls for {req_min_years}+ years.",
-            )
-        elif candidate_exp < req_min_years:
-            return (
-                "NOT_EVIDENCED",
-                SCORE_NOT_EVIDENCED,
-                None,
-                None,
-                keywords,
-                f"Candidate has {candidate_exp}y of verified job/internship experience; does not satisfy requirement of {req_min_years}+ years.",
-            )
-        else:
-            pure_tenure = not any(k in clean_req.lower() for k in [
-                "python", "java", "sql", "kafka", "aws", "docker", "kubernetes", "react", "c++", "go",
-                "redis", "postgres", "mysql", "spark", "hadoop", "cloud", "microservices", "distributed"
-            ])
-            if pure_tenure:
-                return (
-                    "MET",
-                    SCORE_MET,
-                    None,
-                    True,
-                    keywords,
-                    f"Candidate has {candidate_exp}y of verified job/internship experience, satisfying the requirement of {req_min_years}+ years.",
-                )
-
-    # 1. Identify primary anchor skill/topic (e.g. "**SQL:** ...")
-    anchor_skill = None
-    if ":" in clean_req:
-        prefix = clean_req.split(":", 1)[0].strip().lower()
-        if len(prefix.split()) <= 4 and prefix not in _META_ANCHORS:
-            anchor_skill = prefix
-
-    # 2. Find evidence quote candidate
-    evidence = _find_evidence_quote(requirement, resume_text)
-
-    _DEGREE_KEYWORDS = re.compile(
-        r"\b(?:bachelor|master|b\.?s\.?|m\.?s\.?|b\.?tech|m\.?tech|ph\.?d\.?|degree|computer\s+science|software\s+engineering|stem)\b",
-        re.I,
-    )
-    is_degree_req = bool(re.search(r"\b(?:degree|bachelor|master|ph\.?d|b\.?s|m\.?s|b\.?tech|stem)\b", clean_req, re.I))
-
-    # Helper: verify quote + professional verb check
-    def _assess_quote(quote: Optional[str]) -> Tuple[bool, bool]:
-        """Returns (quote_verified, has_professional_verb)"""
-        if not quote:
-            return False, False
-        verified = verify_quote_in_text(quote, parsed_text_for_verification)
-        if is_degree_req and bool(_DEGREE_KEYWORDS.search(quote)):
-            has_verb = True
-        else:
-            has_verb = bool(_PROFESSIONAL_VERBS.search(quote))
-        return verified, has_verb
-
-    # 3. No evidence and no anchor found anywhere
-    if evidence is None and (not anchor_skill or anchor_skill not in resume_lower):
-        return (
-            "NOT_EVIDENCED",
-            SCORE_NOT_EVIDENCED,
-            None,
-            None,
-            keywords,
-            f"Keywords searched: {keywords[:8]}. No verifiable evidence found in resume.",
-        )
-
-    # 4. Anchor skill present — check context strength
-    if anchor_skill and anchor_skill in resume_lower:
-        quote_verified, has_verb = _assess_quote(evidence)
-
-        if evidence and quote_verified:
-            if has_verb:
-                return (
-                    "MET",
-                    SCORE_MET,
-                    evidence,
-                    True,
-                    keywords,
-                    f"Strong evidence: candidate demonstrates '{anchor_skill.title()}' with professional application.",
-                )
-            else:
-                # Listed as skill but no professional verb → PARTIALLY_MET
-                return (
-                    "PARTIALLY_MET",
-                    SCORE_PARTIALLY_MET,
-                    evidence,
-                    True,
-                    keywords,
-                    f"Partial evidence: '{anchor_skill.title()}' listed but without clear professional application context.",
-                )
-        elif evidence and not quote_verified:
-            # Quote hallucinated — downgrade
-            logger.warning("Quote verification FAILED for anchor '%s'; downgrading to NOT_EVIDENCED.", anchor_skill)
-            return (
-                "NOT_EVIDENCED",
-                SCORE_NOT_EVIDENCED,
-                None,
-                False,
-                keywords,
-                f"Quote verification failed for '{anchor_skill.title()}'. Keyword present in resume but quote unverifiable.",
-            )
-        else:
-            # Anchor in resume but no good sentence found → PARTIALLY_MET with skill-list note
-            skill_mention = f"Candidate lists '{anchor_skill.title()}' in technical skills section."
-            quote_verified_flag = verify_quote_in_text(skill_mention, parsed_text_for_verification)
-            if not quote_verified_flag:
-                skill_mention = None
-                quote_verified_flag = None
-            return (
-                "PARTIALLY_MET",
-                SCORE_PARTIALLY_MET,
-                skill_mention,
-                quote_verified_flag,
-                keywords,
-                f"'{anchor_skill.title()}' mentioned in resume but no detailed experience sentence found.",
-            )
-
-    # 5. General keyword matching
-    total_kw = len(keywords)
-    matched_kw = sum(1 for kw in keywords if _kw_in_text(kw, resume_lower))
-
-    if evidence:
-        quote_verified, has_verb = _assess_quote(evidence)
-        if not quote_verified:
-            logger.warning("Quote verification FAILED for requirement '%s'.", requirement[:60])
-            return (
-                "NOT_EVIDENCED",
-                SCORE_NOT_EVIDENCED,
-                None,
-                False,
-                keywords,
-                f"Quote verification failed. Claimed evidence quote was not found in candidate resume.",
-            )
-        if has_verb:
-            return (
-                "MET",
-                SCORE_MET,
-                evidence,
-                True,
-                keywords,
-                f"Strong evidence: verified quote with professional application.",
-            )
-        else:
-            return (
-                "PARTIALLY_MET",
-                SCORE_PARTIALLY_MET,
-                evidence,
-                True,
-                keywords,
-                f"Partial evidence: skill mentioned without explicit action verb context.",
-            )
-    elif matched_kw > 0 and (matched_kw / total_kw >= 0.25 if total_kw > 0 else False):
-        return (
-            "PARTIALLY_MET",
-            SCORE_PARTIALLY_MET,
-            None,
-            None,
-            keywords,
-            f"Partial evidence: {matched_kw}/{total_kw} keywords matched in resume (listed in skills/profile).",
-        )
-    else:
-        return (
-            "NOT_EVIDENCED",
-            SCORE_NOT_EVIDENCED,
-            None,
-            None,
-            keywords,
-            f"Keywords searched: {keywords[:8]}. No verifiable evidence found in resume.",
-        )
-
-
->>>>>>> smartleaven_work/main
 # ---------------------------------------------------------------------------
 # Tenure scoring
 # ---------------------------------------------------------------------------
@@ -768,15 +427,11 @@ def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
     Extract must-have requirements, preferred qualifications, and minimum years
     from a canonical_json Specification v2 structure.
 
-<<<<<<< HEAD
     Handles canonical must_have_requirements, preferred_requirements, and
     conventional_requirements.experience, plus legacy JSON shapes:
       - { must_haves: [...], preferred_qualifications: [...], experience_requirements: {...} }
       - { requirements: { must_have: [...], preferred: [...] } }
       - { sections: { requirements: {...} } }
-=======
-    Handles multiple known JSON shapes.
->>>>>>> smartleaven_work/main
     """
     must_haves: List[str] = []
     preferred:  List[str] = []
@@ -825,7 +480,6 @@ def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
                 if not preferred:
                     preferred = _flatten(sec.get("preferred") or sec.get("preferred_qualifications") or [])
 
-<<<<<<< HEAD
     # Total resume tenure can satisfy only an overall experience minimum.
     conventional = spec_json.get("conventional_requirements") or {}
     experience = conventional.get("experience") if isinstance(conventional, dict) else None
@@ -850,9 +504,6 @@ def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
         must_haves = [req for req in must_haves if req.strip().rstrip(".").casefold() not in tenure_descriptions]
 
     # Legacy overall tenure fields.
-=======
-    # Extract minimum years
->>>>>>> smartleaven_work/main
     for key in ("experience_requirements", "experience", "seniority"):
         if min_years is not None:
             break
@@ -883,6 +534,16 @@ def _extract_requirements_from_spec(spec_json: Dict[str, Any]) -> Tuple[
 # Interview question synthesis
 # ---------------------------------------------------------------------------
 
+def screening_criteria(spec_json: dict[str, Any]) -> list[dict[str, Any]]:
+    must_haves, _, _ = _extract_requirements_from_spec(spec_json)
+    return [
+        {"requirement_id": item["requirement_id"], "text": item["requirement"], "critical": item.get("critical") is True}
+        for item in spec_json.get("evidence_requirements") or []
+        if isinstance(item, dict) and item.get("requirement_id")
+        and item.get("priority") == "MUST_HAVE" and item.get("requirement") in must_haves
+    ]
+
+
 def _generate_interview_question(requirement: str, status: str, evidence_quote: Optional[str]) -> str:
     """
     Generate a targeted interviewer question for a NOT_EVIDENCED or PARTIALLY_MET requirement.
@@ -891,26 +552,14 @@ def _generate_interview_question(requirement: str, status: str, evidence_quote: 
     req_short = requirement[:120]
     if status == "NOT_EVIDENCED":
         return (
-<<<<<<< HEAD
             f"The extracted resume does not substantiate: \"{requirement[:120]}\". "
             "Ask for relevant examples, dates, or credentials."
-=======
-            f"The candidate's resume does not explicitly mention: \"{req_short}\". "
-            f"Ask: 'Can you walk me through your experience with this — specific projects, "
-            f"scale, and what you personally owned or delivered?'"
->>>>>>> smartleaven_work/main
         )
     else:  # PARTIALLY_MET
         snippet = f" (found: \"{evidence_quote[:80]}...\")".rstrip("...") + "\"" if evidence_quote else ""
         return (
-<<<<<<< HEAD
             f"Partial evidence found for: \"{requirement[:120]}\"{snippet}. "
             "Ask which parts they can evidence and what they personally did."
-=======
-            f"Partial evidence found for: \"{req_short}\"{snippet}. "
-            f"Ask: 'Can you go deeper — particularly around professional context, "
-            f"scale, and business outcomes?'"
->>>>>>> smartleaven_work/main
         )
 
 
@@ -924,11 +573,7 @@ def _build_timeline_observations(
     """
     Build neutral timeline observations for the recruiter's interview prep.
 
-    IMPORTANT: These are NOT penalties, NOT score modifiers, and NEVER disqualifiers.
-    Career gaps may reflect caregiving, illness, military service, or personal growth.
-    Observations are phrased neutrally as interview conversation starters.
-
-    Replaces the previous _detect_red_flags() function.
+    Report overlapping dates used to calculate experience.
     """
     observations: List[str] = []
     work_history = parsed_profile.get("work_history", [])
@@ -936,7 +581,6 @@ def _build_timeline_observations(
     if not work_history:
         return observations
 
-    # Sort by start date and note any career pauses
     dated = []
     for entry in work_history:
         if entry.get("start_date") and entry.get("end_date"):
@@ -948,17 +592,6 @@ def _build_timeline_observations(
                 pass
 
     dated.sort(key=lambda x: x[0])
-
-    for i in range(1, len(dated)):
-        prev_end   = dated[i - 1][1]
-        curr_start = dated[i][0]
-        gap_months = (curr_start - prev_end).days / 30.44
-        if gap_months > 6:
-            observations.append(
-                f"Career pause of ~{gap_months:.0f} months between "
-                f"'{dated[i-1][2]}' and '{dated[i][2]}'. "
-                f"Consider exploring this period in conversation (may reflect caregiving, study, or career transition)."
-            )
 
     # Note concurrent roles (overlapping dates) — not suspicious, just informational
     for i in range(len(dated)):
@@ -986,33 +619,11 @@ def _compute_score(
     """
     Compute overall_score (0-100), match_tier, and score_breakdown.
 
-<<<<<<< HEAD
     Uses dynamic weight normalization to handle edge cases:
     - JD with 0 must-haves: must-have weight slot deactivated
     - JD with 0 preferred: preferred weight slot deactivated
     - JD with no tenure specified: tenure weight slot deactivated
     - All weights zero: leave the evaluation unscored for review
-=======
-    Scoring formula:
-      S_must = mean(score_weight for must-have items)         [0.0 - 1.0]
-      S_pref = mean(score_weight for preferred items)         [0.0 - 1.0]
-      S_tenure = min(1.0, candidate_years / required_years)   [0.0 - 1.0]
-
-      W_must   = 0.70 if N_must > 0  else 0.0
-      W_pref   = 0.20 if N_pref > 0  else 0.0
-      W_tenure = 0.10 if JD specifies min tenure else 0.0
-      W_total  = W_must + W_pref + W_tenure
-
-      Final Score = round((W_must*S_must + W_pref*S_pref + W_tenure*S_tenure) / W_total * 100)
-
-    Tier guardrail rules:
-      not_evidenced_must = count of NOT_EVIDENCED must-have items
-
-      STRONG_MATCH:    score >= 75 AND not_evidenced_must == 0
-      POTENTIAL_MATCH: score >= 75 AND not_evidenced_must == 1   (capped despite high score)
-                    OR score >= 50 AND not_evidenced_must <= 1
-      NOT_A_FIT:       score < 50  OR not_evidenced_must >= 2
->>>>>>> smartleaven_work/main
     """
     n_must = len(must_evals)
     n_pref = len(pref_evals)
@@ -1031,13 +642,8 @@ def _compute_score(
             "active_weight_total":  0.0,
             "must_have_base_weight": 0.0,
             "preferred_base_weight": 0.0,
-<<<<<<< HEAD
             "tenure_base_weight": 0.0,
             "warning": NO_EVALUATION_CRITERIA,
-=======
-            "tenure_base_weight":   0.0,
-            "warning": "NO_EVALUATION_CRITERIA_DEFINED",
->>>>>>> smartleaven_work/main
         }
         return None, None, breakdown
 
@@ -1048,15 +654,12 @@ def _compute_score(
     raw = (w_must * s_must + w_pref * s_pref + w_tenure * s_tenure) / w_total
     overall_score = round(raw * 100)
 
-    not_evidenced_must = sum(1 for e in must_evals if e["status"] == "NOT_EVIDENCED")
+    critical_to_verify = [e["requirement"] for e in must_evals if e.get("critical") and e["status"] != "MET"]
+    has_unevidenced_must = any(e["status"] == "NOT_EVIDENCED" for e in must_evals)
 
-    if overall_score >= STRONG_MATCH_THRESHOLD and not_evidenced_must == 0:
+    if overall_score >= STRONG_MATCH_THRESHOLD and not has_unevidenced_must and not critical_to_verify:
         match_tier = "STRONG_MATCH"
-    elif overall_score >= STRONG_MATCH_THRESHOLD and not_evidenced_must == 1:
-        match_tier = "POTENTIAL_MATCH"   # capped despite high score due to unverified must-have
-    elif overall_score >= POTENTIAL_MATCH_THRESHOLD and not_evidenced_must <= 1:
-        match_tier = "POTENTIAL_MATCH"
-    elif overall_score >= POTENTIAL_MATCH_THRESHOLD and not_evidenced_must <= 3:
+    elif overall_score >= POTENTIAL_MATCH_THRESHOLD:
         match_tier = "POTENTIAL_MATCH"
     else:
         match_tier = "NOT_A_FIT"
@@ -1069,6 +672,7 @@ def _compute_score(
         "must_have_base_weight": w_must,
         "preferred_base_weight": w_pref,
         "tenure_base_weight":    w_tenure,
+        "critical_to_verify":   critical_to_verify,
     }
     return overall_score, match_tier, breakdown
 
@@ -1101,9 +705,8 @@ def evaluate_candidate(
     """
     # --- Blind screening anonymization ---
     eval_text = resume_text
-    redacted_pii: Dict[str, str] = {}
     if blind_screening:
-        eval_text, redacted_pii = anonymize_resume(
+        eval_text, _ = anonymize_resume(
             resume_text,
             candidate_name=parsed_profile.get("candidate_name") if parsed_profile else None,
             email=parsed_profile.get("email") if parsed_profile else None,
@@ -1113,16 +716,12 @@ def evaluate_candidate(
     # --- Prompt injection scan (security check on untrusted input) ---
     injection_match = scan_for_injection(eval_text)
     if injection_match:
-        logger.warning(
-            "PROMPT INJECTION PATTERN detected in resume text: '%s'. "
-            "Resume text treated strictly as data.", injection_match
-        )
+        logger.warning("The extracted resume text contains a possible instruction directed at a screening system.")
 
     must_have_reqs, preferred_reqs, min_years = _extract_requirements_from_spec(spec_canonical_json)
-    candidate_exp = parsed_profile.get("total_experience_years") if parsed_profile else None
-
-<<<<<<< HEAD
-    evidence = ResumeEvidence(resume_text, parsed_profile)
+    evidence = ResumeEvidence(eval_text, profile_resume(eval_text) if blind_screening else parsed_profile)
+    original_text = " ".join(resume_text.split())
+    critical_requirements = {item["text"] for item in screening_criteria(spec_canonical_json) if item["critical"]}
     guidance_by_requirement = {
         item["explicit_requirement"]: item["derived_interpretation"]
         for item in spec_canonical_json.get("requirement_interpretations") or []
@@ -1130,8 +729,16 @@ def evaluate_candidate(
         and isinstance(item.get("derived_interpretation"), list)
     }
 
+    any_quote_failed = False
+
     def assess(requirement: str, category: str) -> dict[str, Any]:
+        nonlocal any_quote_failed
         status, quotes, reasoning = evidence.assess(requirement, guidance_by_requirement.get(requirement, []))
+        verified = all(" ".join(quote.split()) in original_text for quote in quotes) and bool(quotes)
+        quote_verified = verified if status != "NOT_EVIDENCED" else None
+        if quote_verified is False:
+            any_quote_failed = True
+            status, quotes, reasoning = "NOT_EVIDENCED", [], "A supporting excerpt could not be verified in the original resume."
         return {
             "requirement": requirement,
             "category": category,
@@ -1139,51 +746,13 @@ def evaluate_candidate(
             "score_weight": _STATUS_WEIGHTS[status],
             "evidence_quote": quotes[0] if quotes else None,
             "evidence_quotes": quotes,
+            "quote_verified": quote_verified,
+            "critical": category == "must_have" and requirement in critical_requirements,
             "reasoning": reasoning,
         }
 
     must_evals = [assess(req, "must_have") for req in must_have_reqs]
     pref_evals = [assess(req, "preferred") for req in preferred_reqs]
-=======
-    # --- Evaluate each requirement ---
-    must_evals: List[Dict[str, Any]] = []
-    pref_evals: List[Dict[str, Any]] = []
-    any_quote_failed = False
-
-    for req in must_have_reqs:
-        status, weight, evidence, quote_verified, keywords, reasoning = _classify_requirement(
-            req, eval_text, resume_text, candidate_exp=candidate_exp
-        )
-        if quote_verified is False:
-            any_quote_failed = True
-        must_evals.append({
-            "requirement":      req,
-            "category":         "must_have",
-            "status":           status,
-            "score_weight":     weight,
-            "evidence_quote":   evidence,
-            "quote_verified":   quote_verified,
-            "searched_keywords": keywords[:10],
-            "reasoning":        reasoning,
-        })
-
-    for req in preferred_reqs:
-        status, weight, evidence, quote_verified, keywords, reasoning = _classify_requirement(
-            req, eval_text, resume_text, candidate_exp=candidate_exp
-        )
-        if quote_verified is False:
-            any_quote_failed = True
-        pref_evals.append({
-            "requirement":      req,
-            "category":         "preferred",
-            "status":           status,
-            "score_weight":     weight,
-            "evidence_quote":   evidence,
-            "quote_verified":   quote_verified,
-            "searched_keywords": keywords[:10],
-            "reasoning":        reasoning,
-        })
->>>>>>> smartleaven_work/main
 
     # --- Tenure scoring ---
     candidate_years = parsed_profile.get("total_experience_years") or 0.0
@@ -1237,8 +806,7 @@ def evaluate_candidate(
     # Injection warning appended as observation (not a scoring penalty)
     if injection_match:
         timeline_observations.insert(0,
-            f"SECURITY: Potential prompt injection pattern detected in resume text: '{injection_match}'. "
-            f"All evaluation results are grounded exclusively in verified keyword evidence."
+            "The extracted text contains a possible instruction directed at a screening system. Review the source document."
         )
 
     # --- Evaluator provenance ---

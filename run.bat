@@ -77,7 +77,7 @@ if %ERRORLEVEL% equ 0 (
 :: Launch Services in Dedicated Windows
 :: -----------------------------------------------------------------------
 echo Launching FastAPI Backend on http://localhost:8000 ...
-start "ProjectResumeAnalyzer-Backend" /d "%ROOT_DIR%backend" cmd /k "call .venv\Scripts\activate.bat && echo ======================================================== && echo  ProjectResumeAnalyzer - FastAPI Backend                        && echo  URL: http://localhost:8000 - Docs: http://localhost:8000/docs && echo ======================================================== && python -m uvicorn app.main:app --reload --port 8000"
+start "ProjectResumeAnalyzer-Backend" /d "%ROOT_DIR%backend" cmd /k "call .venv\Scripts\activate.bat && echo ======================================================== && echo  ProjectResumeAnalyzer - FastAPI Backend                        && echo  URL: http://localhost:8000 - Docs: http://localhost:8000/docs && echo ======================================================== && python -m uvicorn app.main:app --host 127.0.0.1 --reload --port 8000"
 
 echo Launching Next.js Frontend on http://localhost:3000 ...
 start "ProjectResumeAnalyzer-Frontend" /d "%ROOT_DIR%frontend" cmd /k "echo ======================================================== && echo  ProjectResumeAnalyzer - Next.js Frontend                        && echo  URL: http://localhost:3000                                    && echo ======================================================== && call npm run dev"

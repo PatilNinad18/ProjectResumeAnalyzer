@@ -20,7 +20,7 @@
 Unlike conventional AI tools that blindly feed raw text to cloud APIs or hallucinate qualifications, ProjectResumeAnalyzer employs a **dual-pipeline, evidence-grounded architecture**:
 - **Zero Hallucination Risk:** Critical constraints (salary, location, must-have skills, tenure) and evaluation verdicts are strictly grounded in explicit source text with verbatim quotes.
 - **Privacy & Offline Independence:** Operates completely on your local machine using local RAG and optional Ollama inference—zero hiring data ever leaves your workstation.
-- **Standardized & Fair Scoring:** Dynamic weight normalization with zero-criteria safety and clear evidence statuses (`MET`, `PARTIALLY_MET`, `NOT_EVIDENCED`).
+- **Evidence-based scoring.** Dynamic weight normalization and explicit evidence statuses (`MET`, `PARTIALLY_MET`, `NOT_EVIDENCED`).
 
 ---
 
@@ -710,10 +710,10 @@ Candidate Resumes (PDF / DOCX / TXT)
 │    • Verbatim quote extraction from resume   │
 │    • Standardized verdicts:                  │
 │      MET | PARTIALLY_MET | NOT_EVIDENCED     │
-│    • Dynamic weight normalization (70/30)    │
+│    • Dynamic score weights (70/20/10)         │
 │    • Hard must-have guardrails               │
 │    • Tailored interview question synthesis   │
-│    • Anomaly & gap detection                 │
+│    • Screening run and override history      │
 └──────────────────────┬───────────────────────┘
                        │
                        ▼
@@ -740,31 +740,70 @@ Candidate Resumes (PDF / DOCX / TXT)
    - Distinguishes actual employment history from academic degrees and extracurricular projects.
    - **Fresher Protection:** Degree dates (e.g. "B.Tech 2021–2025") are strictly filtered out so freshers evaluate accurately to `0.0y` rather than falsely inflating tenure. Internships are captured and measured accurately.
 
-2. **100% Grounded Evidence (Zero Hallucination):**
-   - Every evaluated requirement must be corroborated by a verbatim citation directly from the resume text.
-   - If an item is not found, it is marked `NOT_EVIDENCED` rather than penalizing or inventing experience.
+2. **Resume evidence**
+   - Positive grades cite one or more excerpts verified against the extracted resume text.
+   - A requirement with insufficient evidence is marked `NOT_EVIDENCED` for follow-up.
 
 3. **Standardized Evaluation Statuses:**
    - `MET` (1.0 weight): Strong, direct evidence found in candidate's experience or projects.
    - `PARTIALLY_MET` (0.5 weight): Indirect or related evidence (e.g. academic coursework, hobby project).
    - `NOT_EVIDENCED` (0.0 weight): No evidence present in the submitted document.
 
-4. **Dynamic Weighted Scoring:**
-   - Must-have requirements carry 70% weight; preferred requirements carry 30% weight.
-   - **Zero-Criteria Safety:** Automatically shifts weight dynamically if a JD specifies zero must-haves or zero preferred skills, eliminating division-by-zero risks.
+4. **Dynamic weighted scoring**
+   - The baseline weights are 70 for must-haves, 20 for preferred criteria, and 10 for an explicit overall experience minimum. The evaluator normalizes the active weights. Overall experience earns proportional credit up to the stated minimum.
+   - A specification with no usable criteria routes candidates to review without a rank.
 
-5. **Hard Tier Guardrails:**
-   - **Strong Match (`STRONG_MATCH`):** Overall score $\ge 75\%$ AND all must-have criteria are `MET` or `PARTIALLY_MET`.
-   - **Potential Match (`POTENTIAL_MATCH`):** Overall score between $50\%$ and $74\%$.  
-     *Guardrail:* Any candidate with an unevidenced must-have requirement is automatically capped at `POTENTIAL_MATCH` regardless of high score on preferred skills.
-   - **Not a Fit (`NOT_A_FIT`):** Overall score $< 50\%$.
+5. **Advisory match tiers**
+   - **Strong match** requires a score of at least 75%, evidence for every must-have, and a fully met grade for every requirement marked critical by a recruiter.
+   - **Potential match** applies at 50% or above when the strong-match conditions need further verification.
+   - **Limited evidence** applies below 50%. The recruiter decides how to proceed.
+   - Each rerun records its specification and evaluator. Outdated runs stay in history and leave the current ranking. Recruiter overrides preserve the automated result and record the reviewer, time, and reason.
 
 6. **Automated Interview Question Synthesis:**
    - Dynamically crafts technical and behavioral interview questions targeted specifically at the candidate's `PARTIALLY_MET` and `NOT_EVIDENCED` criteria.
 
 7. **Asynchronous Background Processing:**
    - Resumes process in the background without blocking the UI.
-   - Worker features active database state recovery to gracefully resume interrupted or queued tasks upon server restarts.
+   - The worker recovers queued runs from the database after a restart.
+
+### Recruiter validation
+
+Use 30–50 approved, de-identified resumes across the target JDs. Include different file formats, layouts, and experience levels. Give two recruiters separate copies of the same offline reviewer form and have them grade the evidence independently before discussing disagreements. Use an approved transcript for scanned files when available so human reviewers can label them even if the app cannot extract text.
+
+From `backend/`, prepare a packet and compare the two returned review exports.
+
+```powershell
+python scripts/validate_screening.py prepare --manifest <manifest.json> --output-dir ../outputs/screening-validation/recruiter
+python scripts/validate_screening.py report ../outputs/screening-validation/recruiter/predictions.private.json <review-a.json> <review-b.json> --top-k 10
+```
+
+Replace the bracketed paths with your files. The manifest paths are relative to the manifest directory.
+
+```json
+{
+  "cases": [
+    {
+      "id": "R001",
+      "resume": "approved/R001.pdf",
+      "specification": "finalized/backend-spec.json",
+      "review_transcript": "approved/R001-transcript.txt",
+      "validation_group": "optional-approved-group"
+    }
+  ]
+}
+```
+
+The transcript and validation group are optional. The tool keeps scores and validation groups in `predictions.private.json`. Give reviewers `reviewer.html` and keep the predictions with the validation owner. The report shows exact agreement and Cohen's kappa for criterion grades, parsing outcomes by format, and cases both reviewers would advance that fell below the automated shortlist. The shortlist uses the current potential-match score threshold and, if supplied, a per-JD top-k limit that includes ties. Group results require at least five cases, and the tool uses only the groups supplied in the manifest.
+
+Use `prepare --synthetic` in place of `prepare --manifest <manifest.json>` to practice the workflow with the checked-in synthetic cases. The [performance baseline](PERFORMANCE_BASELINE.md#9-screening-batch-benchmark) records the separate 200-file batch test.
+
+### Candidate data handling
+
+- **Access.** Default development and startup commands bind to loopback. The API allows the local frontend origins and an optional exact `FRONTEND_ORIGIN`. The current pilot relies on access to the local machine. Shared deployments need recruiter authentication and project-level authorization before accepting candidate data.
+- **Retention.** The data owner chooses the retention period for each JD. From `backend/`, run `python scripts/candidate_retention.py --jd-id <jd-id> --older-than-days <approved-days>` to preview the number of matches. Add `--apply` only when removing those records is approved. The same policy should cover retained copies, exports, and backups.
+- **Deletion.** Deleting a candidate removes the stored file, parsed profile, evaluation history, and candidate-specific audit entries for that JD. A failed file deletion leaves the database record available for retry. Active screening runs must finish before deletion.
+- **Duplicates and JD reuse.** Uploads reject identical file bytes within the same JD, even after a rename. Different documents for the same person can coexist. Upload the resume to each applicable JD to keep those records and decisions independent.
+- **Upload checks.** The app enforces supported formats, PDF and DOCX file signatures, a 10 MB upload limit, and a bound on decompressed DOCX text. Shared deployments should apply malware scanning before the app receives candidate files.
 
 ---
 
@@ -792,9 +831,12 @@ Candidate Resumes (PDF / DOCX / TXT)
 | Method | Endpoint | Description |
 |---|---|---|
 | POST | `/api/jds/{jd_id}/resumes` | Upload candidate resume files (PDF, DOCX, TXT) |
-| POST | `/api/jds/{jd_id}/screen` | Trigger asynchronous grounded screening for resumes |
+| POST | `/api/jds/{jd_id}/resumes/screen` | Queue screening against the current finalized specification |
 | GET | `/api/jds/{jd_id}/resumes` | List candidates with scores, tiers, and statuses |
-| GET | `/api/jds/{jd_id}/resumes/{resume_id}` | Get full candidate evaluation report & verbatim quotes |
+| GET | `/api/jds/{jd_id}/resumes/{resume_id}` | View the latest run or select a historical run with `evaluation_id` |
+| PUT | `/api/jds/{jd_id}/resumes/policy` | Publish a specification revision with updated critical requirements |
+| POST | `/api/jds/{jd_id}/resumes/{resume_id}/override` | Record a recruiter override and audit entry |
+| POST | `/api/jds/{jd_id}/resumes/{resume_id}/re-screen` | Queue a new run and preserve previous results |
 | DELETE | `/api/jds/{jd_id}/resumes/{resume_id}` | Delete a candidate resume and its evaluation records |
 
 ---

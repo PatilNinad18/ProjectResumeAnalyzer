@@ -53,6 +53,7 @@ from app.services.json_serializer import to_json_dict, to_json_str
 from app.services.markdown_renderer import render_markdown
 from app.services.markdown_to_json import markdown_to_spec
 from app.services.storage import build_key, checksum, get_storage
+from app.services.specification_versions import lock_specification_revision, specifications_for_jd
 from app.services.validation import validate_payload
 
 logger = logging.getLogger("jd_agent.api")
@@ -220,13 +221,7 @@ def list_jds(project_id: Optional[str] = None, db: Session = Depends(get_db)):
 
     results = []
     for jd in jds:
-        latest_spec = (
-            db.query(JobSpecificationVersion)
-            .join(JobDescriptionVersion)
-            .filter(JobDescriptionVersion.job_description_id == jd.id)
-            .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
-            .first()
-        )
+        latest_spec = specifications_for_jd(db, jd.id).first()
         latest_job = (
             db.query(ProcessingJob)
             .join(JobDescriptionVersion)
@@ -248,6 +243,8 @@ def list_jds(project_id: Optional[str] = None, db: Session = Depends(get_db)):
             "status": status_val,
             "has_specification": latest_spec is not None,
             "specification_version": latest_spec.specification_version if latest_spec else None,
+            "spec_version_id": latest_spec.id if latest_spec else None,
+            "lifecycle_status": latest_spec.lifecycle_status.value if latest_spec and latest_spec.lifecycle_status else None,
         })
     return results
 
@@ -802,17 +799,13 @@ def cancel_task(jd_id: str, kind: str):
 
 
 def _get_spec_version(jd_id: str, db: Session, version: Optional[int] = None) -> JobSpecificationVersion:
-    query = (
-        db.query(JobSpecificationVersion)
-        .join(JobDescriptionVersion)
-        .filter(JobDescriptionVersion.job_description_id == jd_id)
-    )
+    query = specifications_for_jd(db, jd_id)
     if version is not None:
         spec = query.filter(JobSpecificationVersion.specification_version == version).first()
         if not spec:
             raise HTTPException(404, f"Specification version {version} not found")
         return spec
-    spec = query.order_by(JobSpecificationVersion.specification_version.desc()).first()
+    spec = query.first()
     if not spec:
         raise HTTPException(404, "No specification generated yet")
     return spec
@@ -1144,6 +1137,9 @@ def _do_resolve(db: Session, jd_id: str, answers: Dict[str, Any], answered_by: s
             logger.warning("Could not apply carried-forward enrichment report: %s", exc)
 
     _update_task_progress(task_key, "PERSISTING", f"Saving resolved specification artifacts v{next_version}", 95)
+    lock_specification_revision(db, jd_id)
+    if _latest_spec_version(jd_id, db).id != spec_version.id:
+        raise HTTPException(409, "The JD specification changed during clarification. Reload before submitting.")
     base_md = render_markdown(new_spec)
     json_str = to_json_str(new_spec)
 
@@ -1475,14 +1471,7 @@ def _master_context_from_canonical(jd_id: str, canonical_dict: dict, raw_jd_text
 
 
 def _get_spec_version_row(jd_id: str, db: Session) -> JobSpecificationVersion:
-    spec_version = (
-        db.query(JobSpecificationVersion)
-        .join(JobDescriptionVersion, JobSpecificationVersion.job_description_version_id == JobDescriptionVersion.id)
-        .join(JobDescription, JobDescriptionVersion.job_description_id == JobDescription.id)
-        .filter(JobDescription.id == jd_id)
-        .order_by(JobSpecificationVersion.specification_version.desc(), JobSpecificationVersion.created_at.desc())
-        .first()
-    )
+    spec_version = specifications_for_jd(db, jd_id).first()
     if spec_version:
         return spec_version
 

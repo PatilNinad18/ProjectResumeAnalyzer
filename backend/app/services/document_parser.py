@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from typing import Set
 
 SUPPORTED_EXTENSIONS: Set[str] = {".txt", ".pdf", ".docx"}
+MAX_DOCX_XML_BYTES = 20 * 1024 * 1024
 
 
 class DocumentParseError(Exception):
@@ -55,6 +56,8 @@ def extract_text_from_docx(content: bytes) -> str:
         with zipfile.ZipFile(io.BytesIO(content)) as docx_zip:
             if "word/document.xml" not in docx_zip.namelist():
                 raise DocumentParseError("Invalid DOCX file: missing word/document.xml")
+            if docx_zip.getinfo("word/document.xml").file_size > MAX_DOCX_XML_BYTES:
+                raise DocumentParseError("The uncompressed DOCX document exceeds the text extraction limit.")
             xml_content = docx_zip.read("word/document.xml")
         
         tree = ET.fromstring(xml_content)

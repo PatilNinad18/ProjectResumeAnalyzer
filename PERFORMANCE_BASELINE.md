@@ -224,3 +224,21 @@ A global reduction of `num_ctx` from 4096 to 2048 was empirically evaluated and 
    - Test Results: **7 passed in 0.47s**.
    - Full Pure-Logic Regression Suite: **101 passed in 2.08s**.
 
+## 9. Screening batch benchmark
+
+On 26 November 2026, the local screening API processed 200 synthetic resumes against one finalized JD using the `resume-evidence-v3` evaluator, one worker, and SQLite in WAL mode. The host ran Windows 11 and Python 3.13.1 with 12 logical CPUs. Timing covered upload, parse, enqueue, worker processing, and in-process API polling at a 250 ms interval. File generation, application startup, browser rendering, and network transit were outside the measurement.
+
+| Metric | Observed |
+| --- | ---: |
+| Upload and parse 200 files | 2.778 s |
+| Queue request | 0.521 s |
+| Queue response to observed completion | 5.516 s |
+| Total batch time | 8.815 s |
+| Throughput | 22.69 resumes/s |
+| Worker time p50 / p95 per resume | 16 / 44 ms |
+| Status request p95 | 212 ms |
+
+The batch had 100 PDF, 60 DOCX, and 40 TXT files. Screening completed for 196 files. Four deliberately blank PDFs reached `PARSE_FAILED` and received no score. Loading candidate summaries in batches reduced the observed p95 status request from 728 ms to 212 ms across the two runs. Total batch time was about 8.8 seconds in both runs. These observations apply to this synthetic workload and host.
+
+From `backend/`, reproduce the test with `python scripts/benchmark_screening.py --count 200 --output ../outputs/screening-validation/batch-200.json`. The script uses a temporary database and resume directory.
+

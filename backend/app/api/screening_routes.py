@@ -17,18 +17,20 @@ All endpoints are nested under /api/jds/{jd_id}/resumes.
 """
 from __future__ import annotations
 
+import copy
+import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import Session, selectinload
 
 from app.db import get_db
-from app.models.db_models import JobDescription, gen_uuid
+from app.models.db_models import AuditEvent, JDLifecycleStatusEnum, JobDescription, JobSpecificationVersion, gen_uuid
 from app.models.screening_models import (
     CandidateEvaluation,
     CandidateResume,
@@ -49,29 +51,32 @@ from app.schemas.screening import (
     ScoreBreakdown,
     ScreeningLeaderboardItem,
     ScreeningLeaderboardResponse,
+    ScreeningOverrideEvent,
+    ScreeningPolicyUpdate,
+    ScreeningRun,
     ScreeningStatus,
     ScreeningTriggerRequest,
     ScreeningTriggerResponse,
     ValidationCheckpoint,
 )
-<<<<<<< HEAD
-from app.services.document_parser import DocumentParseError, SUPPORTED_EXTENSIONS
-from app.services.resume.evaluator import NO_EVALUATION_CRITERIA
+from app.schemas.canonical import JobEvaluationSpecification
+from app.schemas.enrichment import TAEnrichmentReport
+from app.schemas.master_context import JDMasterContext
+from app.services.document_parser import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
+from app.services.markdown_renderer import render_markdown
+from app.services.projection.canonical_projector import _flatten_requirements
+from app.services.resume.evaluator import EVALUATOR_ENGINE, NO_EVALUATION_CRITERIA, PROMPT_VERSION, check_parse_quality, screening_criteria
+from app.services.resume.profiler import compute_file_hash, resume_parse_issue
+from app.services.resume.storage import RESUME_STORAGE_DIR, ResumeInUseError, remove_candidate_data
+from app.services.specification_versions import lock_specification_revision, specification_checksum, specifications_for_jd
+from app.services.storage import build_key, checksum, get_storage
 from app.workers.screening_worker import NO_CRITERIA_REVIEW, screening_queue
-=======
-from app.services.document_parser import SUPPORTED_EXTENSIONS, parse_document
-from app.services.resume.evaluator import check_parse_quality
-from app.services.resume.profiler import compute_file_hash
-from app.workers.screening_worker import screening_queue
->>>>>>> smartleaven_work/main
 
 logger = logging.getLogger("jd_agent.screening_routes")
 
 router = APIRouter(prefix="/api/jds/{jd_id}/resumes", tags=["screening"])
 
 # --- Local resume storage directory ---
-BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
-RESUME_STORAGE_DIR = Path(os.getenv("RESUME_STORAGE_DIR", str(BACKEND_DIR / "data" / "resumes"))).resolve()
 RESUME_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -121,13 +126,23 @@ def _tier_sort_key(tier: Optional[str]) -> int:
     return order.get(tier or "", 3)
 
 
-<<<<<<< HEAD
 def _get_latest_eval(resume: CandidateResume) -> Optional[CandidateEvaluation]:
     return max(resume.evaluations, key=lambda e: e.created_at or datetime.min, default=None)
 
 
-def _status_and_review_reason(evaluation: Optional[CandidateEvaluation]) -> tuple[ScreeningStatus, Optional[str]]:
+def _is_outdated(evaluation: CandidateEvaluation, spec: Optional[JobSpecificationVersion], digest: Optional[str]) -> bool:
+    return (
+        spec is None or evaluation.spec_version_id != spec.id or evaluation.spec_checksum != digest
+        or evaluation.evaluator_engine != EVALUATOR_ENGINE or evaluation.prompt_version != PROMPT_VERSION
+    )
+
+
+def _status_and_review_reason(evaluation: Optional[CandidateEvaluation], resume: CandidateResume) -> tuple[ScreeningStatus, Optional[str]]:
     if evaluation is None:
+        quality = resume.parse_quality_check or {}
+        if quality.get("passed") is False:
+            status = ScreeningStatus(quality.get("status") or "PARSE_FAILED")
+            return status, quality.get("failure_reason")
         return ScreeningStatus.QUEUED, None
     if evaluation.status == ScreeningStatusEnum.COMPLETED and (
         (evaluation.score_breakdown or {}).get("warning") == NO_EVALUATION_CRITERIA
@@ -139,42 +154,26 @@ def _status_and_review_reason(evaluation: Optional[CandidateEvaluation]) -> tupl
     return status, reason
 
 
-def _build_leaderboard_item(resume: CandidateResume) -> ScreeningLeaderboardItem:
+def _build_leaderboard_item(
+    resume: CandidateResume, spec: Optional[JobSpecificationVersion], digest: Optional[str],
+) -> ScreeningLeaderboardItem:
     latest_eval = _get_latest_eval(resume)
-    status, reason = _status_and_review_reason(latest_eval)
-    scored = latest_eval if status == ScreeningStatus.COMPLETED else None
+    status, reason = _status_and_review_reason(latest_eval, resume)
+    outdated = bool(latest_eval and _is_outdated(latest_eval, spec, digest))
+    scored = latest_eval if status == ScreeningStatus.COMPLETED and not outdated else None
     mh_summary = (scored.must_haves_summary or {}) if scored else {}
-=======
-def _get_best_eval(resume: CandidateResume) -> Optional[CandidateEvaluation]:
-    if not resume.evaluations:
-        return None
-    # Return the latest evaluation by created_at so live QUEUED/ANALYZING status is shown
-    return sorted(resume.evaluations, key=lambda e: e.created_at or datetime.min, reverse=True)[0]
-
-
-def _effective_tier(eval_: Optional[CandidateEvaluation]) -> Optional[MatchTierEnum]:
-    """Return recruiter override tier if present, otherwise computed tier."""
-    if not eval_:
-        return None
-    return eval_.recruiter_override_tier or eval_.match_tier
-
-
-def _build_leaderboard_item(rank: int, resume: CandidateResume) -> ScreeningLeaderboardItem:
-    latest_eval = _get_best_eval(resume)
-    mh_summary  = latest_eval.must_haves_summary if latest_eval and latest_eval.must_haves_summary else {}
-    status = ScreeningStatus(latest_eval.status.value) if latest_eval else ScreeningStatus.QUEUED
-    eff_tier = _effective_tier(latest_eval)
->>>>>>> smartleaven_work/main
     return ScreeningLeaderboardItem(
         rank=None,
         candidate_resume_id=resume.id,
+        evaluation_id=latest_eval.id if latest_eval else None,
+        has_override=bool(scored and scored.recruiter_override_tier),
         filename=resume.filename,
         candidate_name=resume.candidate_name,
         email=resume.email,
         total_experience_years=resume.total_experience_years,
-<<<<<<< HEAD
-        overall_score=scored.overall_score if scored else None,
+        overall_score=(scored.recruiter_override_score if scored.recruiter_override_score is not None else scored.overall_score) if scored else None,
         match_tier=scored.match_tier if scored else None,
+        effective_tier=(scored.recruiter_override_tier or scored.match_tier) if scored else None,
         must_haves_met=mh_summary.get("met", 0),
         must_haves_partially_met=mh_summary.get("partially_met", 0),
         must_haves_total=mh_summary.get("total", 0),
@@ -182,25 +181,39 @@ def _build_leaderboard_item(rank: int, resume: CandidateResume) -> ScreeningLead
         validation_checkpoints_count=len(scored.validation_checkpoints or []) if scored else 0,
         status=status,
         review_reason=reason,
-=======
-        overall_score=latest_eval.recruiter_override_score or latest_eval.overall_score if latest_eval else None,
-        match_tier=latest_eval.match_tier if latest_eval else None,
-        effective_tier=eff_tier,
-        must_haves_met=mh_summary.get("met", 0) + mh_summary.get("partially_met", 0),
-        must_haves_total=mh_summary.get("total", 0),
-        not_evidenced_count=mh_summary.get("not_evidenced", 0),
-        validation_checkpoints_count=len(latest_eval.validation_checkpoints or []) if latest_eval else 0,
-        status=status,
+        spec_outdated=outdated,
         parse_failed=status == ScreeningStatus.PARSE_FAILED,
-        spec_outdated=latest_eval.spec_outdated if latest_eval else False,
->>>>>>> smartleaven_work/main
         created_at=resume.created_at,
     )
 
 
-def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationResponse:
-    latest_eval = _get_latest_eval(resume)
-    status, reason = _status_and_review_reason(latest_eval)
+def _build_evaluation_response(
+    db: Session, resume: CandidateResume, evaluation: Optional[CandidateEvaluation], spec: Optional[JobSpecificationVersion],
+) -> CandidateEvaluationResponse:
+    latest_eval = evaluation
+    status, reason = _status_and_review_reason(latest_eval, resume)
+    digest = specification_checksum(spec) if spec else None
+    outdated = bool(latest_eval and _is_outdated(latest_eval, spec, digest))
+    events = []
+    if latest_eval:
+        events = db.query(AuditEvent).filter_by(
+            entity_type="candidate_evaluation", entity_id=latest_eval.id, action="recruiter_override",
+        ).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).all()
+    history = [
+        ScreeningOverrideEvent(**event.details, created_at=event.created_at)
+        for event in events
+    ]
+    runs = [
+        ScreeningRun(
+            evaluation_id=run.id, specification_version=run.specification_version,
+            status=_status_and_review_reason(run, resume)[0],
+            overall_score=run.overall_score if _status_and_review_reason(run, resume)[0] == ScreeningStatus.COMPLETED else None,
+            match_tier=run.match_tier if _status_and_review_reason(run, resume)[0] == ScreeningStatus.COMPLETED else None,
+            evaluator_version=run.evaluator_engine if run.spec_checksum else None,
+            spec_outdated=_is_outdated(run, spec, digest), created_at=run.created_at,
+        )
+        for run in sorted(resume.evaluations, key=lambda item: item.created_at or datetime.min, reverse=True)
+    ]
     profile = resume.parsed_profile_json or {}
     candidate_profile = CandidateProfile(
         candidate_name=resume.candidate_name or profile.get("candidate_name"),
@@ -220,6 +233,11 @@ def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationRe
             specification_version=latest_eval.specification_version if latest_eval else 2,
             status=status,
             review_reason=reason,
+            evaluation_id=latest_eval.id if latest_eval else None,
+            spec_checksum=latest_eval.spec_checksum if latest_eval else None,
+            spec_outdated=outdated,
+            runs=runs,
+            override_history=history,
             overall_score=None,
             match_tier=None,
             candidate_profile=candidate_profile,
@@ -253,7 +271,7 @@ def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationRe
     sb = latest_eval.score_breakdown or {}
 
     provenance = None
-    if latest_eval.evaluator_engine:
+    if latest_eval.spec_checksum:
         provenance = EvaluatorProvenance(
             evaluator_engine=latest_eval.evaluator_engine,
             model_name=latest_eval.model_name,
@@ -266,16 +284,16 @@ def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationRe
     return CandidateEvaluationResponse(
         candidate_resume_id=resume.id,
         job_description_id=resume.job_description_id,
+        evaluation_id=latest_eval.id,
         spec_version_id=latest_eval.spec_version_id,
         specification_version=latest_eval.specification_version,
-<<<<<<< HEAD
         status=status,
         overall_score=latest_eval.overall_score,
-=======
-        spec_outdated=latest_eval.spec_outdated or False,
-        status=ScreeningStatus(latest_eval.status.value),
-        overall_score=latest_eval.recruiter_override_score or latest_eval.overall_score,
->>>>>>> smartleaven_work/main
+        spec_checksum=latest_eval.spec_checksum,
+        spec_outdated=outdated,
+        can_override=not outdated and spec.lifecycle_status == JDLifecycleStatusEnum.FINALIZED and latest_eval is _get_latest_eval(resume),
+        runs=runs,
+        override_history=history,
         match_tier=latest_eval.match_tier,
         provenance=provenance,
         quote_verification_pass=latest_eval.quote_verification_pass,
@@ -285,7 +303,10 @@ def _build_evaluation_response(resume: CandidateResume) -> CandidateEvaluationRe
         score_breakdown=ScoreBreakdown(**sb) if sb else None,
         detailed_evaluations=_parse_req_evals(latest_eval.detailed_evaluations),
         validation_checkpoints=_parse_checkpoints(latest_eval.validation_checkpoints),
-        timeline_observations=latest_eval.timeline_observations or [],
+        timeline_observations=[
+            note for note in (latest_eval.timeline_observations or [])
+            if not note.lower().startswith(("career pause", "employment gap", "career gap"))
+        ],
         tailored_interview_questions=latest_eval.tailored_interview_questions or [],
         recruiter_override_tier=latest_eval.recruiter_override_tier,
         recruiter_override_score=latest_eval.recruiter_override_score,
@@ -322,7 +343,7 @@ async def upload_resumes(
     failed: List[dict] = []
 
     for file in files:
-        filename = file.filename or "unknown"
+        filename = Path(file.filename or "unknown").name
         ext = Path(filename).suffix.lower()
 
         if ext not in SUPPORTED_EXTENSIONS:
@@ -332,7 +353,7 @@ async def upload_resumes(
             })
             continue
 
-        content = await file.read()
+        content = await file.read(MAX_FILE_SIZE_BYTES + 1)
 
         if len(content) == 0:
             failed.append({"filename": filename, "error": "Empty file (0 bytes)."})
@@ -341,7 +362,7 @@ async def upload_resumes(
         if len(content) > MAX_FILE_SIZE_BYTES:
             failed.append({
                 "filename": filename,
-                "error": f"File too large ({len(content) // 1024}KB). Maximum: {MAX_FILE_SIZE_BYTES // 1024}KB.",
+                "error": f"File exceeds the {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB limit.",
             })
             continue
 
@@ -355,43 +376,41 @@ async def upload_resumes(
         # SHA-256 file hash for deduplication
         file_hash = compute_file_hash(content)
 
-        # Duplicate detection: same hash + same JD = likely re-upload
-        existing_hash = (
-            db.query(CandidateResume)
-            .filter(
-                CandidateResume.job_description_id == jd_id,
-                CandidateResume.file_hash == file_hash,
-            )
-            .first()
-        )
-        if existing_hash:
-            failed.append({
-                "filename": filename,
-                "error": f"Duplicate file detected (SHA-256 matches existing resume '{existing_hash.filename}'). Delete it first or upload a different file.",
-            })
-            continue
-
         # Store file on disk
         resume_id = gen_uuid()
         safe_name = f"{resume_id}_{filename}"
         file_path  = RESUME_STORAGE_DIR / safe_name
-        file_path.write_bytes(content)
-
         # Run parse quality gate immediately on upload for fast user feedback
         try:
             parsed_text = parse_document(filename, content)
             quality = check_parse_quality(parsed_text)
-        except Exception as e:
+            quality["failure_reason"] = resume_parse_issue(parsed_text)
+            quality["passed"] = quality["failure_reason"] is None
+            quality["status"] = "QUEUED" if quality["passed"] else "NEEDS_REVIEW"
+        except DocumentParseError:
             parsed_text = ""
             quality = {
                 "passed": False,
                 "text_length": 0,
                 "word_count": 0,
                 "alpha_ratio": 0.0,
-                "failure_reason": f"Document parsing failed: {str(e)[:200]}",
+                "failure_reason": "No readable text was extracted. Upload a text-searchable copy.",
+                "status": "PARSE_FAILED",
             }
 
-        # Create DB record
+        # Serialize the duplicate check and insert for this JD. Parse first so other
+        # requests need only wait for the short file and database write.
+        lock_specification_revision(db, jd_id)
+        existing_hash = db.query(CandidateResume).filter_by(job_description_id=jd_id, file_hash=file_hash).first()
+        if existing_hash:
+            failed.append({
+                "filename": filename,
+                "error": f"Duplicate file already uploaded to this JD as '{existing_hash.filename}'.",
+                "existing_candidate_resume_id": existing_hash.id,
+            })
+            db.rollback()
+            continue
+
         resume = CandidateResume(
             id=resume_id,
             job_description_id=jd_id,
@@ -399,13 +418,23 @@ async def upload_resumes(
             file_size_bytes=len(content),
             file_key=str(file_path),
             file_hash=file_hash,
-            parsed_text=parsed_text if quality["passed"] else None,
+            parsed_text=parsed_text or None,
             parse_quality_check=quality,
         )
-        db.add(resume)
-        db.flush()
+        try:
+            file_path.write_bytes(content)
+            db.add(resume)
+            db.commit()
+        except (OSError, SQLAlchemyError):
+            db.rollback()
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed to clean up an incomplete resume upload %s", resume_id)
+            failed.append({"filename": filename, "error": "Resume could not be stored. Retry the upload."})
+            continue
 
-        status = ScreeningStatus.QUEUED if quality["passed"] else ScreeningStatus.PARSE_FAILED
+        status = ScreeningStatus(quality["status"])
         uploaded.append(ResumeUploadResponse(
             candidate_resume_id=resume_id,
             filename=filename,
@@ -419,8 +448,6 @@ async def upload_resumes(
             ),
         ))
 
-    db.commit()
-
     return BatchResumeUploadResponse(
         uploaded=uploaded,
         failed=failed,
@@ -428,334 +455,220 @@ async def upload_resumes(
     )
 
 
-@router.post("/screen", response_model=ScreeningTriggerResponse, status_code=202)
-def trigger_screening(
-    jd_id: str,
-    body: ScreeningTriggerRequest = ScreeningTriggerRequest(),
-    db: Session = Depends(get_db),
-):
-    """
-    Trigger grounded evaluation of uploaded resumes against the JD's Specification v2.
-    - Skips resumes that failed the parse quality gate (PARSE_FAILED).
-    - Enqueues CandidateEvaluation tasks into the background screening worker.
-    - Returns immediately with a list of queued evaluation IDs.
-    """
-    _get_jd_or_404(jd_id, db)
+def _queue_evaluations(db: Session, jd_id: str, resumes: list[CandidateResume], spec_id: Optional[str]) -> ScreeningTriggerResponse:
+    versions = specifications_for_jd(db, jd_id)
+    spec = versions.first()
+    if spec_id and (not spec or spec.id != spec_id):
+        if not versions.filter(JobSpecificationVersion.id == spec_id).first():
+            raise HTTPException(404, "Specification is not part of this JD.")
+        raise HTTPException(409, "The specification changed. Reload and screen against the current version.")
+    if not spec or spec.lifecycle_status != JDLifecycleStatusEnum.FINALIZED:
+        raise HTTPException(409, "Finalize the current job specification before screening resumes.")
 
-    if body.candidate_resume_ids:
-        resumes = (
-            db.query(CandidateResume)
-            .filter(
-                CandidateResume.job_description_id == jd_id,
-                CandidateResume.id.in_(body.candidate_resume_ids),
-            )
-            .all()
-        )
-    else:
-        resumes = (
-            db.query(CandidateResume)
-            .filter(CandidateResume.job_description_id == jd_id)
-            .all()
-        )
-
-    if not resumes:
-        raise HTTPException(
-            status_code=404,
-            detail="No candidate resumes found for this JD. Upload resumes first.",
-        )
-
-    queued_ids: List[str] = []
-    skipped_parse_failed: List[str] = []
-
+    digest = specification_checksum(spec)
+    queued_ids = []
     for resume in resumes:
-        # Skip resumes that failed parse quality gate
-        pq = resume.parse_quality_check or {}
-        if pq and not pq.get("passed", True):
-            skipped_parse_failed.append(resume.filename)
-            continue
-
-        existing = (
-            db.query(CandidateEvaluation)
-            .filter(
-                CandidateEvaluation.candidate_resume_id == resume.id,
-                CandidateEvaluation.job_description_id == jd_id,
+        run_key = checksum(f"{resume.id}:{spec.id}:{digest}:{EVALUATOR_ENGINE}:{PROMPT_VERSION}")
+        evaluation = db.query(CandidateEvaluation).filter_by(active_run_key=run_key).first()
+        if evaluation is None:
+            evaluation = CandidateEvaluation(
+                candidate_resume_id=resume.id, job_description_id=jd_id,
+                spec_version_id=spec.id, specification_version=spec.specification_version,
+                spec_checksum=digest, active_run_key=run_key,
+                evaluator_engine=EVALUATOR_ENGINE, prompt_version=PROMPT_VERSION,
+                status=ScreeningStatusEnum.QUEUED, created_at=datetime.now(timezone.utc),
             )
-            .order_by(CandidateEvaluation.created_at.desc())
-            .first()
-        )
-        if existing:
-<<<<<<< HEAD
-            # Keep an active run pinned to its current inputs.
-            db.query(CandidateEvaluation).filter(
-                CandidateEvaluation.id == existing.id,
-                CandidateEvaluation.status.notin_((ScreeningStatusEnum.QUEUED, ScreeningStatusEnum.ANALYZING)),
-            ).update({
-                "status": ScreeningStatusEnum.QUEUED,
-                "spec_version_id": body.spec_version_id,
-                "error_message": None,
-            }, synchronize_session=False)
-=======
-            existing.status = ScreeningStatusEnum.QUEUED
-            existing.spec_version_id = body.spec_version_id
-            existing.error_message = None
-            existing.overall_score = None
-            existing.match_tier = None
-            existing.must_haves_summary = None
-            existing.preferred_summary = None
-            existing.detailed_evaluations = None
-            existing.score_breakdown = None
-            existing.timeline_observations = None
-            existing.completed_at = None
->>>>>>> smartleaven_work/main
-            queued_ids.append(existing.id)
-            continue
-
-        evaluation = CandidateEvaluation(
-            candidate_resume_id=resume.id,
-            job_description_id=jd_id,
-            spec_version_id=body.spec_version_id,
-            specification_version=2,
-            status=ScreeningStatusEnum.QUEUED,
-        )
-        db.add(evaluation)
-        db.flush()
+            try:
+                with db.begin_nested():
+                    db.add(evaluation)
+                    db.flush()
+            except IntegrityError:
+                evaluation = db.query(CandidateEvaluation).filter_by(active_run_key=run_key).first()
+                if evaluation is None:
+                    raise
         queued_ids.append(evaluation.id)
 
-    # Commit BEFORE enqueueing so worker thread sees committed rows
     db.commit()
-
-    for qid in queued_ids:
-        screening_queue.enqueue(qid)
-
-    skip_msg = f" ({len(skipped_parse_failed)} skipped: unreadable PDFs)" if skipped_parse_failed else ""
+    for evaluation_id in queued_ids:
+        screening_queue.enqueue(evaluation_id)
     return ScreeningTriggerResponse(
-        queued_count=len(queued_ids),
-        candidate_resume_ids=queued_ids,
-        message=f"{len(queued_ids)} candidate evaluation(s) queued{skip_msg}. Poll GET /resumes for results.",
+        queued_count=len(queued_ids), candidate_resume_ids=queued_ids,
+        message=f"Screening requested for {len(queued_ids)} candidate(s) against specification v{spec.specification_version}.",
     )
+
+
+@router.post("/screen", response_model=ScreeningTriggerResponse, status_code=202)
+def trigger_screening(jd_id: str, body: ScreeningTriggerRequest = ScreeningTriggerRequest(), db: Session = Depends(get_db)):
+    _get_jd_or_404(jd_id, db)
+    lock_specification_revision(db, jd_id)
+    query = db.query(CandidateResume).filter_by(job_description_id=jd_id)
+    if body.candidate_resume_ids is not None:
+        query = query.filter(CandidateResume.id.in_(body.candidate_resume_ids))
+    resumes = query.all()
+    if not resumes:
+        raise HTTPException(404, "No candidate resumes found for this JD. Upload resumes first.")
+    return _queue_evaluations(db, jd_id, resumes, body.spec_version_id)
 
 
 @router.get("", response_model=ScreeningLeaderboardResponse)
-def get_leaderboard(
-    jd_id: str,
-    db: Session = Depends(get_db),
-):
-    """
-    Fetch the ranked candidate leaderboard for a Job Description.
-    Sort order: effective_tier (STRONG first) → overall_score descending.
-    PARSE_FAILED candidates appear at the bottom regardless of score.
-    """
+def get_leaderboard(jd_id: str, db: Session = Depends(get_db)):
     _get_jd_or_404(jd_id, db)
-
-    resumes = (
-        db.query(CandidateResume)
-        .filter(CandidateResume.job_description_id == jd_id)
-        .order_by(CandidateResume.created_at.asc())
-        .all()
+    spec = specifications_for_jd(db, jd_id).first()
+    digest = specification_checksum(spec) if spec else None
+    summaries = selectinload(CandidateResume.evaluations).load_only(
+        CandidateEvaluation.created_at, CandidateEvaluation.status, CandidateEvaluation.error_message,
+        CandidateEvaluation.spec_version_id, CandidateEvaluation.spec_checksum,
+        CandidateEvaluation.evaluator_engine, CandidateEvaluation.prompt_version,
+        CandidateEvaluation.overall_score, CandidateEvaluation.match_tier, CandidateEvaluation.score_breakdown,
+        CandidateEvaluation.recruiter_override_score, CandidateEvaluation.recruiter_override_tier,
+        CandidateEvaluation.must_haves_summary, CandidateEvaluation.validation_checkpoints,
     )
+    resumes = db.query(CandidateResume).options(summaries).filter_by(
+        job_description_id=jd_id,
+    ).order_by(CandidateResume.created_at).all()
 
-<<<<<<< HEAD
-    items = [_build_leaderboard_item(resume) for resume in resumes]
-    items.sort(key=lambda item: (item.overall_score is None, _tier_sort_key(item.match_tier), -(item.overall_score or 0)))
+    # Historic duplicates can predate upload-time SHA-256 deduplication.
+    deduped = {}
+    for resume in resumes:
+        key = resume.file_hash or resume.id
+        previous = deduped.get(key)
+        if previous is None or (bool(resume.parsed_text), len(resume.evaluations)) > (
+            bool(previous.parsed_text), len(previous.evaluations),
+        ):
+            deduped[key] = resume
+    items = [_build_leaderboard_item(resume, spec, digest) for resume in deduped.values()]
+    items.sort(key=lambda item: (item.overall_score is None, _tier_sort_key(item.effective_tier), -(item.overall_score or 0)))
     for rank, item in enumerate(items, start=1):
         if item.overall_score is None:
             break
         item.rank = rank
-=======
-    # Deduplicate exact duplicate files by SHA-256 file_hash within the same JD.
-    # Different candidates sharing a common filename (e.g. 'resume.pdf') have distinct file_hashes
-    # and MUST NOT be collapsed.
-    deduped: dict[str, CandidateResume] = {}
-    for r in resumes:
-        key = r.file_hash if r.file_hash else r.id
-        if key not in deduped:
-            deduped[key] = r
-        else:
-            prev = deduped[key]
-            prev_score = (bool(prev.parsed_text), len(prev.evaluations), prev.created_at or datetime.min)
-            curr_score = (bool(r.parsed_text), len(r.evaluations), r.created_at or datetime.min)
-            if curr_score > prev_score:
-                deduped[key] = r
-    resumes = list(deduped.values())
-
-    def sort_key(r: CandidateResume):
-        latest_eval = _get_best_eval(r)
-        # Push PARSE_FAILED to end
-        if latest_eval and latest_eval.status == ScreeningStatusEnum.PARSE_FAILED:
-            return (99, 0)
-        eff_tier = _effective_tier(latest_eval)
-        score = (latest_eval.recruiter_override_score or latest_eval.overall_score or -1) if latest_eval else -1
-        return (_tier_sort_key(eff_tier), -(score or 0))
-
-    sorted_resumes = sorted(resumes, key=sort_key)
-    items = [_build_leaderboard_item(rank + 1, r) for rank, r in enumerate(sorted_resumes)]
->>>>>>> smartleaven_work/main
-
     return ScreeningLeaderboardResponse(
-        job_description_id=jd_id,
-        total_candidates=len(items),
-        candidates=items,
+        job_description_id=jd_id, total_candidates=len(items), candidates=items,
+        spec_version_id=spec.id if spec else None,
+        specification_version=spec.specification_version if spec else None,
+        spec_finalized=bool(spec and spec.lifecycle_status == JDLifecycleStatusEnum.FINALIZED),
+        criteria=screening_criteria(spec.canonical_json) if spec else [],
     )
 
 
 @router.get("/status")
-def get_screening_status(
-    jd_id: str,
-    db: Session = Depends(get_db),
-):
-    """
-    Lightweight polling endpoint: returns only resume IDs, filenames,
-    scores, tiers, and statuses. Suitable for frequent frontend polling.
-    """
-    _get_jd_or_404(jd_id, db)
-    resumes = (
-        db.query(CandidateResume)
-        .filter(CandidateResume.job_description_id == jd_id)
-        .all()
+def get_screening_status(jd_id: str, db: Session = Depends(get_db)):
+    leaderboard = get_leaderboard(jd_id, db)
+    keys = {"candidate_resume_id", "filename", "status", "overall_score", "effective_tier", "parse_failed", "spec_outdated"}
+    return {"job_description_id": jd_id, "candidates": [row.model_dump(include=keys) for row in leaderboard.candidates]}
+
+
+@router.put("/policy")
+def update_screening_policy(jd_id: str, body: ScreeningPolicyUpdate, db: Session = Depends(get_db)):
+    jd = _get_jd_or_404(jd_id, db)
+    lock_specification_revision(db, jd_id)
+    spec = specifications_for_jd(db, jd_id).first()
+    if not spec or spec.id != body.spec_version_id or spec.lifecycle_status != JDLifecycleStatusEnum.FINALIZED:
+        raise HTTPException(409, "The specification changed. Reload the current finalized specification.")
+    choices = {item["requirement_id"]: item["critical"] for item in screening_criteria(spec.canonical_json)}
+    selected = set(body.critical_requirement_ids)
+    if selected - choices.keys():
+        raise HTTPException(422, "Critical requirements must be scorable must-haves in this specification.")
+    previous = {key for key, critical in choices.items() if critical}
+    if selected == previous:
+        db.commit()
+        return {"spec_version_id": spec.id, "specification_version": spec.specification_version}
+
+    version = spec.specification_version + 1
+    payload = copy.deepcopy(spec.canonical_json)
+    payload["metadata"] = {**(payload.get("metadata") or {}), "specification_version": version}
+    for criterion in payload.get("evidence_requirements", []):
+        if criterion.get("requirement_id") in choices:
+            criterion["critical"] = criterion["requirement_id"] in selected
+    canonical = JobEvaluationSpecification.model_validate(payload)
+    master = JDMasterContext.model_validate(spec.master_context_json) if spec.master_context_json else None
+    if master:
+        for requirement in _flatten_requirements(master.requirements):
+            requirement.is_critical = requirement.id in selected
+    storage = get_storage()
+    json_key = build_key(str(jd.project_id), jd_id, version, "json")
+    md_key = build_key(str(jd.project_id), jd_id, version, "markdown")
+    storage.put_text(json_key, json.dumps(payload, ensure_ascii=False, indent=2), "application/json")
+    storage.put_text(md_key, render_markdown(canonical), "text/markdown")
+    revision = JobSpecificationVersion(
+        job_description_version_id=spec.job_description_version_id, specification_version=version,
+        parent_specification_version_id=spec.id, canonical_json=payload,
+        master_context_json=master.model_dump(mode="json") if master else None,
+        lifecycle_status=JDLifecycleStatusEnum.FINALIZED, s3_json_key=json_key, s3_markdown_key=md_key,
+        prompt_version=spec.prompt_version, model_version=spec.model_version,
+        is_valid=spec.is_valid, needs_review=spec.needs_review,
     )
-    # Deduplicate exact duplicate files by SHA-256 file_hash within the same JD
-    deduped: dict[str, CandidateResume] = {}
-    for r in resumes:
-        key = r.file_hash if r.file_hash else r.id
-        if key not in deduped:
-            deduped[key] = r
+    db.add(revision)
+    db.flush()
+    if spec.enrichment_report_json:
+        try:
+            report = TAEnrichmentReport.model_validate(spec.enrichment_report_json)
+        except ValueError:
+            logger.warning("Could not carry forward enrichment for specification %s", spec.id)
         else:
-            prev = deduped[key]
-            prev_score = (bool(prev.parsed_text), len(prev.evaluations), prev.created_at or datetime.min)
-            curr_score = (bool(r.parsed_text), len(r.evaluations), r.created_at or datetime.min)
-            if curr_score > prev_score:
-                deduped[key] = r
-    resumes = list(deduped.values())
-    items = []
-    for r in resumes:
-        e = _get_best_eval(r)
-        items.append({
-            "candidate_resume_id": r.id,
-            "filename":            r.filename,
-            "status":              e.status.value if e else "QUEUED",
-            "overall_score":       e.recruiter_override_score or e.overall_score if e else None,
-            "effective_tier":      (_effective_tier(e).value if _effective_tier(e) else None),
-            "parse_failed":        (e.status == ScreeningStatusEnum.PARSE_FAILED) if e else False,
-        })
-    return {"job_description_id": jd_id, "candidates": items}
+            report.source_specification_version_id = revision.id
+            report.source_specification_version = version
+            enriched_key = build_key(str(jd.project_id), jd_id, version, "enriched_markdown")
+            storage.put_text(enriched_key, render_markdown(canonical, enrichment_report=report), "text/markdown")
+            revision.enrichment_report_json = report.model_dump(mode="json")
+            revision.s3_enriched_markdown_key = enriched_key
+    db.add(AuditEvent(
+        entity_type="job_specification_version", entity_id=revision.id, action="screening_policy_changed",
+        details={"previous_critical_requirement_ids": sorted(previous), "critical_requirement_ids": sorted(selected)},
+    ))
+    db.commit()
+    return {"spec_version_id": revision.id, "specification_version": revision.specification_version}
 
 
 @router.get("/{resume_id}", response_model=CandidateEvaluationResponse)
-def get_candidate_detail(
-    jd_id: str,
-    resume_id: str,
-    db: Session = Depends(get_db),
-):
-    """
-    Fetch the full deep-dive evaluation report for a specific candidate.
-    Includes evaluator provenance, verbatim evidence quotes with verification status,
-    validation checkpoints, timeline observations, and tailored interview questions.
-    """
+def get_candidate_detail(jd_id: str, resume_id: str, evaluation_id: Optional[str] = None, db: Session = Depends(get_db)):
     resume = _get_resume_or_404(jd_id, resume_id, db)
-    return _build_evaluation_response(resume)
+    evaluation = _get_latest_eval(resume)
+    if evaluation_id:
+        evaluation = next((run for run in resume.evaluations if run.id == evaluation_id), None)
+        if evaluation is None:
+            raise HTTPException(404, "Screening run not found for this candidate.")
+    return _build_evaluation_response(db, resume, evaluation, specifications_for_jd(db, jd_id).first())
 
 
 @router.post("/{resume_id}/override", response_model=RecruiterOverrideResponse)
-def override_candidate_tier(
-    jd_id: str,
-    resume_id: str,
-    body: RecruiterOverrideRequest,
-    db: Session = Depends(get_db),
-):
-    """
-    Recruiter override: manually adjust a candidate's match tier and/or score.
-
-    - Requires a mandatory justification reason (minimum 10 characters).
-    - The original algorithmic evaluation is preserved; override is stored separately.
-    - Builds an audit trail (overridden_by, overridden_at, override_reason).
-    - The effective_tier in leaderboard and responses reflects the override.
-
-    This endpoint enforces the principle: the tool provides advisory recommendations
-    only. No candidate is ever auto-rejected; human judgment is always the final call.
-    """
+def override_candidate_tier(jd_id: str, resume_id: str, body: RecruiterOverrideRequest, db: Session = Depends(get_db)):
     resume = _get_resume_or_404(jd_id, resume_id, db)
-    evaluation = _get_best_eval(resume)
+    lock_specification_revision(db, jd_id)
+    evaluation = _get_latest_eval(resume)
+    spec = specifications_for_jd(db, jd_id).first()
+    if (
+        not evaluation or evaluation.id != body.evaluation_id or not spec
+        or spec.lifecycle_status != JDLifecycleStatusEnum.FINALIZED
+        or _status_and_review_reason(evaluation, resume)[0] != ScreeningStatus.COMPLETED
+        or _is_outdated(evaluation, spec, specification_checksum(spec))
+    ):
+        raise HTTPException(409, "Only the current completed run can be overridden. Refresh or rerun screening.")
 
-    if not evaluation:
-        raise HTTPException(
-            status_code=404,
-            detail="No evaluation found for this candidate. Run screening first.",
-        )
-    if evaluation.status not in (ScreeningStatusEnum.COMPLETED, ScreeningStatusEnum.FAILED):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot override evaluation in status '{evaluation.status.value}'. Wait for COMPLETED.",
-        )
-
-    evaluation.recruiter_override_tier  = body.override_tier
+    overridden_at = datetime.now(timezone.utc)
+    evaluation.recruiter_override_tier = MatchTierEnum(body.override_tier.value)
     evaluation.recruiter_override_score = body.override_score
-    evaluation.override_reason          = body.reason
-    evaluation.overridden_by            = body.overridden_by
-    evaluation.overridden_at            = datetime.now(timezone.utc)
+    evaluation.override_reason = body.reason
+    evaluation.overridden_by = body.overridden_by
+    evaluation.overridden_at = overridden_at
+    db.add(AuditEvent(
+        entity_type="candidate_evaluation", entity_id=evaluation.id, action="recruiter_override", created_at=overridden_at,
+        details={"tier": body.override_tier.value, "score": body.override_score, "reason": body.reason, "reviewer": body.overridden_by},
+    ))
     db.commit()
-
-    logger.info(
-        "Recruiter override for resume %s: tier=%s reason='%s' by='%s'",
-        resume_id, body.override_tier, body.reason[:80], body.overridden_by,
-    )
-
     return RecruiterOverrideResponse(
-        candidate_resume_id=resume_id,
-        job_description_id=jd_id,
-        recruiter_override_tier=body.override_tier,
-        recruiter_override_score=body.override_score,
-        override_reason=body.reason,
-        overridden_by=body.overridden_by,
-        overridden_at=evaluation.overridden_at,
-        message=f"Override applied. Effective tier is now '{body.override_tier.value}'.",
+        evaluation_id=evaluation.id, candidate_resume_id=resume.id, job_description_id=jd_id,
+        recruiter_override_tier=body.override_tier, recruiter_override_score=body.override_score,
+        override_reason=body.reason, overridden_by=body.overridden_by, overridden_at=overridden_at,
+        message="Recruiter override recorded.",
     )
 
 
 @router.post("/{resume_id}/re-screen", response_model=ScreeningTriggerResponse, status_code=202)
-def re_screen_candidate(
-    jd_id: str,
-    resume_id: str,
-    spec_version_id: Optional[str] = None,
-    db: Session = Depends(get_db),
-):
-    """
-    Re-trigger screening for a single candidate (e.g. after the JD spec was updated).
-    Resets the existing evaluation to QUEUED and re-enqueues.
-    """
+def re_screen_candidate(jd_id: str, resume_id: str, spec_version_id: Optional[str] = None, db: Session = Depends(get_db)):
+    lock_specification_revision(db, jd_id)
     resume = _get_resume_or_404(jd_id, resume_id, db)
-
-    pq = resume.parse_quality_check or {}
-    if pq and not pq.get("passed", True):
-        raise HTTPException(
-            status_code=422,
-            detail="Cannot re-screen a resume that failed the parse quality gate. Upload a text-based PDF or DOCX instead.",
-        )
-
-    evaluation = _get_best_eval(resume)
-    if evaluation:
-        evaluation.status           = ScreeningStatusEnum.QUEUED
-        evaluation.spec_version_id  = spec_version_id
-        evaluation.error_message    = None
-        evaluation.spec_outdated    = False
-    else:
-        evaluation = CandidateEvaluation(
-            candidate_resume_id=resume.id,
-            job_description_id=jd_id,
-            spec_version_id=spec_version_id,
-            specification_version=2,
-            status=ScreeningStatusEnum.QUEUED,
-        )
-        db.add(evaluation)
-        db.flush()
-
-    db.commit()
-    screening_queue.enqueue(evaluation.id)
-
-    return ScreeningTriggerResponse(
-        queued_count=1,
-        candidate_resume_ids=[evaluation.id],
-        message=f"Candidate re-screening queued. Poll GET /resumes/{resume_id} for updated results.",
-    )
+    return _queue_evaluations(db, jd_id, [resume], spec_version_id)
 
 
 @router.delete("/{resume_id}", status_code=204)
@@ -764,17 +677,16 @@ def delete_candidate(
     resume_id: str,
     db: Session = Depends(get_db),
 ):
-    """
-    Delete a candidate resume and all their evaluations for this JD.
-    Also removes the stored resume file from disk (GDPR-compatible hard delete).
-    """
-    resume = _get_resume_or_404(jd_id, resume_id, db)
-
-    if resume.file_key:
-        try:
-            Path(resume.file_key).unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning("Could not delete resume file %s: %s", resume.file_key, e)
-
-    db.delete(resume)
-    db.commit()
+    """Delete a candidate and their screening records for this JD."""
+    try:
+        remove_candidate_data(db, jd_id, resume_id)
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(404, str(exc)) from exc
+    except ResumeInUseError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except (OSError, ValueError, SQLAlchemyError) as exc:
+        db.rollback()
+        logger.warning("Could not remove candidate data for resume %s", resume_id)
+        raise HTTPException(503, "Candidate data could not be removed. Check the configured resume storage and retry.") from exc

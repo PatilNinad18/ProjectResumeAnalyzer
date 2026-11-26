@@ -14,6 +14,7 @@ import type { useJDBatch } from "@/hooks/useJDBatch";
 export interface WorkflowPageProps {
   batchState: ReturnType<typeof useJDBatch>;
   handleLaunchBatchAgent: (agentName: string, task: BatchTask, markdown: string) => Promise<void>;
+  onScreenBatch: (jdId: string, batchIds?: string[]) => void;
   isStep1Done: boolean;
   isStep2Done: boolean;
   currentStep: number;
@@ -95,6 +96,7 @@ export interface WorkflowPageProps {
 export default function WorkflowPage({
     batchState,
     handleLaunchBatchAgent,
+    onScreenBatch,
     isStep1Done,
     isStep2Done,
     currentStep,
@@ -175,6 +177,7 @@ export default function WorkflowPage({
   const sharedProps = {
     onNavigateToScreening,
     handleLaunchBatchAgent,
+    onScreenBatch,
     isStep1Done,
     isStep2Done,
     currentStep,

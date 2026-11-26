@@ -37,6 +37,7 @@ from app.services.json_serializer import to_json_dict, to_json_str
 from app.services.markdown_renderer import render_markdown
 from app.services.projection.canonical_projector import project_to_canonical
 from app.services.storage import build_key, get_storage
+from app.services.specification_versions import lock_specification_revision, specifications_for_jd
 from app.services.validation import validate_payload
 
 logger = logging.getLogger("jd_agent.worker")
@@ -208,23 +209,31 @@ def process_job_description_version(
                 enrichment_report = None
                 enriched_md = None
 
+        stage("GENERATING", "Saving independent specification artifacts", 95)
+        lock_specification_revision(db, jd_version.job_description_id)
+        previous = specifications_for_jd(db, jd_version.job_description_id).first()
+        version = previous.specification_version + 1 if previous else 1
+        spec.metadata.specification_version = version
         baseline_markdown = render_markdown(spec)
         json_str = to_json_str(spec)
+        if enrichment_report:
+            enrichment_report.source_specification_version = version
+            enriched_md = render_markdown(spec, enrichment_report=enrichment_report)
 
-        stage("GENERATING", "Saving independent specification artifacts", 95)
         project_id = str(jd_version.job_description.project_id) if jd_version.job_description else "unknown"
-        json_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "json")
-        md_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "markdown")
+        json_key = build_key(project_id, str(jd_version.job_description_id), version, "json")
+        md_key = build_key(project_id, str(jd_version.job_description_id), version, "markdown")
         storage.put_text(json_key, json_str, "application/json")
         storage.put_text(md_key, baseline_markdown, "text/markdown")
 
         if enriched_md:
-            enriched_key = build_key(project_id, str(jd_version.job_description_id), jd_version.version, "enriched_markdown")
+            enriched_key = build_key(project_id, str(jd_version.job_description_id), version, "enriched_markdown")
             storage.put_text(enriched_key, enriched_md, "text/markdown")
 
         spec_version = JobSpecificationVersion(
             job_description_version_id=jd_version_id,
-            specification_version=1,
+            specification_version=version,
+            parent_specification_version_id=previous.id if previous else None,
             s3_json_key=json_key,
             s3_markdown_key=md_key,
             canonical_json=json.loads(json_str),

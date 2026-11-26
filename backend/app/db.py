@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker, Session
 
 from app.config import get_settings
@@ -19,8 +22,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db() -> None:
     """Create tables and apply lightweight SQLite migrations for added columns."""
+    if engine.dialect.name == "sqlite" and engine.url.database not in {None, "", ":memory:"}:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL")).scalar()
+        except OperationalError:
+            logging.getLogger(__name__).warning("SQLite could not switch to WAL. Using its existing journal mode.")
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite()
+    _migrate_screening_runs()
     if engine.dialect.name == "postgresql":
         with engine.begin() as conn:
             conn.execute(text("ALTER TYPE screeningstatusenum ADD VALUE IF NOT EXISTS 'PARSE_FAILED'"))
@@ -32,6 +42,8 @@ def _migrate_sqlite() -> None:
     try:
         from sqlalchemy import inspect, text
         inspector = inspect(engine)
+        default_false = "FALSE" if engine.dialect.name == "postgresql" else "0"
+        timestamp_type = "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME"
         if "job_specification_versions" in inspector.get_table_names():
             columns = {col["name"] for col in inspector.get_columns("job_specification_versions")}
             with engine.begin() as conn:
@@ -49,7 +61,7 @@ def _migrate_sqlite() -> None:
             agent_cols = {col["name"] for col in inspector.get_columns("agents")}
             with engine.begin() as conn:
                 if "is_test" not in agent_cols:
-                    conn.execute(text("ALTER TABLE agents ADD COLUMN is_test BOOLEAN DEFAULT 0"))
+                    conn.execute(text(f"ALTER TABLE agents ADD COLUMN is_test BOOLEAN DEFAULT {default_false}"))
 
         if "candidate_resumes" in inspector.get_table_names():
             resume_cols = {col["name"] for col in inspector.get_columns("candidate_resumes")}
@@ -63,7 +75,7 @@ def _migrate_sqlite() -> None:
             eval_cols = {col["name"] for col in inspector.get_columns("candidate_evaluations")}
             with engine.begin() as conn:
                 if "spec_outdated" not in eval_cols:
-                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN spec_outdated BOOLEAN DEFAULT 0"))
+                    conn.execute(text(f"ALTER TABLE candidate_evaluations ADD COLUMN spec_outdated BOOLEAN DEFAULT {default_false}"))
                 if "evaluator_engine" not in eval_cols:
                     conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN evaluator_engine VARCHAR(64) DEFAULT 'deterministic_v1'"))
                 if "model_name" not in eval_cols:
@@ -89,10 +101,27 @@ def _migrate_sqlite() -> None:
                 if "overridden_by" not in eval_cols:
                     conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN overridden_by VARCHAR(255)"))
                 if "overridden_at" not in eval_cols:
-                    conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN overridden_at DATETIME"))
+                    conn.execute(text(f"ALTER TABLE candidate_evaluations ADD COLUMN overridden_at {timestamp_type}"))
     except Exception as exc:
         # Ignore or log migration failure (e.g. non-SQLite or already exists)
         pass
+
+
+def _migrate_screening_runs() -> None:
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    if not inspector.has_table("candidate_evaluations"):
+        return
+    columns = {col["name"] for col in inspector.get_columns("candidate_evaluations")}
+    with engine.begin() as conn:
+        for name in ("spec_checksum", "active_run_key"):
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE candidate_evaluations ADD COLUMN {name} VARCHAR(64)"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_candidate_evaluations_active_run_key "
+            "ON candidate_evaluations (active_run_key)"
+        ))
 
 
 def get_db() -> Session:
@@ -105,4 +134,5 @@ def get_db() -> Session:
 
 # Ensure SQLite tables have latest schema updates even in bare TestClient runs
 _migrate_sqlite()
+_migrate_screening_runs()
 

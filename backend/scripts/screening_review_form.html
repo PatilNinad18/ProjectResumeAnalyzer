@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Independent screening review</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f2f5f9; color: #191f2b; font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 1300px; padding: 28px; margin: auto; }
+  header, section { background: #fff; border: 1px solid #d5dee9; border-radius: 12px; padding: 18px; }
+  h1, h2 { margin: 0 0 12px; }
+  p { margin: 8px 0; }
+  .actions { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 12px; }
+  label { display: grid; gap: 4px; }
+  button, input, select { font: inherit; border: 1px solid #a7b7ca; border-radius: 6px; padding: 6px 9px; color: #191f2b; background: #fff; }
+  button { cursor: pointer; }
+  button.primary { background: #204286; color: #fff; border-color: #204286; }
+  button:disabled { cursor: default; opacity: .5; }
+  .columns { margin-top: 16px; display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; align-items: start; }
+  .criteria { display: grid; gap: 12px; margin: 16px 0; }
+  .criteria label { padding-bottom: 9px; border-bottom: 1px solid #e2e8f0; }
+  .note { color: #40516a; }
+  [hidden] { display: none !important; }
+  pre { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+  @media (max-width: 800px) { main { padding: 12px; } .columns { grid-template-columns: 1fr; } }
+</style>
+<main>
+  <header>
+    <h1>Independent screening review</h1>
+    <p id="datasetNotice" class="note"></p>
+    <p>Label each requirement from the resume evidence. Record whether you would advance the candidate to human review. Work independently and export your labels when finished.</p>
+    <div class="actions">
+      <label>Reviewer identifier<input id="reviewer" maxlength="100" autocomplete="off"></label>
+      <label>Resume a saved draft<input id="import" type="file" accept=".json,application/json"></label>
+      <button id="draft" type="button">Save draft</button>
+      <button id="complete" class="primary" type="button">Export completed review</button>
+    </div>
+    <p id="status" role="status"></p>
+    <div class="actions">
+      <button id="prev" type="button">Previous case</button>
+      <label>Go to case<select id="casePicker"></select></label>
+      <button id="next" type="button">Next case</button>
+    </div>
+  </header>
+  <div class="columns">
+    <section aria-labelledby="resumeTitle">
+      <h2 id="resumeTitle">Resume evidence</h2>
+      <p id="resumeFormat" class="note"></p>
+      <pre id="resume"></pre>
+    </section>
+    <section aria-labelledby="jobTitle">
+      <h2 id="jobTitle"></h2>
+      <p id="tenure" class="note"></p>
+      <label>Would you advance this candidate to human review?
+        <select id="advance">
+          <option value="">Select an answer</option>
+          <option value="yes">Yes</option>
+          <option value="no">No</option>
+          <option value="unreviewable">Source is unreviewable</option>
+        </select>
+      </label>
+      <div id="criteria" class="criteria"></div>
+      <p class="note">MET means the source shows the requested capability. PARTIAL means a mention or some supporting evidence. NOT EVIDENCED means the source provides no support for that requirement.</p>
+    </section>
+  </div>
+</main>
+<script type="application/json" id="packet">{{REVIEW_PACKET}}</script>
+<script>
+  "use strict";
+  const packet = JSON.parse(document.getElementById("packet").textContent);
+  const get = (id) => document.getElementById(id);
+  const grades = [["", "Select an evidence grade"], ["MET", "Met"], ["PARTIALLY_MET", "Partial"], ["NOT_EVIDENCED", "Not evidenced"]];
+  const labels = new Map();
+  let active = 0;
+  get("datasetNotice").textContent = packet.kind === "synthetic" ?
+    "Synthetic practice packet. Use approved de-identified resumes for recruiter validation." :
+    "De-identified reviewer packet. Keep the export in the approved validation workspace.";
+
+  function currentCase() { return packet.cases[active]; }
+  function completed(item) {
+    const label = labels.get(item.id);
+    if (!label) return false;
+    return label.advance === null || (typeof label.advance === "boolean" &&
+      packet.jobs[item.spec_id].criteria.every((criterion) => grades.slice(1).some(([key]) => label.grades[criterion.id] === key)));
+  }
+  function showProgress(message) {
+    const done = packet.cases.filter(completed).length;
+    get("status").textContent = done + " of " + packet.cases.length + " complete" + (message ? " · " + message : "");
+    get("complete").disabled = done !== packet.cases.length || !get("reviewer").value.trim();
+    get("draft").disabled = !get("reviewer").value.trim();
+    packet.cases.forEach((item, index) => {
+      get("casePicker").options[index].textContent = item.id + (completed(item) ? " ✓" : "");
+    });
+  }
+  function saveAnswer() {
+    const value = get("advance").value;
+    const answer = { grades: {} };
+    if (value === "yes" || value === "no") answer.advance = value === "yes";
+    if (value === "unreviewable") answer.advance = null;
+    get("criteria").hidden = value === "unreviewable";
+    if (value !== "unreviewable") {
+      for (const select of get("criteria").querySelectorAll("select")) {
+        if (select.value) answer.grades[select.name] = select.value;
+      }
+    }
+    labels.set(currentCase().id, answer);
+    showProgress();
+  }
+  function render() {
+    const item = currentCase();
+    const job = packet.jobs[item.spec_id];
+    const previous = labels.get(item.id);
+    get("resumeFormat").textContent = item.id + " · " + item.format.toUpperCase();
+    get("resume").textContent = item.resume || "No reviewable transcript was supplied. Select Source is unreviewable unless you have the approved source for this case.";
+    get("jobTitle").textContent = job.title;
+    get("tenure").textContent = job.minimum_years > 0 ? "Overall experience minimum · " + job.minimum_years + " years" : "";
+    get("advance").value = previous?.advance === null ? "unreviewable" :
+      previous?.advance === true ? "yes" : previous?.advance === false ? "no" : "";
+    get("criteria").replaceChildren();
+    for (const criterion of job.criteria) {
+      const label = document.createElement("label");
+      label.append((criterion.critical ? "Critical must-have · " : criterion.category === "must_have" ? "Must-have · " : "Preferred · ") + criterion.text);
+      const select = document.createElement("select");
+      select.name = criterion.id;
+      for (const [key, name] of grades) select.add(new Option(name, key));
+      select.value = previous?.grades?.[criterion.id] || "";
+      select.addEventListener("change", saveAnswer);
+      label.append(select);
+      get("criteria").append(label);
+    }
+    get("criteria").hidden = get("advance").value === "unreviewable";
+    get("casePicker").value = String(active);
+    get("prev").disabled = active === 0;
+    get("next").disabled = active === packet.cases.length - 1;
+    showProgress();
+  }
+  function exportReview(draft) {
+    const reviewer = get("reviewer").value.trim();
+    if (!reviewer) return;
+    const data = JSON.stringify({ dataset_id: packet.dataset_id, reviewer, labels: Object.fromEntries(labels) }, null, 2);
+    const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = (draft ? "draft-" : "review-") + (reviewer.replace(/[^a-z0-9_-]+/gi, "-") || "labels") + ".json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showProgress(draft ? "Draft saved" : "Review exported");
+  }
+  packet.cases.forEach((item, index) => get("casePicker").add(new Option(item.id, String(index))));
+  get("prev").onclick = () => { active--; render(); };
+  get("next").onclick = () => { active++; render(); };
+  get("casePicker").onchange = (event) => { active = Number(event.target.value); render(); };
+  get("advance").onchange = saveAnswer;
+  get("reviewer").oninput = () => showProgress();
+  get("draft").onclick = () => exportReview(true);
+  get("complete").onclick = () => exportReview(false);
+  get("import").onchange = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (data.dataset_id !== packet.dataset_id || typeof data.reviewer !== "string" || !data.labels || typeof data.labels !== "object") {
+        throw new Error("This draft belongs to a different packet.");
+      }
+      get("reviewer").value = data.reviewer;
+      labels.clear();
+      for (const item of packet.cases) {
+        const saved = data.labels[item.id];
+        if (saved && typeof saved === "object" && saved.grades && typeof saved.grades === "object") labels.set(item.id, saved);
+      }
+      const unfinished = packet.cases.findIndex((item) => !completed(item));
+      active = unfinished === -1 ? 0 : unfinished;
+      render();
+      showProgress("Draft loaded");
+    } catch (error) {
+      showProgress(error instanceof Error ? error.message : "Could not load the draft.");
+    }
+    event.target.value = "";
+  };
+  render();
+</script>
+</html>

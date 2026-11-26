@@ -11,6 +11,7 @@ from app.services.resume.profiler import _SECTION_HEADERS, _SKILL_KEYWORDS, _tot
 
 _ALIASES = {
     "aws": ("aws", "amazon web services"),
+    "gcp": ("gcp", "google cloud", "google cloud platform"),
     "postgresql": ("postgresql", "postgres"),
     "kubernetes": ("kubernetes", "k8s"),
     "next.js": ("next.js", "nextjs", "next js"),
@@ -20,6 +21,7 @@ _ALIASES = {
     "r": ("R",),
     "c": ("C",),
     "microservices": ("microservices", "microservice"),
+    "spark": ("apache spark", "spark"),
     "computer science": ("computer science",),
     "information technology": ("information technology",),
     "data science": ("data science",),
@@ -28,7 +30,7 @@ _ALIASES = {
 _ALIAS_LOOKUP = {alias.lower(): key for key, aliases in _ALIASES.items() for alias in aliases}
 _OTHER_TOOLS = (
     "supabase", "sentry", "vercel", "tailwind", "shadcn", "claude code",
-    "sql", "apis?", "distributed systems?", r"\.net",
+    "sql", "apis?", "distributed systems?", "hadoop", "rabbitmq", "container orchestration", r"\.net",
 )
 _TECHNOLOGIES = re.compile(
     r"(?<![\w+#])(?:"
@@ -49,21 +51,26 @@ _STOP = frozenset("""
     practical proven equivalent qualifications qualification plus someone who will work working
 """.split())
 _APPLIED = re.compile(
-    r"\b(?:architected|automated|built|configured|created|deployed|designed|developed|"
+    r"\b(?:architected|automated|built|configured|created|deployed|designed|developed|engineered|"
     r"delivered|implemented|improved|integrated|led|maintained|managed|migrated|"
     r"monitored|operated|optimized|owned|performed|processed|reconciled|reduced|"
-    r"refactored|shipped|tested|trained|used|worked|wrote)\b",
+    r"indexed|orchestrated|packaged|partitioned|programmed|refactored|shipped|tested|trained|used|worked|wrote)\b",
     re.IGNORECASE,
 )
 _CAPABILITY_ACTIONS = {
     "deployment": r"deploy(?:ment|ed|ing|s)?|roll(?:ed|ing)? out|release[ds]?",
     "design": r"design(?:ed|ing|s)?|architect(?:ed|ing|ure)?",
-    "development": r"develop(?:ment|ed|ing|s)?|built|wrote|implemented|architected",
+    "development": r"develop(?:ment|ed|ing|s)?|built|wrote|implemented|architected|engineered|programmed",
     "operations": r"operat(?:ions?|ed|ing|e)|managed|maintained|monitored",
     "automation": r"automat(?:ion|ed|ing|e)",
     "testing": r"test(?:s|ing|ed)?",
 }
 _ACTION_PATTERNS = {name: re.compile(rf"\b(?:{words})\b", re.I) for name, words in _CAPABILITY_ACTIONS.items()}
+_RELATIONAL_SQL = re.compile(
+    r"(?=.*\b(?:postgres(?:ql)?|mysql|mariadb|sqlite|sql server)\b)"
+    r"(?=.*\b(?:queries|query|indexes?|indexing|schemas?|transactions?)\b)",
+    re.I,
+)
 _NEGATED = re.compile(
     r"\b(?:no (?:prior )?(?:experience|knowledge)|never (?:used|worked)|"
     r"(?:did|have|has) not (?:used?|work|worked|complete)|not (?:used|familiar with)|unfamiliar with)\b",
@@ -122,12 +129,17 @@ def _criterion_groups(requirement: str) -> list[set[str]]:
         return [{term} for term in _generic_terms(requirement)]
     groups: list[set[str]] = []
     previous_end = 0
+    list_start = 0
     for match in matches:
         term = _canonical_term(match.group())
         separator = requirement[previous_end:match.start()]
-        if groups and re.fullmatch(r"\s*(?:/|,?\s*or)\s*", separator, re.I):
+        if groups and re.fullmatch(r"\s*,?\s*or\s*", separator, re.I):
+            groups[list_start:] = [set().union(*groups[list_start:], {term})]
+        elif groups and re.fullmatch(r"\s*/\s*", separator):
             groups[-1].add(term)
         elif not any(term in group for group in groups):
+            if not re.fullmatch(r"\s*,\s*", separator):
+                list_start = len(groups)
             groups.append({term})
         previous_end = match.end()
     return groups
@@ -189,7 +201,11 @@ class ResumeEvidence:
     @staticmethod
     def _hits(groups: list[set[str]], passage: str) -> set[int]:
         normalized = " ".join(passage.split())
-        return {i for i, group in enumerate(groups) if any(_term_pattern(term).search(normalized) for term in group)}
+        return {
+            i for i, group in enumerate(groups)
+            if any(_term_pattern(term).search(normalized) for term in group)
+            or ("sql" in group and _RELATIONAL_SQL.match(normalized))
+        }
 
     def _relevant_passages(
         self, groups: list[set[str]], passages: list[tuple[str, str]], capabilities: list[re.Pattern],
@@ -246,9 +262,15 @@ class ResumeEvidence:
         return "NOT_EVIDENCED", [], "The requested degree level is absent from the extracted resume text."
 
     def assess(self, requirement: str, guidance: list[str]) -> tuple[str, list[str], str]:
-        for degree in _DEGREES.values():
-            if match := degree.search(requirement):
-                return self._degree(requirement, degree, match)
+        degrees = [(degree, match) for degree in _DEGREES.values() if (match := degree.search(requirement))]
+        if degrees:
+            grades = [self._degree(requirement, degree, match) for degree, match in degrees]
+            if len(grades) == 1 or re.search(r"\bor\b", requirement[:max(match.end() for _, match in degrees)], re.I):
+                return max(grades, key=lambda grade: ("NOT_EVIDENCED", "PARTIALLY_MET", "MET").index(grade[0]))
+            quotes = self.checked_quotes([quote for _, evidence, _ in grades for quote in evidence])
+            if all(status == "MET" for status, _, _ in grades):
+                return "MET", quotes, "The resume lists the requested degrees."
+            return ("PARTIALLY_MET" if quotes else "NOT_EVIDENCED"), quotes, "Confirm evidence for all requested degrees."
 
         credential = bool(_CERTIFICATION.search(requirement))
         subject = _CERTIFICATION.sub("", requirement) if credential else requirement

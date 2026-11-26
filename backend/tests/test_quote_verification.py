@@ -12,7 +12,6 @@ Validates:
 import pytest
 from app.services.resume.evaluator import (
     verify_quote_in_text,
-    _classify_requirement,
     evaluate_candidate,
 )
 
@@ -99,11 +98,8 @@ def test_downgrade_unverified_quote_in_evaluation():
     fake_quote = "Managed Apache Spark and Hadoop clusters for big data analytics"
     assert verify_quote_in_text(fake_quote, SAMPLE_RESUME_TEXT) is False
 
-    # 2. _classify_requirement returns NOT_EVIDENCED with 0.0 weight
-    status, weight, evidence, quote_verified, keywords, reasoning = _classify_requirement(
-        req, SAMPLE_RESUME_TEXT, SAMPLE_RESUME_TEXT, candidate_exp=8.0
-    )
-
-    assert status == "NOT_EVIDENCED"
-    assert weight == 0.0
-    assert quote_verified is not True
+    # 2. The production evaluator awards no credit without supporting evidence.
+    grade, = evaluate_candidate(SAMPLE_RESUME_TEXT, {}, {"must_haves": [req]})["detailed_evaluations"]
+    assert grade["status"] == "NOT_EVIDENCED"
+    assert grade["score_weight"] == 0.0
+    assert grade["quote_verified"] is not True

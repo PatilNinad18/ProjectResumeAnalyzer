@@ -298,6 +298,7 @@ class StructuredRequirement(_Base):
     )
     min_years: Optional[float] = None
     max_years: Optional[float] = None
+    is_critical: bool = False
     negated: bool = False
     assessment_guidance: Dict[str, str] = Field(
         default_factory=dict,
