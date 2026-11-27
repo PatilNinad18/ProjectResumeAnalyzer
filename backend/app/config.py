@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # provider; only set LLM_MODEL if you want to override that.
     llm_model: Optional[str] = os.environ.get("LLM_MODEL") or None
     ollama_base_url: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_resume_model: Optional[str] = os.environ.get("OLLAMA_RESUME_MODEL") or None
     ollama_use_schema: bool = os.environ.get("OLLAMA_USE_SCHEMA", "false").lower() in ("true", "1", "yes")
     ollama_num_ctx: int = int(os.environ.get("OLLAMA_NUM_CTX", "4096"))
     ollama_read_timeout: int = int(os.environ.get("OLLAMA_READ_TIMEOUT", "300"))

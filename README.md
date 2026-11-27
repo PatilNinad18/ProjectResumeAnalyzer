@@ -735,22 +735,21 @@ Candidate Resumes (PDF / DOCX / TXT)
 
 ### Key Screening Capabilities
 
-1. **Deterministic Profiling & Verified Tenure:**
-   - Evaluates candidate text to extract names, emails, phone numbers, and professional links (LinkedIn, GitHub).
-   - Distinguishes actual employment history from academic degrees and extracurricular projects.
-   - **Fresher Protection:** Degree dates (e.g. "B.Tech 2021–2025") are strictly filtered out so freshers evaluate accurately to `0.0y` rather than falsely inflating tenure. Internships are captured and measured accurately.
+1. **Ollama resume profiles**
+   - The worker extracts resume text and uses the local Ollama model to create a structured profile with resume excerpts. The candidate detail drawer offers JSON and Markdown downloads.
+   - Start Ollama with `qwen3:4b` installed, or set `OLLAMA_RESUME_MODEL` to another installed model. An unreadable file or incomplete model response stays unranked for review.
+   - Overall experience uses dated employment and internships and counts overlapping periods once.
 
 2. **Resume evidence**
-   - Positive grades cite one or more excerpts verified against the extracted resume text.
-   - A requirement with insufficient evidence is marked `NOT_EVIDENCED` for follow-up.
+   - Ollama compares the profile with the finalized JD and returns one judgment per criterion. Positive grades cite excerpts verified against the extracted resume text.
+   - A batch run that shares resume files across JDs can reuse the resume profile. Each JD gets its own grades and leaderboard.
 
-3. **Standardized Evaluation Statuses:**
-   - `MET` (1.0 weight): Strong, direct evidence found in candidate's experience or projects.
-   - `PARTIALLY_MET` (0.5 weight): Indirect or related evidence (e.g. academic coursework, hobby project).
-   - `NOT_EVIDENCED` (0.0 weight): No evidence present in the submitted document.
+3. **Evidence grades**
+   - Full evidence earns 100% of the requirement's points, partial evidence earns 50%, a mention earns 25%, and missing evidence earns zero.
 
 4. **Dynamic weighted scoring**
    - The baseline weights are 70 for must-haves, 20 for preferred criteria, and 10 for an explicit overall experience minimum. The evaluator normalizes the active weights. Overall experience earns proportional credit up to the stated minimum.
+   - The candidate drawer shows the points earned and available for each requirement. Earlier runs remain in history and can be rerun with the current evaluator.
    - A specification with no usable criteria routes candidates to review without a rank.
 
 5. **Advisory match tiers**
@@ -795,7 +794,7 @@ Replace the bracketed paths with your files. The manifest paths are relative to 
 
 The transcript and validation group are optional. The tool keeps scores and validation groups in `predictions.private.json`. Give reviewers `reviewer.html` and keep the predictions with the validation owner. The report shows exact agreement and Cohen's kappa for criterion grades, parsing outcomes by format, and cases both reviewers would advance that fell below the automated shortlist. The shortlist uses the current potential-match score threshold and, if supplied, a per-JD top-k limit that includes ties. Group results require at least five cases, and the tool uses only the groups supplied in the manifest.
 
-Use `prepare --synthetic` in place of `prepare --manifest <manifest.json>` to practice the workflow with the checked-in synthetic cases. The [performance baseline](PERFORMANCE_BASELINE.md#9-screening-batch-benchmark) records the separate 200-file batch test.
+Use `prepare --synthetic` in place of `prepare --manifest <manifest.json>` to practice with the offline baseline. Add `--evaluator ollama` to test the synthetic cases with the installed model. The [performance baseline](PERFORMANCE_BASELINE.md#9-screening-batch-benchmark) records the earlier 200-file test of the deterministic evaluator.
 
 ### Candidate data handling
 

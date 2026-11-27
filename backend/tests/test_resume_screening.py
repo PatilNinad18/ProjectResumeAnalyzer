@@ -365,7 +365,7 @@ def _wait_for_screening(client: TestClient, base: str, count: int) -> list[dict]
     pytest.fail("Screening did not reach a terminal state.")
 
 
-def test_resume_screening_api_lifecycle(test_setup):
+def test_resume_screening_api_lifecycle(test_setup, fake_resume_model):
     client = TestClient(app)
     jd_id = test_setup["jd_id"]
 
@@ -396,17 +396,26 @@ def test_resume_screening_api_lifecycle(test_setup):
     detail = res_detail.json()
     assert detail["candidate_profile"]["candidate_name"] == "Sarah Connor"
     assert len(detail["detailed_evaluations"]) > 0
+    assert detail["has_resume_profile"]
+    assert detail["provenance"]["evaluator_engine"] == "ollama-resume-evidence-v1"
+    profile_path = f"/api/jds/{jd_id}/resumes/{resume_id}/profile"
+    exported = client.get(f"{profile_path}/json")
+    assert exported.status_code == 200 and exported.json()["facts"]
+    assert exported.headers["content-disposition"].endswith('.json"')
+    assert "## Work history" in client.get(f"{profile_path}/md").text
+    assert fake_resume_model == {"profiles": 1, "comparisons": 1}
 
     # 5. Delete Candidate
     res_del = client.delete(f"/api/jds/{jd_id}/resumes/{resume_id}")
     assert res_del.status_code == 204
+    assert client.get(f"{profile_path}/json").status_code == 404
 
     # Verify deleted
     res_lb_after = client.get(f"/api/jds/{jd_id}/resumes")
     assert res_lb_after.json()["total_candidates"] == 0
 
 
-def test_screening_review_rows_are_unranked_and_coverage_matches_detail(test_setup):
+def test_screening_review_rows_are_unranked_and_coverage_matches_detail(test_setup, fake_resume_model):
     from pypdf import PdfWriter
 
     client = TestClient(app)
@@ -460,7 +469,32 @@ def test_screening_review_rows_are_unranked_and_coverage_matches_detail(test_set
     assert all(row["rank"] is None for row in client.get(base).json()["candidates"])
 
 
-def test_screening_runs_preserve_audited_overrides_and_pin_specification_revisions(test_setup, monkeypatch):
+def test_ollama_failure_leaves_profile_downloadable_and_candidate_unranked(test_setup, fake_resume_model, monkeypatch):
+    from app.services.llm_service import OllamaAdapter
+
+    extraction = OllamaAdapter.complete_private_json
+
+    def complete(adapter, **kwargs):
+        if kwargs["schema"]["title"] == "GradeOutput":
+            raise RuntimeError("A model error with private document contents.")
+        return extraction(adapter, **kwargs)
+
+    monkeypatch.setattr(OllamaAdapter, "complete_private_json", complete)
+    client = TestClient(app)
+    base = f"/api/jds/{test_setup['jd_id']}/resumes"
+    upload = client.post(base, files=[("files", ("resume.txt", SAMPLE_RESUME_TEXT, "text/plain"))]).json()
+    resume_id = upload["uploaded"][0]["candidate_resume_id"]
+    assert client.post(f"{base}/screen").status_code == 202
+    item, = _wait_for_screening(client, base, 1)
+    assert item["status"] == "NEEDS_REVIEW"
+    assert item["rank"] is item["overall_score"] is None
+    assert "Ollama could not" in item["review_reason"]
+    assert "private document contents" not in item["review_reason"]
+    assert client.get(f"{base}/{resume_id}").json()["provenance"]["model_name"]
+    assert client.get(f"{base}/{resume_id}/profile/json").status_code == 200
+
+
+def test_screening_runs_preserve_audited_overrides_and_pin_specification_revisions(test_setup, monkeypatch, fake_resume_model):
     from app.models.db_models import AuditEvent
     from app.services.enrichment.ta_enrichment_service import get_enrichment_service
     from app.services.storage import get_storage
@@ -483,7 +517,7 @@ def test_screening_runs_preserve_audited_overrides_and_pin_specification_revisio
         }
         db.commit()
 
-    resume = "Projects\nDeveloped a reporting pipeline in Python.\n\nSkills\nKubernetes, PostgreSQL, Git, Docker, Linux\n"
+    resume = "Projects\nDeveloped a reporting pipeline in Python.\nCompleted an introductory Kubernetes lab.\n\nSkills\nPostgreSQL, Git, Docker, Linux\n"
     uploaded = client.post(base, files=[("files", ("versioned.txt", resume, "text/plain"))]).json()
     resume_id = uploaded["uploaded"][0]["candidate_resume_id"]
     detail_path = f"{base}/{resume_id}"
@@ -499,7 +533,7 @@ def test_screening_runs_preserve_audited_overrides_and_pin_specification_revisio
     assert detail["spec_version_id"] == spec_id
     assert detail["specification_version"] == 2
     assert len(detail["spec_checksum"]) == 64
-    assert detail["provenance"]["evaluator_engine"] == "resume-evidence-v3"
+    assert detail["provenance"]["evaluator_engine"] == "ollama-resume-evidence-v1"
     assert detail["overall_score"] == 75 and detail["match_tier"] == "STRONG_MATCH"
     assert detail["can_override"]
 
@@ -550,6 +584,7 @@ def test_screening_runs_preserve_audited_overrides_and_pin_specification_revisio
     assert latest["score_breakdown"]["critical_to_verify"] == ["Kubernetes"]
     assert latest["recruiter_override_tier"] is None
     assert len(latest["runs"]) == 3
+    assert fake_resume_model["profiles"] == 1
     historical = client.get(detail_path, params={"evaluation_id": first_id}).json()
     assert historical["spec_outdated"] and not historical["can_override"]
     assert historical["recruiter_override_score"] == 0

@@ -17,7 +17,11 @@ from app.services.resume.evaluator import (
     EVALUATOR_ENGINE, POTENTIAL_MATCH_THRESHOLD, _extract_requirements_from_spec,
     anonymize_resume, evaluate_candidate, screening_criteria,
 )
+from app.services.resume.ollama_screening import (
+    EVALUATOR_ENGINE as OLLAMA_ENGINE, ScreeningModelError, configured_model, evaluate_with_ollama, structure_resume,
+)
 from app.services.resume.profiler import profile_resume, resume_parse_issue
+from app.services.storage import checksum
 
 GRADES = {"MET", "PARTIALLY_MET", "NOT_EVIDENCED"}
 MAX_INPUT_BYTES = 10 * 1024 * 1024
@@ -80,8 +84,10 @@ def synthetic_cases():
         }
 
 
-def prepare(cases, output: Path, dataset_kind: str) -> dict:
+def prepare(cases, output: Path, dataset_kind: str, *, use_ollama: bool = False) -> dict:
     packets, predictions, jobs, case_ids = [], [], {}, set()
+    model = configured_model() if use_ollama else None
+    structured_profiles = {}
     for row in cases:
         case_id = row["id"]
         if not isinstance(case_id, str) or not case_id.strip() or case_id in case_ids:
@@ -116,8 +122,19 @@ def prepare(cases, output: Path, dataset_kind: str) -> dict:
         elif resume_parse_issue(row["text"]):
             status = "NEEDS_REVIEW"
         else:
-            result = evaluate_candidate(row["text"], profile_resume(row["text"]), spec)
-            status = "COMPLETED" if result["overall_score"] is not None else "NO_CRITERIA"
+            text = row["text"]
+            identity = profile_resume(text)
+            try:
+                if model:
+                    source_hash = checksum(text)
+                    if source_hash not in structured_profiles:
+                        structured_profiles[source_hash] = structure_resume(text, identity, model, source_hash)
+                    result = evaluate_with_ollama(text, identity, structured_profiles[source_hash], spec, model)
+                else:
+                    result = evaluate_candidate(text, identity, spec)
+                status = "COMPLETED" if result["overall_score"] is not None else "NO_CRITERIA"
+            except ScreeningModelError:
+                status = "NEEDS_REVIEW"
         criteria = {(item["category"], item["text"]): item["id"] for item in job["criteria"]}
         predictions.append({
             "id": case_id, "spec_id": spec_id, "format": row["format"], "group": row.get("group"),
@@ -138,7 +155,8 @@ def prepare(cases, output: Path, dataset_kind: str) -> dict:
     template = Path(__file__).with_name("screening_review_form.html").read_text(encoding="utf-8")
     encoded = json.dumps(dataset, ensure_ascii=True).replace("<", r"\u003c")
     (output / "reviewer.html").write_text(template.replace("{{REVIEW_PACKET}}", encoded), encoding="utf-8")
-    baseline = {"dataset_id": dataset_id, "kind": dataset_kind, "evaluator": EVALUATOR_ENGINE,
+    baseline = {"dataset_id": dataset_id, "kind": dataset_kind, "evaluator": OLLAMA_ENGINE if model else EVALUATOR_ENGINE,
+                "model": model,
                 "jobs": jobs, "cases": predictions}
     write_json(output / "predictions.private.json", baseline)
     return baseline
@@ -283,6 +301,8 @@ def main() -> None:
     source.add_argument("--manifest", type=Path)
     source.add_argument("--synthetic", action="store_true")
     prep.add_argument("--output-dir", type=Path, required=True)
+    prep.add_argument("--evaluator", choices=("ollama", "baseline"),
+                      help="Defaults to Ollama for a manifest and the offline baseline for synthetic practice.")
     compare = commands.add_parser("report")
     compare.add_argument("predictions", type=Path)
     compare.add_argument("first_review", type=Path)
@@ -295,6 +315,7 @@ def main() -> None:
             baseline = prepare(
                 synthetic_cases() if args.synthetic else manifest_cases(args.manifest),
                 args.output_dir, "synthetic" if args.synthetic else "recruiter_validation",
+                use_ollama=(args.evaluator == "ollama" if args.evaluator else not args.synthetic),
             )
             print(f"Prepared an independent review packet for {len(baseline['cases'])} cases.")
         else:

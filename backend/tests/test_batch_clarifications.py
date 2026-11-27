@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 from zipfile import ZipFile
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_batch_jds_keep_questions_isolated_and_screen_after_finalization():
+def test_batch_jds_keep_questions_isolated_and_screen_after_finalization(fake_resume_model):
     from app.schemas.master_context import JDMasterContext
     from tests.stubs import make_unresolved
 
@@ -200,6 +201,7 @@ def test_batch_jds_keep_questions_isolated_and_screen_after_finalization():
         files = [("files", ("alex.txt", resume, "text/plain"))]
         candidate_ids = set()
         run_ids = set()
+        profile_batch_id = str(uuid.uuid4())
         for role_id in screening_ids:
             base = f"/api/jds/{role_id}/resumes"
             spec_id = saved_jobs[role_id]["spec_version_id"]
@@ -212,7 +214,7 @@ def test_batch_jds_keep_questions_isolated_and_screen_after_finalization():
             candidate_ids.add(candidate_id)
             queued = client.post(
                 f"{base}/screen",
-                json={"spec_version_id": spec_id, "candidate_resume_ids": [candidate_id]},
+                json={"spec_version_id": spec_id, "candidate_resume_ids": [candidate_id], "profile_batch_id": profile_batch_id},
             )
             assert queued.status_code == 202, queued.text
             assert queued.json()["queued_count"] == 1
@@ -224,6 +226,15 @@ def test_batch_jds_keep_questions_isolated_and_screen_after_finalization():
             assert leaderboard["total_candidates"] == 1
             assert leaderboard["candidates"][0]["candidate_resume_id"] == candidate_id
             assert leaderboard["candidates"][0]["evaluation_id"] == run_id
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            statuses = [client.get(f"/api/jds/{role_id}/resumes").json()["candidates"][0]["status"] for role_id in screening_ids]
+            if all(status == "COMPLETED" for status in statuses):
+                break
+            time.sleep(0.05)
+        assert statuses == ["COMPLETED"] * 3
+        assert fake_resume_model == {"profiles": 1, "comparisons": 3}
 
         unfinalized_base = f"/api/jds/{jd_ids_by_index[3]}/resumes"
         assert client.post(unfinalized_base, files=files).status_code == 202

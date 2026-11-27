@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, UUID4
 from typing import Annotated
 
 
@@ -102,8 +102,11 @@ class RequirementEvaluation(BaseModel):
     score_weight: float = Field(
         ge=0.0,
         le=1.0,
-        description="1.0=MET, 0.5=PARTIALLY_MET, 0.0=NOT_EVIDENCED",
+        description="1.0=full, 0.5=partial, 0.25=mention, 0.0=no evidence",
     )
+    evidence_grade: Optional[Literal["FULL", "PARTIAL", "MENTION", "NO_EVIDENCE"]] = None
+    points_earned: Optional[float] = None
+    points_available: Optional[float] = None
     evidence_quote:    Optional[str] = Field(
         None,
         description="Verbatim excerpt from resume text, verified present in parsed_text.",
@@ -139,6 +142,8 @@ class ScoreBreakdown(BaseModel):
     preferred_base_weight: float
     tenure_base_weight:   float
     tenure_evidence:      List[str] = Field(default_factory=list)
+    experience_points:    Optional[float] = None
+    experience_years_required: Optional[float] = None
     critical_to_verify:   List[str] = Field(default_factory=list)
     warning:               Optional[str] = None   # e.g. "NO_EVALUATION_CRITERIA_DEFINED"
 
@@ -256,6 +261,7 @@ class CandidateEvaluationResponse(BaseModel):
     runs:                  List[ScreeningRun] = Field(default_factory=list)
     override_history:      List[ScreeningOverrideEvent] = Field(default_factory=list)
     can_override:          bool = False
+    has_resume_profile:    bool = False
 
     status:        ScreeningStatus
     review_reason: Optional[str] = None
@@ -347,6 +353,9 @@ class ScreeningTriggerRequest(BaseModel):
     candidate_resume_ids: Optional[List[str]] = Field(
         None,
         description="Subset of resume IDs to screen. If omitted, screens all uploaded candidates.",
+    )
+    profile_batch_id: Optional[UUID4] = Field(
+        None, description="Reuse profiles for identical resume files submitted together across selected jobs.",
     )
 
 

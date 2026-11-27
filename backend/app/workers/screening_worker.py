@@ -32,9 +32,13 @@ from app.models.screening_models import (
 )
 from app.services.document_parser import DocumentParseError, parse_document
 from app.services.resume.profiler import profile_resume, resume_parse_issue
-from app.services.resume.evaluator import EVALUATOR_ENGINE, PROMPT_VERSION, evaluate_candidate
+from app.services.resume.ollama_screening import (
+    EVALUATOR_ENGINE, PROFILE_VERSION, PROMPT_VERSION, ScreeningModelError,
+    evaluate_with_ollama, resume_markdown, structure_resume, work_date_evidence,
+)
 from app.services.resume.storage import resume_file_path
 from app.services.specification_versions import specification_checksum
+from app.services.storage import checksum
 
 logger = logging.getLogger("jd_agent.screening_worker")
 NO_CRITERIA_REVIEW = "The job specification has no usable screening criteria. Review the finalized JD and rerun screening."
@@ -52,17 +56,30 @@ def _finish_without_score(db: Session, evaluation: CandidateEvaluation, status: 
     db.commit()
 
 
+def _cached_profile(
+    db: Session, resume: CandidateResume, run: CandidateEvaluation, source_hash: str,
+) -> dict | None:
+    def matches(profile: dict | None) -> bool:
+        return bool(profile and profile.get("source_hash") == source_hash
+                    and profile.get("model") == run.model_name and profile.get("profile_version") == PROFILE_VERSION)
+
+    if matches(resume.screening_profile_json):
+        return resume.screening_profile_json
+    if not run.profile_batch_id or not resume.file_hash:
+        return None
+
+    siblings = db.query(CandidateResume.screening_profile_json).join(CandidateEvaluation).filter(
+        CandidateEvaluation.profile_batch_id == run.profile_batch_id,
+        CandidateEvaluation.model_name == run.model_name,
+        CandidateResume.id != resume.id,
+        CandidateResume.file_hash == resume.file_hash,
+        CandidateResume.screening_profile_json.is_not(None),
+    ).all()
+    return next((profile for (profile,) in siblings if matches(profile)), None)
+
+
 def process_candidate_evaluation(db: Session, evaluation_id: str) -> None:
-    """
-    Full pipeline for a single candidate evaluation:
-      1. Load CandidateResume and CandidateEvaluation from DB.
-      2. Parse resume file (if not already parsed) using document_parser.
-      3. Run parse quality gate — set PARSE_FAILED if text is unreadable.
-      4. Run profiler to extract structured candidate profile.
-      5. Load Spec v2 canonical_json.
-      6. Run grounded evaluator (quote verification, injection scan, scoring).
-      7. Persist results (provenance, timeline_observations, quote_verification_pass).
-    """
+    """Persist the Ollama resume profile, then grade it against the pinned JD."""
     claimed = db.query(CandidateEvaluation).filter(
         CandidateEvaluation.id == evaluation_id,
         CandidateEvaluation.status == ScreeningStatusEnum.QUEUED,
@@ -84,6 +101,7 @@ def process_candidate_evaluation(db: Session, evaluation_id: str) -> None:
             or specification_checksum(spec) != evaluation.spec_checksum
             or evaluation.evaluator_engine != EVALUATOR_ENGINE
             or evaluation.prompt_version != PROMPT_VERSION
+            or not evaluation.model_name
         ):
             _finish_without_score(
                 db, evaluation, ScreeningStatusEnum.NEEDS_REVIEW,
@@ -91,6 +109,7 @@ def process_candidate_evaluation(db: Session, evaluation_id: str) -> None:
             )
             return
         spec_json = spec.canonical_json
+        model = evaluation.model_name
 
         resume: Optional[CandidateResume] = db.get(CandidateResume, evaluation.candidate_resume_id)
         if not resume:
@@ -105,23 +124,30 @@ def process_candidate_evaluation(db: Session, evaluation_id: str) -> None:
             resume.parsed_text = parse_document(resume.filename, raw_bytes)
             db.flush()
 
-        if issue := resume_parse_issue(resume.parsed_text):
+        resume_text = resume.parsed_text
+        if issue := resume_parse_issue(resume_text):
             _finish_without_score(db, evaluation, ScreeningStatusEnum.NEEDS_REVIEW, issue)
             return
 
-        # --- Step 2: Profile candidate ---
-        parsed_profile = profile_resume(resume.parsed_text)
+        parsed_profile = profile_resume(resume_text)
+        source_hash = checksum(resume_text)
+        structured = _cached_profile(db, resume, evaluation, source_hash)
+        db.commit()  # Do not hold a database transaction open during inference.
+        if structured is None:
+            structured = structure_resume(resume_text, parsed_profile, model, source_hash)
 
-        # Persist profile back to resume row
+        tenure, _ = work_date_evidence(structured, documented_work=parsed_profile.get("work_history"))
+        parsed_profile["total_experience_years"] = round(tenure, 1)
+        resume.screening_profile_json = structured
+        resume.screening_profile_markdown = resume_markdown(structured)
         resume.parsed_profile_json      = parsed_profile
         resume.candidate_name           = resume.candidate_name or parsed_profile.get("candidate_name")
         resume.email                    = resume.email or parsed_profile.get("email")
         resume.phone                    = resume.phone or parsed_profile.get("phone")
         resume.total_experience_years   = parsed_profile.get("total_experience_years") or 0.0
-        db.flush()
+        db.commit()
 
-        # --- Step 5: Grounded evaluation ---
-        result = evaluate_candidate(resume.parsed_text, parsed_profile, spec_json)
+        result = evaluate_with_ollama(resume_text, parsed_profile, structured, spec_json, model)
         if result["overall_score"] is None:
             _finish_without_score(db, evaluation, ScreeningStatusEnum.NEEDS_REVIEW, NO_CRITERIA_REVIEW)
             return
@@ -148,6 +174,9 @@ def process_candidate_evaluation(db: Session, evaluation_id: str) -> None:
             result.get("quote_verification_pass"),
         )
 
+    except ScreeningModelError as exc:
+        db.rollback()
+        _finish_without_score(db, evaluation, ScreeningStatusEnum.NEEDS_REVIEW, str(exc))
     except DocumentParseError:
         db.rollback()
         _finish_without_score(

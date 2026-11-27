@@ -23,9 +23,9 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -65,7 +65,8 @@ from app.schemas.master_context import JDMasterContext
 from app.services.document_parser import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
 from app.services.markdown_renderer import render_markdown
 from app.services.projection.canonical_projector import _flatten_requirements
-from app.services.resume.evaluator import EVALUATOR_ENGINE, NO_EVALUATION_CRITERIA, PROMPT_VERSION, check_parse_quality, screening_criteria
+from app.services.resume.evaluator import NO_EVALUATION_CRITERIA, check_parse_quality, screening_criteria
+from app.services.resume.ollama_screening import EVALUATOR_ENGINE, PROMPT_VERSION, SEED, configured_model
 from app.services.resume.profiler import compute_file_hash, resume_parse_issue
 from app.services.resume.storage import RESUME_STORAGE_DIR, ResumeInUseError, remove_candidate_data
 from app.services.specification_versions import lock_specification_revision, specification_checksum, specifications_for_jd
@@ -134,6 +135,7 @@ def _is_outdated(evaluation: CandidateEvaluation, spec: Optional[JobSpecificatio
     return (
         spec is None or evaluation.spec_version_id != spec.id or evaluation.spec_checksum != digest
         or evaluation.evaluator_engine != EVALUATOR_ENGINE or evaluation.prompt_version != PROMPT_VERSION
+        or evaluation.model_name != configured_model()
     )
 
 
@@ -225,6 +227,15 @@ def _build_evaluation_response(
         current_or_last_title=profile.get("current_or_last_title"),
     )
 
+    provenance = EvaluatorProvenance(
+        evaluator_engine=latest_eval.evaluator_engine,
+        model_name=latest_eval.model_name,
+        model_version=latest_eval.model_version,
+        prompt_version=latest_eval.prompt_version or "eval_v2.1",
+        temperature=latest_eval.temperature or 0.0,
+        seed=latest_eval.seed or 42,
+    ) if latest_eval and latest_eval.spec_checksum else None
+
     if not latest_eval or status != ScreeningStatus.COMPLETED:
         return CandidateEvaluationResponse(
             candidate_resume_id=resume.id,
@@ -236,6 +247,8 @@ def _build_evaluation_response(
             evaluation_id=latest_eval.id if latest_eval else None,
             spec_checksum=latest_eval.spec_checksum if latest_eval else None,
             spec_outdated=outdated,
+            provenance=provenance,
+            has_resume_profile=bool(resume.screening_profile_json),
             runs=runs,
             override_history=history,
             overall_score=None,
@@ -270,17 +283,6 @@ def _build_evaluation_response(
     pf = latest_eval.preferred_summary or {}
     sb = latest_eval.score_breakdown or {}
 
-    provenance = None
-    if latest_eval.spec_checksum:
-        provenance = EvaluatorProvenance(
-            evaluator_engine=latest_eval.evaluator_engine,
-            model_name=latest_eval.model_name,
-            model_version=latest_eval.model_version,
-            prompt_version=latest_eval.prompt_version or "eval_v2.1",
-            temperature=latest_eval.temperature or 0.0,
-            seed=latest_eval.seed or 42,
-        )
-
     return CandidateEvaluationResponse(
         candidate_resume_id=resume.id,
         job_description_id=resume.job_description_id,
@@ -291,6 +293,7 @@ def _build_evaluation_response(
         overall_score=latest_eval.overall_score,
         spec_checksum=latest_eval.spec_checksum,
         spec_outdated=outdated,
+        has_resume_profile=bool(resume.screening_profile_json),
         can_override=not outdated and spec.lifecycle_status == JDLifecycleStatusEnum.FINALIZED and latest_eval is _get_latest_eval(resume),
         runs=runs,
         override_history=history,
@@ -455,7 +458,10 @@ async def upload_resumes(
     )
 
 
-def _queue_evaluations(db: Session, jd_id: str, resumes: list[CandidateResume], spec_id: Optional[str]) -> ScreeningTriggerResponse:
+def _queue_evaluations(
+    db: Session, jd_id: str, resumes: list[CandidateResume], spec_id: Optional[str],
+    profile_batch_id: str | None = None,
+) -> ScreeningTriggerResponse:
     versions = specifications_for_jd(db, jd_id)
     spec = versions.first()
     if spec_id and (not spec or spec.id != spec_id):
@@ -466,16 +472,19 @@ def _queue_evaluations(db: Session, jd_id: str, resumes: list[CandidateResume], 
         raise HTTPException(409, "Finalize the current job specification before screening resumes.")
 
     digest = specification_checksum(spec)
+    model = configured_model()
     queued_ids = []
     for resume in resumes:
-        run_key = checksum(f"{resume.id}:{spec.id}:{digest}:{EVALUATOR_ENGINE}:{PROMPT_VERSION}")
+        run_key = checksum(f"{resume.id}:{spec.id}:{digest}:{EVALUATOR_ENGINE}:{PROMPT_VERSION}:{model}")
         evaluation = db.query(CandidateEvaluation).filter_by(active_run_key=run_key).first()
         if evaluation is None:
             evaluation = CandidateEvaluation(
                 candidate_resume_id=resume.id, job_description_id=jd_id,
                 spec_version_id=spec.id, specification_version=spec.specification_version,
                 spec_checksum=digest, active_run_key=run_key,
+                profile_batch_id=profile_batch_id,
                 evaluator_engine=EVALUATOR_ENGINE, prompt_version=PROMPT_VERSION,
+                model_name=model, temperature=0.0, seed=SEED,
                 status=ScreeningStatusEnum.QUEUED, created_at=datetime.now(timezone.utc),
             )
             try:
@@ -507,7 +516,8 @@ def trigger_screening(jd_id: str, body: ScreeningTriggerRequest = ScreeningTrigg
     resumes = query.all()
     if not resumes:
         raise HTTPException(404, "No candidate resumes found for this JD. Upload resumes first.")
-    return _queue_evaluations(db, jd_id, resumes, body.spec_version_id)
+    return _queue_evaluations(db, jd_id, resumes, body.spec_version_id,
+                              str(body.profile_batch_id) if body.profile_batch_id else None)
 
 
 @router.get("", response_model=ScreeningLeaderboardResponse)
@@ -518,7 +528,7 @@ def get_leaderboard(jd_id: str, db: Session = Depends(get_db)):
     summaries = selectinload(CandidateResume.evaluations).load_only(
         CandidateEvaluation.created_at, CandidateEvaluation.status, CandidateEvaluation.error_message,
         CandidateEvaluation.spec_version_id, CandidateEvaluation.spec_checksum,
-        CandidateEvaluation.evaluator_engine, CandidateEvaluation.prompt_version,
+        CandidateEvaluation.evaluator_engine, CandidateEvaluation.prompt_version, CandidateEvaluation.model_name,
         CandidateEvaluation.overall_score, CandidateEvaluation.match_tier, CandidateEvaluation.score_breakdown,
         CandidateEvaluation.recruiter_override_score, CandidateEvaluation.recruiter_override_tier,
         CandidateEvaluation.must_haves_summary, CandidateEvaluation.validation_checkpoints,
@@ -629,6 +639,23 @@ def get_candidate_detail(jd_id: str, resume_id: str, evaluation_id: Optional[str
         if evaluation is None:
             raise HTTPException(404, "Screening run not found for this candidate.")
     return _build_evaluation_response(db, resume, evaluation, specifications_for_jd(db, jd_id).first())
+
+
+@router.get("/{resume_id}/profile/{file_format}")
+def download_resume_profile(jd_id: str, resume_id: str, file_format: Literal["json", "md"], db: Session = Depends(get_db)):
+    resume = _get_resume_or_404(jd_id, resume_id, db)
+    if not resume.screening_profile_json or not resume.screening_profile_markdown:
+        raise HTTPException(404, "Screen this resume to generate its profile files.")
+    if file_format == "json":
+        content = json.dumps(resume.screening_profile_json, ensure_ascii=False, indent=2) + "\n"
+        media_type = "application/json"
+    else:
+        content = resume.screening_profile_markdown
+        media_type = "text/markdown"
+    return Response(content, media_type=media_type, headers={
+        "Content-Disposition": f'attachment; filename="resume-{resume.id}.{file_format}"',
+        "Cache-Control": "no-store",
+    })
 
 
 @router.post("/{resume_id}/override", response_model=RecruiterOverrideResponse)

@@ -343,6 +343,7 @@ class OllamaAdapter(ProviderAdapter):
     def _stream_chat(
         self, *, system_prompt: str, user_prompt: str, model: str, max_tokens: int,
         temperature: float, response_format: Any = None, num_ctx: Optional[int] = None,
+        private: bool = False, seed: Optional[int] = None,
     ) -> Tuple[str, int, int, str, float]:
         import httpx
 
@@ -352,6 +353,8 @@ class OllamaAdapter(ProviderAdapter):
             "num_predict": max_tokens,
         }
         options.update(_sampling_options(model, temperature))
+        if seed is not None:
+            options["seed"] = seed
         payload: Dict[str, Any] = {
             "model": model,
             "messages": [
@@ -366,7 +369,8 @@ class OllamaAdapter(ProviderAdapter):
         if response_format is not None:
             payload["format"] = response_format
 
-        _log_request(self.name, model, system_prompt, user_prompt)
+        if not private:
+            _log_request(self.name, model, system_prompt, user_prompt)
         logger.info("Ollama POST %s num_ctx=%s num_predict=%s temperature=%s format=%s", url,
                     options["num_ctx"], max_tokens, temperature,
                     "schema" if isinstance(response_format, dict) else response_format)
@@ -390,7 +394,7 @@ class OllamaAdapter(ProviderAdapter):
                             if "think" in payload:
                                 logger.warning("Ollama HTTP %s; retrying without think=False", exc.status)
                                 payload.pop("think")
-                            elif isinstance(payload.get("format"), dict):
+                            elif isinstance(payload.get("format"), dict) and not private:
                                 logger.warning("Ollama HTTP %s with JSON schema; retrying with format=json", exc.status)
                                 payload["format"] = "json"
                             else:
@@ -410,6 +414,20 @@ class OllamaAdapter(ProviderAdapter):
             raise RuntimeError(f"Failed to communicate with local Ollama service: {exc}") from exc
 
         return text, in_tok, out_tok, finish, (time.perf_counter() - start) * 1000
+
+    def complete_private_json(
+        self, *, system_prompt: str, user_prompt: str, model: str, schema: dict,
+        max_tokens: int, num_ctx: int, seed: int,
+    ) -> dict:
+        """Return a complete schema-constrained response without logging document contents."""
+        text, _, _, finish, _ = self._stream_chat(
+            system_prompt=system_prompt, user_prompt=user_prompt, model=model,
+            max_tokens=max_tokens, temperature=0.0, response_format=schema,
+            num_ctx=num_ctx, private=True, seed=seed,
+        )
+        if finish != "stop":
+            raise ValueError("Ollama did not complete the structured response.")
+        return json.loads(text)
 
     def complete_structured(
         self,

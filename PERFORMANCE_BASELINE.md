@@ -240,5 +240,5 @@ On 26 November 2026, the local screening API processed 200 synthetic resumes aga
 
 The batch had 100 PDF, 60 DOCX, and 40 TXT files. Screening completed for 196 files. Four deliberately blank PDFs reached `PARSE_FAILED` and received no score. Loading candidate summaries in batches reduced the observed p95 status request from 728 ms to 212 ms across the two runs. Total batch time was about 8.8 seconds in both runs. These observations apply to this synthetic workload and host.
 
-From `backend/`, reproduce the test with `python scripts/benchmark_screening.py --count 200 --output ../outputs/screening-validation/batch-200.json`. The script uses a temporary database and resume directory.
+The benchmark script now runs the current Ollama evaluator. From `backend/`, run `python scripts/benchmark_screening.py --count 10` with Ollama running to measure it separately. The script uses a temporary database and resume directory.
 

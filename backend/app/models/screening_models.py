@@ -100,7 +100,7 @@ class CandidateResume(Base):
     Stores an uploaded candidate resume and the structured profile extracted from it.
 
     Design notes:
-    - Not tied to a specific JD. The same resume can be evaluated against multiple JDs.
+    - This record and its downloadable artifacts are scoped to one JD.
     - file_hash (SHA-256) enables duplicate detection before heavy parsing.
     - parse_quality_check stores the quality gate result:
         { "passed": bool, "text_length": int, "word_count": int,
@@ -135,6 +135,8 @@ class CandidateResume(Base):
     # --- Full text & structured profile ---
     parsed_text         = Column(Text, nullable=True)   # raw clean text from parser (plain-text only)
     parsed_profile_json = Column(JSON, nullable=True)   # structured: work_history, skills, education, projects
+    screening_profile_json = Column(JSON, nullable=True)
+    screening_profile_markdown = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -173,6 +175,7 @@ class CandidateEvaluation(Base):
     specification_version = Column(Integer, nullable=False, default=2)
     spec_checksum = Column(String(64), nullable=True)
     active_run_key = Column(String(64), nullable=True, unique=True, index=True)
+    profile_batch_id = Column(String(36), nullable=True, index=True)
 
     # Retained for older databases. The API compares the pinned inputs to the current revision.
     spec_outdated = Column(Boolean, nullable=False, default=False)
@@ -214,7 +217,7 @@ class CandidateEvaluation(Base):
     #   "requirement": str,
     #   "category": "must_have" | "preferred",
     #   "status": "MET" | "PARTIALLY_MET" | "NOT_EVIDENCED",
-    #   "score_weight": 1.0 | 0.5 | 0.0,
+    #   "score_weight": 1.0 | 0.5 | 0.25 | 0.0,
     #   "evidence_quote": str | null,  # verbatim excerpt from resume
     #   "evidence_quotes": list[str],  # all supporting verbatim excerpts
     #   "reasoning": str,

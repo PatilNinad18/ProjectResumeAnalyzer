@@ -101,7 +101,7 @@ def run(count: int, poll_interval: float, timeout: float) -> dict:
         from app.main import app
         from app.models.db_models import JDLifecycleStatusEnum, JobDescription, JobDescriptionVersion, JobSpecificationVersion, Project, User
         from app.models.screening_models import CandidateEvaluation
-        from app.services.resume.evaluator import EVALUATOR_ENGINE
+        from app.services.resume.ollama_screening import EVALUATOR_ENGINE, configured_model
 
         init_db()
         with SessionLocal() as db:
@@ -178,6 +178,7 @@ def run(count: int, poll_interval: float, timeout: float) -> dict:
         "environment": {
             "os": platform.platform(), "processor": platform.processor(), "logical_cpus": os.cpu_count(),
             "python": platform.python_version(), "sqlite": journal_mode, "workers": 1, "evaluator": EVALUATOR_ENGINE,
+            "model": configured_model(),
             "poll_endpoint": "/resumes/status",
         },
         "seconds": {
@@ -195,7 +196,7 @@ def run(count: int, poll_interval: float, timeout: float) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--count", type=int, default=200)
+    parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--poll-interval", type=float, default=.25)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--output", type=Path)

@@ -30,6 +30,9 @@ export interface RequirementEvaluation {
   category: "must_have" | "preferred";
   status: EvaluationStatus;
   score_weight: number;
+  evidence_grade?: "FULL" | "PARTIAL" | "MENTION" | "NO_EVIDENCE" | null;
+  points_earned?: number | null;
+  points_available?: number | null;
   evidence_quote: string | null;
   evidence_quotes?: string[];
   critical?: boolean;
@@ -58,6 +61,8 @@ export interface ScoreBreakdown {
   preferred_base_weight: number;
   tenure_base_weight: number;
   tenure_evidence?: string[];
+  experience_points?: number | null;
+  experience_years_required?: number | null;
   critical_to_verify?: string[];
 }
 
@@ -89,6 +94,7 @@ export interface CandidateEvaluationDetail {
   spec_outdated?: boolean;
   spec_checksum?: string | null;
   can_override: boolean;
+  has_resume_profile?: boolean;
   runs: ScreeningRun[];
   override_history: ScreeningOverrideEvent[];
   status: ScreeningStatus;
@@ -217,7 +223,8 @@ export async function uploadCandidateResumes(
 export async function triggerScreening(
   jdId: string,
   specVersionId?: string,
-  candidateResumeIds?: string[]
+  candidateResumeIds?: string[],
+  profileBatchId?: string,
 ): Promise<ScreeningTriggerResponse> {
   const res = await fetch(`${API_BASE_SCREENING}/api/jds/${jdId}/resumes/screen`, {
     method: "POST",
@@ -225,6 +232,7 @@ export async function triggerScreening(
     body: JSON.stringify({
       spec_version_id: specVersionId ?? null,
       candidate_resume_ids: candidateResumeIds ?? null,
+      profile_batch_id: profileBatchId ?? null,
     }),
   });
   if (!res.ok) {
@@ -232,6 +240,10 @@ export async function triggerScreening(
     throw new Error(err.detail || `Screen trigger failed (${res.status})`);
   }
   return res.json();
+}
+
+export function resumeProfileDownloadUrl(jdId: string, resumeId: string, format: "json" | "md"): string {
+  return `${API_BASE_SCREENING}/api/jds/${encodeURIComponent(jdId)}/resumes/${encodeURIComponent(resumeId)}/profile/${format}`;
 }
 
 export async function fetchScreeningLeaderboard(

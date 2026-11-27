@@ -1,6 +1,6 @@
 import { useState } from "react";
 import styles from "./CandidateDetailDrawer.module.css";
-import { MATCH_TIER_LABELS, type CandidateEvaluationDetail, type RequirementEvaluation, type MatchTier, type ScreeningOverrideRequest } from "@/lib/screening_api";
+import { MATCH_TIER_LABELS, resumeProfileDownloadUrl, type CandidateEvaluationDetail, type RequirementEvaluation, type MatchTier, type ScreeningOverrideRequest } from "@/lib/screening_api";
 
 interface CandidateDetailDrawerProps {
   isOpen: boolean;
@@ -18,11 +18,13 @@ const TIER_META: Record<MatchTier, { label: string; cls: string; icon: string }>
   NOT_A_FIT: { label: "Limited evidence", cls: styles.tierNotFit, icon: "🔴" },
 };
 
-function EvalStatusBadge({ status }: { status: string }) {
+function EvalStatusBadge({ status, grade }: { status: string; grade?: RequirementEvaluation["evidence_grade"] }) {
   const cls = status === "MET" ? styles.statusMet : status === "PARTIALLY_MET" ? styles.statusPartial : styles.statusNone;
-  const label = status === "MET" ? "✓ MET" : status === "PARTIALLY_MET" ? "⟳ PARTIALLY MET" : "⚪ NOT EVIDENCED";
+  const label = grade === "MENTION" ? "MENTION ONLY" : status === "MET" ? "✓ MET" : status === "PARTIALLY_MET" ? "⟳ PARTIALLY MET" : "⚪ NOT EVIDENCED";
   return <span className={`${styles.statusBadge} ${cls}`}>{label}</span>;
 }
+
+const points = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 
 function RequirementRow({ eval: ev }: { eval: RequirementEvaluation }) {
   const quotes = ev.evidence_quotes?.length ? ev.evidence_quotes : ev.evidence_quote ? [ev.evidence_quote] : [];
@@ -31,8 +33,11 @@ function RequirementRow({ eval: ev }: { eval: RequirementEvaluation }) {
       <div className={styles.reqHeader}>
         <span className={styles.reqText}>{ev.requirement}</span>
         {ev.critical && <span className={styles.reviewChip}>Critical</span>}
-        <EvalStatusBadge status={ev.status} />
+        <EvalStatusBadge status={ev.status} grade={ev.evidence_grade} />
       </div>
+      {ev.points_earned != null && ev.points_available != null && (
+        <p className={styles.reasoning}>{points.format(ev.points_earned)} / {points.format(ev.points_available)} points</p>
+      )}
       {quotes.length > 0 && (
         <blockquote className={styles.evidenceQuote}>
           <span className={styles.evidenceLabel}>📄 Resume Evidence</span>
@@ -98,6 +103,7 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
   const profile = candidate?.candidate_profile;
   const mhSummary = candidate?.must_haves_summary;
   const tenureEvidence = candidate?.score_breakdown?.tenure_evidence ?? [];
+  const breakdown = candidate?.score_breakdown;
   const mustHaveEvals = candidate?.detailed_evaluations.filter((e) => e.category === "must_have") ?? [];
   const preferredEvals = candidate?.detailed_evaluations.filter((e) => e.category === "preferred") ?? [];
 
@@ -134,6 +140,9 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
               <div className={styles.mhSummary}>
                 <span className={styles.sectionTitle}>Needs review</span>
                 <p className={styles.reasoning}>{candidate.review_reason}</p>
+                {candidate.status === "NEEDS_REVIEW" && !candidate.spec_outdated && onRerun && (
+                  <button type="button" className={styles.reviewButton} onClick={() => onRerun(candidate.candidate_resume_id)}>Rerun screening</button>
+                )}
               </div>
             )}
             {candidate.spec_outdated && (
@@ -153,7 +162,7 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
                 }}>
                   {candidate.overall_score}%
                 </span>
-                <span className={styles.scoreSubLabel}>Automated score</span>
+                <span className={styles.scoreSubLabel}>ATS match score</span>
               </div>}
               <div className={styles.profileMeta}>
                 {profile?.email && <span>✉️ {profile.email}</span>}
@@ -167,10 +176,16 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
               </div>
             </div>
 
+            {candidate.has_resume_profile && (
+              <div className={styles.profileDownloads} aria-label="Structured resume files">
+                <a href={resumeProfileDownloadUrl(candidate.job_description_id, candidate.candidate_resume_id, "json")}>Download resume JSON</a>
+                <a href={resumeProfileDownloadUrl(candidate.job_description_id, candidate.candidate_resume_id, "md")}>Download resume Markdown</a>
+              </div>
+            )}
             {candidate.evaluation_id && (
               <div className={styles.reviewPanel}>
                 <strong>Screening run</strong>
-                <p>Specification v{candidate.specification_version} · {candidate.provenance?.evaluator_engine ?? "Legacy evaluator"}</p>
+                <p>Specification v{candidate.specification_version} · {candidate.provenance?.model_name ? `Ollama · ${candidate.provenance.model_name}` : candidate.provenance?.evaluator_engine ?? "Legacy evaluator"}</p>
                 {candidate.spec_checksum && <p>Specification checksum <code className={styles.digest}>{candidate.spec_checksum}</code></p>}
                 {candidate.quote_verification_pass === false && <p>One or more excerpts could not be verified.</p>}
                 {candidate.runs.length > 1 && (
@@ -210,12 +225,18 @@ export default function CandidateDetailDrawer({ isOpen, isLoading, candidate, on
               </div>
             )}
 
-            {tenureEvidence.length > 0 && (
+            {((breakdown?.tenure_base_weight ?? 0) > 0 || tenureEvidence.length > 0) && (
               <div className={styles.mhSummary}>
-                <span className={styles.sectionTitle}>Dates used for experience scoring</span>
-                <ul>
+                <span className={styles.sectionTitle}>Overall experience</span>
+                {breakdown?.experience_points != null && (
+                  <p className={styles.reasoning}>
+                    {points.format(breakdown.experience_points)} / {points.format(100 * breakdown.tenure_base_weight / breakdown.active_weight_total)} points
+                    {breakdown.experience_years_required != null && ` · ${breakdown.experience_years_required} years required`}
+                  </p>
+                )}
+                {tenureEvidence.length > 0 && <ul>
                   {tenureEvidence.map((quote) => <li key={quote}>{quote}</li>)}
-                </ul>
+                </ul>}
               </div>
             )}
 

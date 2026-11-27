@@ -62,14 +62,14 @@ _DATE_RE = re.compile(
     re.IGNORECASE,
 )
 _DATE_RANGE_RE = re.compile(
-    rf"({_DATE_RE.pattern})\s*[-–—to]+\s*({_DATE_RE.pattern}|present|current|now|till date)",
+    rf"({_DATE_RE.pattern})\s*(?:[-–—\uFFFD]+|to)\s*({_DATE_RE.pattern}|present|current|now|till date)",
     re.IGNORECASE,
 )
 
 # Section headers commonly found in resumes
 _SECTION_HEADERS = {
     "experience": re.compile(
-        r"^(?:(?:professional|work|industry|relevant|internship)\s+)?(?:experience|employment|work\s+history|career\s+history|positions?\s+held|internships?)\b",
+        r"^(?:(?:professional|work|industry|relevant|internship)\s+)?(?:experience|employment|work\s+history|career\s+history|positions?\s+held|internships?)(?:\s*(?:/|&|and)\s*internships?)?\b",
         re.IGNORECASE | re.MULTILINE,
     ),
     "skills": re.compile(

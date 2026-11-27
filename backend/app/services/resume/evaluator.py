@@ -343,6 +343,13 @@ def verify_quote_in_text(quote: str, parsed_text: str) -> bool:
 # Evidence extraction helpers
 # ---------------------------------------------------------------------------
 
+_EMPLOYER_DETAILS = re.compile(
+    r"^(?:(?:salary|compensation|pay|remuneration)(?:\s+(?:range|band|budget))?"
+    r"|(?:(?:current|existing)\s+)?team\s+size)(?:\s*[:=–—-]|\s+(?:is\b|of\b|\d)|$)",
+    re.IGNORECASE,
+)
+
+
 def _clean_requirements(items: List[str]) -> List[str]:
     """
     Filter out non-requirement noise from canonical_json specification:
@@ -370,6 +377,8 @@ def _clean_requirements(items: List[str]) -> List[str]:
         if clean_hdr in JUNK_HEADERS:
             continue
         if clean_hdr.partition(":")[0].strip() in RUBRIC_LABELS:
+            continue
+        if _EMPLOYER_DETAILS.search(clean_hdr):
             continue
         if re.match(r"^(?:experience|tenure)\s*[:*–-]*\s*\d+.*years?$", clean_hdr):
             continue
@@ -399,7 +408,7 @@ def _score_tenure(
     Sliding scale: score = min(1.0, candidate_years / required_years)
     If JD specifies no minimum years, weight slot is deactivated (0.0).
     """
-    if not required_years or required_years <= 0:
+    if not required_years or not math.isfinite(required_years) or required_years <= 0:
         return 0.0, 0.0
     if not candidate_years or candidate_years <= 0:
         return 0.0, WEIGHT_TENURE_BASE
@@ -754,7 +763,25 @@ def evaluate_candidate(
     must_evals = [assess(req, "must_have") for req in must_have_reqs]
     pref_evals = [assess(req, "preferred") for req in preferred_reqs]
 
-    # --- Tenure scoring ---
+    return build_screening_result(
+        parsed_profile, must_evals, pref_evals, min_years,
+        evidence.checked_quotes(
+            [entry.get("date_text") for entry in evidence.work_history if entry.get("start_date") and entry.get("end_date")]
+        ),
+        provenance={
+            "evaluator_engine": EVALUATOR_ENGINE, "model_name": None, "model_version": None,
+            "prompt_version": PROMPT_VERSION, "temperature": TEMPERATURE, "seed": SEED,
+        },
+        injection_match=injection_match, quote_verification_pass=not any_quote_failed,
+    )
+
+
+def build_screening_result(
+    parsed_profile: dict[str, Any], must_evals: list[dict[str, Any]], pref_evals: list[dict[str, Any]],
+    min_years: float | None, tenure_evidence: list[str], *, provenance: dict[str, Any],
+    injection_match: str | None = None, quote_verification_pass: bool = True,
+) -> dict[str, Any]:
+    """Apply the scoring policy to verified requirement grades."""
     candidate_years = parsed_profile.get("total_experience_years") or 0.0
     tenure_score, tenure_base_weight = _score_tenure(candidate_years, min_years)
 
@@ -763,9 +790,16 @@ def evaluate_candidate(
         must_evals, pref_evals, tenure_score, tenure_base_weight
     )
     if tenure_base_weight:
-        score_breakdown["tenure_evidence"] = evidence.checked_quotes(
-            [entry.get("date_text") for entry in evidence.work_history if entry.get("start_date") and entry.get("end_date")]
-        )
+        score_breakdown["tenure_evidence"] = tenure_evidence
+        score_breakdown["experience_years_required"] = min_years
+    if active_weight := score_breakdown["active_weight_total"]:
+        score_breakdown["experience_points"] = round(100 * tenure_base_weight * tenure_score / active_weight, 4)
+        for evaluations, key in ((must_evals, "must_have_base_weight"), (pref_evals, "preferred_base_weight")):
+            if evaluations:
+                per_requirement = 100 * score_breakdown[key] / active_weight / len(evaluations)
+                for evaluation in evaluations:
+                    evaluation["points_available"] = round(per_requirement, 4)
+                    evaluation["points_earned"] = round(per_requirement * evaluation["score_weight"], 4)
 
     # --- Summaries ---
     def _summarize(evals: List[Dict]) -> Dict[str, int]:
@@ -809,16 +843,6 @@ def evaluate_candidate(
             "The extracted text contains a possible instruction directed at a screening system. Review the source document."
         )
 
-    # --- Evaluator provenance ---
-    provenance = {
-        "evaluator_engine": EVALUATOR_ENGINE,
-        "model_name":       None,
-        "model_version":    None,
-        "prompt_version":   PROMPT_VERSION,
-        "temperature":      TEMPERATURE,
-        "seed":             SEED,
-    }
-
     return {
         "overall_score":               overall_score,
         "match_tier":                  match_tier,
@@ -829,7 +853,7 @@ def evaluate_candidate(
         "timeline_observations":       timeline_observations,
         "tailored_interview_questions": interview_questions,
         "score_breakdown":             score_breakdown,
-        "quote_verification_pass":     not any_quote_failed,
+        "quote_verification_pass":     quote_verification_pass,
         "injection_warning":           injection_match,
         "provenance":                  provenance,
     }

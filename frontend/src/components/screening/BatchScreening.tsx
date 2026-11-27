@@ -32,6 +32,7 @@ export default function BatchScreening({ jobs, initialJobIds, onViewJob, onReque
     setResults({});
 
     try {
+      const profileBatchId = files.length > 0 && selectedJobs.length > 1 ? crypto.randomUUID?.() : undefined;
       for (const job of selectedJobs) {
         const result: JobResult = { uploadErrors: [] };
         try {
@@ -45,7 +46,7 @@ export default function BatchScreening({ jobs, initialJobIds, onViewJob, onReque
             }
             if (!resumeIds.length) throw new Error("No resumes from this upload could be queued.");
           }
-          const response = await triggerScreening(job.jd_id, job.spec_version_id ?? undefined, resumeIds);
+          const response = await triggerScreening(job.jd_id, job.spec_version_id ?? undefined, resumeIds, profileBatchId);
           result.queuedCount = response.queued_count;
         } catch (cause) {
           result.error = cause instanceof Error ? cause.message : "Could not queue this job.";

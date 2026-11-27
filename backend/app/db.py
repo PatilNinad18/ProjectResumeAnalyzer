@@ -114,6 +114,7 @@ def _migrate_screening_runs() -> None:
     if not inspector.has_table("candidate_evaluations"):
         return
     columns = {col["name"] for col in inspector.get_columns("candidate_evaluations")}
+    resume_columns = {col["name"] for col in inspector.get_columns("candidate_resumes")}
     with engine.begin() as conn:
         for name in ("spec_checksum", "active_run_key"):
             if name not in columns:
@@ -122,6 +123,16 @@ def _migrate_screening_runs() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_candidate_evaluations_active_run_key "
             "ON candidate_evaluations (active_run_key)"
         ))
+        if "profile_batch_id" not in columns:
+            conn.execute(text("ALTER TABLE candidate_evaluations ADD COLUMN profile_batch_id VARCHAR(36)"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_candidate_evaluations_profile_batch_id "
+            "ON candidate_evaluations (profile_batch_id)"
+        ))
+        if "screening_profile_json" not in resume_columns:
+            conn.execute(text("ALTER TABLE candidate_resumes ADD COLUMN screening_profile_json JSON"))
+        if "screening_profile_markdown" not in resume_columns:
+            conn.execute(text("ALTER TABLE candidate_resumes ADD COLUMN screening_profile_markdown TEXT"))
 
 
 def get_db() -> Session:
